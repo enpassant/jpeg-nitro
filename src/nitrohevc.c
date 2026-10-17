@@ -883,7 +883,9 @@ static int residual(Dec *d, int x0, int y0, int log2, int c, int pred_mode) {
     Cabac *cb = &d->cabac;
     int n = 1 << log2;
     int32_t *coef = d->coeff;   // (all zero between blocks: cleared after use)
-    if (d->pps->transform_skip) return -1;   // (transform_skip_flag: not handled yet)
+    int transform_skip = 0;     // (4x4 blocks only: Log2MaxTransformSkipSize is 2 without range extensions)
+    if (d->pps->transform_skip && !d->cu_transquant_bypass && log2 == 2)
+        transform_skip = cabac_decision(cb, CTX_TS_FLAG + (c ? 1 : 0));
 
     // scanIdx (7.4.9.11)
     int scan = 0;
@@ -1056,7 +1058,10 @@ static int residual(Dec *d, int x0, int y0, int log2, int c, int pred_mode) {
             int64_t t = ((int64_t)coef[k] * sf[k] * scale + (1 << (bd_shift - 1))) >> bd_shift;
             coef[k] = (int32_t)CLIP3(-32768, 32767, t);
         }
-        inverse_transform(coef, log2, c == 0 && log2 == 2, maxx, maxy, res);
+        if (transform_skip)   // r = d << 7, then (r + 2048) >> 12 (8.6.4.2, tsShift 7, bdShift 12)
+            for (int i = 0; i < 16; i++) res[i] = (int16_t)((coef[i] * 128 + 2048) >> 12);
+        else
+            inverse_transform(coef, log2, c == 0 && log2 == 2, maxx, maxy, res);
     }
     for (int i = 0; i < nnz; i++) coef[d->nz[i]] = 0;
     // reconstruction

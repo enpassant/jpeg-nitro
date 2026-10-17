@@ -6,8 +6,8 @@
 // Still Picture profile, 8-bit 4:2:0, I slices.
 //
 // Work in progress: no deblocking filter and no SAO yet (the picture is decoded
-// before the in-loop filters); not handled (returns an error): PCM, tiles inside a
-// picture, dependent slices, transform skip, other bit depths and chroma formats.
+// before the in-loop filters); not handled (returns an error): PCM blocks, tiles inside
+// a picture, dependent slices, other bit depths and chroma formats.
 #ifndef NITROHEVC_H
 #define NITROHEVC_H
 
