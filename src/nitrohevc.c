@@ -96,6 +96,11 @@ static int32_t bits_se(Bits *b) {
 // ---------------------------------------------------------------------------
 // parameter sets (7.3.2)
 
+typedef struct {   // a short-term reference picture set: its delta POCs (DeltaPocS0 / S1)
+    int nneg, npos;
+    int s0[16], s1[16];
+} Rps;
+
 typedef struct {
     int valid;
     int chroma_format_idc, width, height;
@@ -108,7 +113,7 @@ typedef struct {
     uint8_t scaling[4][6][64 + 1];   // [sizeId][matrixId][coef in up-right diagonal order], [64]: DC
     int amp, sao, pcm, log2_min_pcm, log2_max_pcm;
     int num_short_term_ref_pic_sets;
-    int num_delta_pocs[65];   // NumDeltaPocs of each short-term reference picture set
+    Rps rps[65];   // the short-term reference picture sets (delta POCs, see parse_st_ref_pic_set)
     int long_term_ref_pics_present, num_long_term_ref_pics_sps;
     int temporal_mvp, strong_intra_smoothing;
 } Sps;
@@ -212,33 +217,82 @@ static int parse_scaling_list(Bits *b, uint8_t s[4][6][65]) {
     return 0;
 }
 
-// 7.3.7 st_ref_pic_set(): only skipped (I pictures do not use it)
-static int skip_st_ref_pic_set(Bits *b, int idx, int num_sets, int *num_delta) {
+// 7.3.7 st_ref_pic_set(): parsed only to be skipped (I pictures do not use it), but a set
+// predicted from another one (inter_ref_pic_set_prediction_flag) needs that one's delta POCs:
+// they are kept (7.4.8), so the number of its entries is exact
+static int parse_st_ref_pic_set(Bits *b, int idx, int num_sets, Rps *rps) {
+    Rps *r = &rps[idx];
     int inter = 0;
     if (idx != 0) inter = (int)bits_u(b, 1);
     if (inter) {
         int delta_idx = 1;
         if (idx == num_sets) delta_idx = (int)bits_ue(b) + 1;
-        bits_u(b, 1);   // delta_rps_sign
-        bits_ue(b);     // abs_delta_rps_minus1
-        int ref = idx - delta_idx;
-        if (ref < 0) return -1;
-        int n = 0;
-        for (int j = 0; j <= num_delta[ref]; j++) {
+        int sign = (int)bits_u(b, 1);
+        uint32_t abs_minus1 = bits_ue(b);
+        if (abs_minus1 > 32767) return -1;
+        int delta_rps = (1 - 2 * sign) * (int)(abs_minus1 + 1);
+        int ref_idx = idx - delta_idx;
+        if (ref_idx < 0) return -1;
+        const Rps *ref = &rps[ref_idx];
+        int nref = ref->nneg + ref->npos;
+        uint8_t use[33];   // use_delta_flag: the negative pictures, the positive ones, the reference picture
+        for (int j = 0; j <= nref; j++) {
             int used = (int)bits_u(b, 1);
-            int use_delta = 1;
-            if (!used) use_delta = (int)bits_u(b, 1);
-            if (used || use_delta) n++;
+            use[j] = used ? 1 : (uint8_t)bits_u(b, 1);
         }
-        num_delta[idx] = n;
+        int i = 0, d;
+        for (int j = ref->npos - 1; j >= 0; j--)
+            if ((d = ref->s1[j] + delta_rps) < 0 && use[ref->nneg + j]) {
+                if (i >= 16) return -1;
+                r->s0[i++] = d;
+            }
+        if (delta_rps < 0 && use[nref]) {
+            if (i >= 16) return -1;
+            r->s0[i++] = delta_rps;
+        }
+        for (int j = 0; j < ref->nneg; j++)
+            if ((d = ref->s0[j] + delta_rps) < 0 && use[j]) {
+                if (i >= 16) return -1;
+                r->s0[i++] = d;
+            }
+        r->nneg = i;
+        i = 0;
+        for (int j = ref->nneg - 1; j >= 0; j--)
+            if ((d = ref->s0[j] + delta_rps) > 0 && use[j]) {
+                if (i >= 16) return -1;
+                r->s1[i++] = d;
+            }
+        if (delta_rps > 0 && use[nref]) {
+            if (i >= 16) return -1;
+            r->s1[i++] = delta_rps;
+        }
+        for (int j = 0; j < ref->npos; j++)
+            if ((d = ref->s1[j] + delta_rps) > 0 && use[ref->nneg + j]) {
+                if (i >= 16) return -1;
+                r->s1[i++] = d;
+            }
+        r->npos = i;
     } else {
         uint32_t neg = bits_ue(b), pos = bits_ue(b);
         if (neg > 16 || pos > 16) return -1;
-        for (uint32_t i = 0; i < neg + pos; i++) {
-            bits_ue(b);
-            bits_u(b, 1);
+        int poc = 0;
+        for (uint32_t i = 0; i < neg; i++) {
+            uint32_t m = bits_ue(b);
+            if (m > 32767) return -1;
+            poc -= (int)m + 1;
+            r->s0[i] = poc;
+            bits_u(b, 1);   // used_by_curr_pic_s0_flag
         }
-        num_delta[idx] = (int)(neg + pos);
+        poc = 0;
+        for (uint32_t i = 0; i < pos; i++) {
+            uint32_t m = bits_ue(b);
+            if (m > 32767) return -1;
+            poc += (int)m + 1;
+            r->s1[i] = poc;
+            bits_u(b, 1);   // used_by_curr_pic_s1_flag
+        }
+        r->nneg = (int)neg;
+        r->npos = (int)pos;
     }
     return 0;
 }
@@ -296,7 +350,7 @@ static int parse_sps(const uint8_t *rbsp, size_t len, Sps *sps_table) {
     s->num_short_term_ref_pic_sets = (int)bits_ue(&b);
     if (s->num_short_term_ref_pic_sets > 64) return -1;
     for (int i = 0; i < s->num_short_term_ref_pic_sets; i++)
-        if (skip_st_ref_pic_set(&b, i, s->num_short_term_ref_pic_sets, s->num_delta_pocs)) return -1;
+        if (parse_st_ref_pic_set(&b, i, s->num_short_term_ref_pic_sets, s->rps)) return -1;
     s->long_term_ref_pics_present = (int)bits_u(&b, 1);
     if (s->long_term_ref_pics_present) {
         s->num_long_term_ref_pics_sps = (int)bits_ue(&b);
@@ -1356,9 +1410,9 @@ static int decode_slice(Dec *d, const Sps *sps_table, const Pps *pps_table, cons
     if (nal_type != 19 && nal_type != 20) {   // not IDR: POC and reference picture sets (unused here)
         bits_u(&b, sps->log2_max_poc_lsb);
         if (!bits_u(&b, 1)) {
-            int num_delta[65];
-            memcpy(num_delta, sps->num_delta_pocs, sizeof num_delta);
-            if (skip_st_ref_pic_set(&b, sps->num_short_term_ref_pic_sets, sps->num_short_term_ref_pic_sets, num_delta))
+            Rps rps[65];   // (the slice's own set: index num_short_term_ref_pic_sets)
+            memcpy(rps, sps->rps, sizeof rps);
+            if (parse_st_ref_pic_set(&b, sps->num_short_term_ref_pic_sets, sps->num_short_term_ref_pic_sets, rps))
                 goto out;
         } else if (sps->num_short_term_ref_pic_sets > 1) {
             int bits = 0;
