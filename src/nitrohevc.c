@@ -106,7 +106,7 @@ typedef struct {
     int max_transform_hierarchy_depth_intra;
     int scaling_list_enabled;
     uint8_t scaling[4][6][64 + 1];   // [sizeId][matrixId][coef in up-right diagonal order], [64]: DC
-    int amp, sao, pcm;
+    int amp, sao, pcm, log2_min_pcm, log2_max_pcm;
     int num_short_term_ref_pic_sets;
     int long_term_ref_pics_present, num_long_term_ref_pics_sps;
     int temporal_mvp, strong_intra_smoothing;
@@ -285,9 +285,9 @@ static int parse_sps(const uint8_t *rbsp, size_t len, Sps *sps_table) {
     s->sao = (int)bits_u(&b, 1);
     s->pcm = (int)bits_u(&b, 1);
     if (s->pcm) {
-        bits_u(&b, 8);
-        bits_ue(&b);
-        bits_ue(&b);
+        bits_u(&b, 8);   // PCM sample bit depths
+        s->log2_min_pcm = (int)bits_ue(&b) + 3;
+        s->log2_max_pcm = s->log2_min_pcm + (int)bits_ue(&b);
         bits_u(&b, 1);
     }
     s->num_short_term_ref_pic_sets = (int)bits_ue(&b);
@@ -1219,7 +1219,8 @@ static int coding_unit(Dec *d, int x0, int y0, int log2) {
     int part_nxn = 0;
     if (log2 == s->log2_min_cb) part_nxn = !cabac_decision(c, CTX_PART_MODE);
     if (part_nxn && log2 <= s->log2_min_tb) return -1;
-    if (s->pcm && !part_nxn) return -1;   // (pcm_flag: not handled)
+    // pcm_flag (decoded as a terminate bin): PCM samples are not handled
+    if (s->pcm && !part_nxn && log2 >= s->log2_min_pcm && log2 <= s->log2_max_pcm && cabac_terminate(c)) return -1;
     int nb = part_nxn ? 4 : 1, pb = part_nxn ? n / 2 : n;
     int prev[4];
     for (int i = 0; i < nb; i++) prev[i] = cabac_decision(c, CTX_PREV_INTRA);
