@@ -429,8 +429,9 @@ static int decode_own(const uint8_t *data, const nh_info *info, uint8_t *const p
             int sh = c ? 1 : 0;
             p[c] = planes[c] + (size_t)(row * (info->tile_h >> sh)) * pitch[c] + (size_t)col * (info->tile_w >> sh);
         }
+        // (a grid: the tiles in parallel, each on one thread; a single picture: its CTB rows in parallel)
         if (nhevc_decode(info->hvcc, info->hvcc_len, data + info->tile_off[t], info->tile_len[t], info->tile_w,
-                         info->tile_h, p, pitch))
+                         info->tile_h, p, pitch, info->ntiles > 1 ? 1 : 0))
             atomic_store(pfailed, 1);
     });
     return atomic_load(&failed) ? -1 : 0;

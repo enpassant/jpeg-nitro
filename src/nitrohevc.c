@@ -2,8 +2,12 @@
 // Copyright (c) 2026 A'rpi - part of jpeg-nitro (https://github.com/gereoffy/jpeg-nitro)
 // nitrohevc: see nitrohevc.h. Section numbers refer to ITU-T H.265 (v4 and later).
 #include "nitrohevc.h"
+#include "nitro_os.h"   // parallel loop (GCD on macOS, a thread pool elsewhere)
 
 #include <pthread.h>
+#include <sched.h>
+#include <stdatomic.h>
+#include <unistd.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -780,6 +784,7 @@ typedef struct {
     uint16_t nz[32 * 32];        // positions (y * n + x) of the coefficients of the current block
     uint8_t sf[4][3][32 * 32];   // ScalingFactor (7.4.5): [log2 - 2][cIdx][y * n + x], intra matrices
     int sf_ready;
+    int threads;                 // for the CTB rows of a WPP picture (<= 1: one after the other)
 } Dec;
 
 // ScalingFactor of the picture's PPS (flat 16 without scaling lists)
@@ -1363,6 +1368,88 @@ static int coding_quadtree(Dec *d, int x0, int y0, int log2, int depth) {
 // ---------------------------------------------------------------------------
 // slices (7.3.6) and the picture
 
+// Wavefront decoding (WPP): row r starts when row r - 1 is two CTBs ahead (the CTB above and to the
+// right is decoded, and the contexts after that row's 2nd CTB are known); every worker takes the
+// next row in order, with its own copy of the decoder state (the picture and the maps are shared).
+typedef struct {
+    Dec *d;
+    const uint8_t *rbsp, *end;
+    const size_t *sub_start;
+    _Atomic int *progress;   // per row: CTBs finished
+    uint8_t (*states)[NUM_CTX];   // per row: the contexts after its 2nd CTB
+    _Atomic int next_row, failed;
+} Rows;
+
+static int wait_row(Rows *w, int row, int need) {   // until row has finished need CTBs
+    while (atomic_load_explicit(&w->progress[row], memory_order_acquire) < need) {
+        if (atomic_load(&w->failed)) return -1;
+        sched_yield();
+    }
+    return 0;
+}
+
+static int decode_row(Rows *w, Dec *l, int ry) {
+    Dec *d = w->d;
+    Cabac *c = &l->cabac;
+    cabac_start(c, w->rbsp + w->sub_start[ry], w->end);
+    if (ry > 0 && d->ctb_w > 1) {
+        if (wait_row(w, ry - 1, 2)) return -1;
+        memcpy(c->state, w->states[ry - 1], NUM_CTX);
+    } else {
+        if (ry > 0 && wait_row(w, ry - 1, 1)) return -1;
+        cabac_init_contexts(c, d->slice_qp);
+    }
+    l->qp_prev_cu = l->qp_y = l->qp_pred = d->slice_qp;
+    l->is_cu_qp_delta_coded = 0;
+    l->cu_qp_delta = 0;
+    for (int rx = 0; rx < d->ctb_w; rx++) {
+        if (ry > 0 && wait_row(w, ry - 1, MIN(rx + 2, d->ctb_w))) return -1;
+        if (l->sao_luma || l->sao_chroma) parse_sao(l, rx, ry);
+        if (!l->pps->cu_qp_delta_enabled) l->qp_y = d->slice_qp;
+        if (coding_quadtree(l, rx << d->log2_ctb, ry << d->log2_ctb, d->log2_ctb, 0)) return -1;
+        if (rx == 1) memcpy(w->states[ry], c->state, NUM_CTX);
+        atomic_store_explicit(&w->progress[ry], rx + 1, memory_order_release);
+        int end = cabac_terminate(c);   // end_of_slice_segment_flag: only after the last CTB
+        if (end != (ry == d->ctb_h - 1 && rx == d->ctb_w - 1)) return -1;
+    }
+    return 0;
+}
+
+static int decode_rows(Dec *d, const uint8_t *rbsp, const size_t *sub_start, const uint8_t *end) {
+    Rows w = {d, rbsp, end, sub_start, calloc((size_t)d->ctb_h, sizeof(_Atomic int)),
+              malloc((size_t)d->ctb_h * NUM_CTX), 0, 0};
+    if (!w.progress || !w.states) {
+        free((void *)w.progress);
+        free(w.states);
+        return -1;
+    }
+    for (int i = 0; i < d->ctb_w * d->ctb_h; i++) d->slice_addr[i] = d->slice_addr_rs;   // (one slice)
+    Rows *pw = &w;
+    int workers = MIN(d->threads, d->ctb_h);
+    nitro_parallel((size_t)workers, ^(size_t i) {
+        (void)i;
+        Dec *l = malloc(sizeof(Dec));
+        if (!l) {
+            atomic_store(&pw->failed, 1);
+            return;
+        }
+        for (;;) {
+            int ry = atomic_fetch_add(&pw->next_row, 1);
+            if (ry >= pw->d->ctb_h || atomic_load(&pw->failed)) break;
+            *l = *pw->d;   // (the row's own CABAC, QP state and buffers; the picture and maps shared)
+            if (decode_row(pw, l, ry)) {
+                atomic_store(&pw->failed, 1);
+                break;
+            }
+        }
+        free(l);
+    });
+    int rc = atomic_load(&w.failed) ? -1 : 0;
+    free((void *)w.progress);
+    free(w.states);
+    return rc;
+}
+
 static int decode_slice(Dec *d, const Sps *sps_table, const Pps *pps_table, const uint8_t *nal, size_t len,
                         int *pic_started) {
     Rbsp r;
@@ -1492,6 +1579,11 @@ static int decode_slice(Dec *d, const Sps *sps_table, const Pps *pps_table, cons
 
     d->slice_addr_rs = addr;
     const uint8_t *end = r.data + r.len;
+    // a whole picture in one WPP slice: its CTB rows in parallel
+    if (pps->entropy_coding_sync && first && d->threads > 1 && d->ctb_h > 1 && num_entry == (uint32_t)d->ctb_h - 1) {
+        rc = decode_rows(d, r.data, sub_start, end);
+        goto out;
+    }
     Cabac *c = &d->cabac;
     cabac_start(c, r.data + data_rbsp, end);
     cabac_init_contexts(c, d->slice_qp);
@@ -1539,13 +1631,14 @@ static void init_tables(void) {
 }
 
 int nhevc_decode(const uint8_t *hvcc, size_t hvcc_len, const uint8_t *data, size_t len, int width, int height,
-                 uint8_t *const planes[3], const size_t pitch[3]) {
+                 uint8_t *const planes[3], const size_t pitch[3], int threads) {
     pthread_once(&tables_once, init_tables);
     Sps *sps = calloc(16, sizeof(Sps));
     Pps *pps = calloc(64, sizeof(Pps));
     Dec *d = calloc(1, sizeof(Dec));
     int rc = -1, started = 0;
     if (!sps || !pps || !d || hvcc_len < 23) goto out;
+    d->threads = threads > 0 ? threads : (int)sysconf(_SC_NPROCESSORS_ONLN);
     // parameter sets from hvcC
     int len_size = (hvcc[21] & 3) + 1;
     size_t p = 23;

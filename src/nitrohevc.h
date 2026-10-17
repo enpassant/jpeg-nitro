@@ -18,8 +18,10 @@
 // configuration), the picture's NAL units from data (length-prefixed, as in HEIF).
 // planes[0..2] receive Y, Cb, Cr of width x height (the picture after its conformance
 // window; chroma half size), full range BT.601 (as JPEG): a picture whose VUI says
-// otherwise (BT.709, limited range) returns an error. Returns 0 on success.
+// otherwise (BT.709, limited range) returns an error. threads: a picture coded with WPP in
+// one slice has its CTB rows decoded in parallel by that many threads (<= 0: the CPUs; 1: none,
+// e.g. when the caller decodes several pictures in parallel). Returns 0 on success.
 int nhevc_decode(const uint8_t *hvcc, size_t hvcc_len, const uint8_t *data, size_t len, int width, int height,
-                 uint8_t *const planes[3], const size_t pitch[3]);
+                 uint8_t *const planes[3], const size_t pitch[3], int threads);
 
 #endif
