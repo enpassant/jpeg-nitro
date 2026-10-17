@@ -1431,7 +1431,8 @@ static int decode_slice(Dec *d, const Sps *sps_table, const Pps *pps_table, cons
             // a new substream: the contexts of the CTB above and to the right (after its 2nd CTB)
             if (++sub > num_entry) goto out;
             cabac_start(c, r.data + sub_start[sub], end);
-            if (have_wpp_state && d->slice_addr[(ry - 1) * d->ctb_w + MIN(1, d->ctb_w - 1)] == addr)
+            // (a picture one CTB wide has no CTB there: always initialized)
+            if (have_wpp_state && d->ctb_w > 1 && d->slice_addr[(ry - 1) * d->ctb_w + 1] == addr)
                 memcpy(c->state, wpp_state, NUM_CTX);
             else
                 cabac_init_contexts(c, d->slice_qp);
@@ -1442,7 +1443,7 @@ static int decode_slice(Dec *d, const Sps *sps_table, const Pps *pps_table, cons
         if (d->sao_luma || d->sao_chroma) parse_sao(d, rx, ry);
         if (!d->pps->cu_qp_delta_enabled) d->qp_y = d->slice_qp;
         if (coding_quadtree(d, x0, y0, d->log2_ctb, 0)) goto out;
-        if (pps->entropy_coding_sync && rx == MIN(1, d->ctb_w - 1)) {
+        if (pps->entropy_coding_sync && rx == 1) {
             memcpy(wpp_state, c->state, NUM_CTX);
             have_wpp_state = 1;
         }
