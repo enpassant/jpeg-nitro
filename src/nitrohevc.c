@@ -198,6 +198,7 @@ static int parse_scaling_list(Bits *b, uint8_t s[4][6][65]) {
                 }
                 for (int i = 0; i < n; i++) {
                     int d = bits_se(b);
+                    if (d < -128 || d > 127) return -1;
                     next = (next + d + 256) % 256;
                     s[size][m][i] = (uint8_t)next;
                 }
@@ -267,6 +268,7 @@ static int parse_sps(const uint8_t *rbsp, size_t len, Sps *sps_table) {
     s->bit_depth_luma = (int)bits_ue(&b) + 8;
     s->bit_depth_chroma = (int)bits_ue(&b) + 8;
     s->log2_max_poc_lsb = (int)bits_ue(&b) + 4;
+    if (s->log2_max_poc_lsb > 16) return -1;
     int ordering = (int)bits_u(&b, 1);
     for (int i = ordering ? 0 : max_sub_layers_minus1; i <= max_sub_layers_minus1; i++) {
         bits_ue(&b);
@@ -298,6 +300,7 @@ static int parse_sps(const uint8_t *rbsp, size_t len, Sps *sps_table) {
     s->long_term_ref_pics_present = (int)bits_u(&b, 1);
     if (s->long_term_ref_pics_present) {
         s->num_long_term_ref_pics_sps = (int)bits_ue(&b);
+        if (s->num_long_term_ref_pics_sps > 32) return -1;
         for (int i = 0; i < s->num_long_term_ref_pics_sps; i++) {
             bits_u(&b, s->log2_max_poc_lsb);
             bits_u(&b, 1);
@@ -1020,6 +1023,7 @@ static int residual(Dec *d, int x0, int y0, int log2, int c, int pred_mode) {
                 // coeff_abs_level_remaining (9.3.3.11)
                 int prefix = 0;
                 while (prefix < 32 && cabac_bypass(cb)) prefix++;
+                if (prefix > 24) return -1;   // (more would not fit the 16-bit coefficient range)
                 int rem;
                 if (prefix <= 3) rem = (prefix << rice) + (int)cabac_bypass_bits(cb, rice);
                 else rem = (((1 << (prefix - 3)) + 3 - 1) << rice) + (int)cabac_bypass_bits(cb, prefix - 3 + rice);
@@ -1191,6 +1195,7 @@ static int transform_tree(Dec *d, int x0, int y0, int xbase, int ybase, int log2
         if (v == 5) {
             int k = 0;
             while (k < 32 && cabac_bypass(c)) k++;
+            if (k > 16) return -1;   // (CuQpDeltaVal is within -26..25)
             v += (int)(((1u << k) - 1) + cabac_bypass_bits(c, k));
         }
         if (v && cabac_bypass(c)) v = -v;
