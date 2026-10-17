@@ -108,6 +108,7 @@ typedef struct {
     uint8_t scaling[4][6][64 + 1];   // [sizeId][matrixId][coef in up-right diagonal order], [64]: DC
     int amp, sao, pcm, log2_min_pcm, log2_max_pcm;
     int num_short_term_ref_pic_sets;
+    int num_delta_pocs[65];   // NumDeltaPocs of each short-term reference picture set
     int long_term_ref_pics_present, num_long_term_ref_pics_sps;
     int temporal_mvp, strong_intra_smoothing;
 } Sps;
@@ -292,9 +293,8 @@ static int parse_sps(const uint8_t *rbsp, size_t len, Sps *sps_table) {
     }
     s->num_short_term_ref_pic_sets = (int)bits_ue(&b);
     if (s->num_short_term_ref_pic_sets > 64) return -1;
-    int num_delta[65] = {0};
     for (int i = 0; i < s->num_short_term_ref_pic_sets; i++)
-        if (skip_st_ref_pic_set(&b, i, s->num_short_term_ref_pic_sets, num_delta)) return -1;
+        if (skip_st_ref_pic_set(&b, i, s->num_short_term_ref_pic_sets, s->num_delta_pocs)) return -1;
     s->long_term_ref_pics_present = (int)bits_u(&b, 1);
     if (s->long_term_ref_pics_present) {
         s->num_long_term_ref_pics_sps = (int)bits_ue(&b);
@@ -1351,7 +1351,8 @@ static int decode_slice(Dec *d, const Sps *sps_table, const Pps *pps_table, cons
     if (nal_type != 19 && nal_type != 20) {   // not IDR: POC and reference picture sets (unused here)
         bits_u(&b, sps->log2_max_poc_lsb);
         if (!bits_u(&b, 1)) {
-            int num_delta[65] = {0};
+            int num_delta[65];
+            memcpy(num_delta, sps->num_delta_pocs, sizeof num_delta);
             if (skip_st_ref_pic_set(&b, sps->num_short_term_ref_pic_sets, sps->num_short_term_ref_pic_sets, num_delta))
                 goto out;
         } else if (sps->num_short_term_ref_pic_sets > 1) {
