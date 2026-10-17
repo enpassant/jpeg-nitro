@@ -116,6 +116,7 @@ typedef struct {
     Rps rps[65];   // the short-term reference picture sets (delta POCs, see parse_st_ref_pic_set)
     int long_term_ref_pics_present, num_long_term_ref_pics_sps;
     int temporal_mvp, strong_intra_smoothing;
+    int full_range, matrix_coeffs;   // from the VUI (when it says so: else full range, matrix 2 "unspecified")
 } Sps;
 
 typedef struct {
@@ -362,8 +363,25 @@ static int parse_sps(const uint8_t *rbsp, size_t len, Sps *sps_table) {
     }
     s->temporal_mvp = (int)bits_u(&b, 1);
     s->strong_intra_smoothing = (int)bits_u(&b, 1);
-    // (VUI and extensions: not needed)
+    // VUI (E.2.1): only the video signal type; the planes are taken as full range BT.601, as HEIF
+    // images are when it says nothing (iPhones write no VUI)
+    s->full_range = 1;
+    s->matrix_coeffs = 2;
+    if (bits_u(&b, 1)) {   // vui_parameters_present_flag
+        if (bits_u(&b, 1) && bits_u(&b, 8) == 255) bits_u(&b, 32);   // aspect ratio (255: SAR width, height)
+        if (bits_u(&b, 1)) bits_u(&b, 1);                              // overscan
+        if (bits_u(&b, 1)) {                                           // video_signal_type_present_flag
+            bits_u(&b, 3);                                             // video_format
+            s->full_range = (int)bits_u(&b, 1);
+            if (bits_u(&b, 1)) {                                       // colour_description_present_flag
+                bits_u(&b, 16);                                        // primaries, transfer characteristics
+                s->matrix_coeffs = (int)bits_u(&b, 8);
+            }
+        }
+    }
     if (s->chroma_format_idc != 1 || s->bit_depth_luma != 8 || s->bit_depth_chroma != 8) return -1;   // 8-bit 4:2:0
+    // BT.601 coefficients (matrix 6, or 5 as Samsung phones write it), full range: else not ours
+    if (!s->full_range || (s->matrix_coeffs != 2 && s->matrix_coeffs != 5 && s->matrix_coeffs != 6)) return -1;
     if (s->width < 8 || s->height < 8 || s->width > 16384 || s->height > 16384 || s->log2_ctb < 4 || s->log2_ctb > 6 ||
         s->log2_max_tb > 5 || s->log2_max_tb > s->log2_ctb || s->log2_min_tb >= s->log2_min_cb ||
         (s->width & ((1 << s->log2_min_cb) - 1)) || (s->height & ((1 << s->log2_min_cb) - 1)))
