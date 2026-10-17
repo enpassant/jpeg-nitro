@@ -1638,7 +1638,11 @@ int nhevc_decode(const uint8_t *hvcc, size_t hvcc_len, const uint8_t *data, size
     Dec *d = calloc(1, sizeof(Dec));
     int rc = -1, started = 0;
     if (!sps || !pps || !d || hvcc_len < 23) goto out;
+#ifdef __APPLE__
     d->threads = threads > 0 ? threads : (int)sysconf(_SC_NPROCESSORS_ONLN);
+#else
+    d->threads = threads > 0 ? threads : nitro_ncpu();
+#endif
     // parameter sets from hvcC
     int len_size = (hvcc[21] & 3) + 1;
     size_t p = 23;
