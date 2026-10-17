@@ -1842,11 +1842,21 @@ static void render(void) {
     loader_reap();
     Decoded *d = loader_get(V.index);
     ID3D11ShaderResourceView *srv = d ? texture_for(d) : NULL;   // first: it may use the render target itself
+    // not decoded yet (a slow HEIC, a slideshow faster than decoding): the previous image stays
+    // on screen until it is, rather than a black window (a failed one is not waited for)
+    int previous = 0;
+    if (!srv && V.shown_index >= 0 && V.shown_index != V.index && !loader_failed(V.index)) {
+        Decoded *o = loader_get(V.shown_index);
+        if (o && (srv = texture_for(o))) {
+            d = o;
+            previous = 1;
+        }
+    }
     float black[4] = {0, 0, 0, 1};
     ID3D11DeviceContext_OMSetRenderTargets(g_ctx, 1, &V.rtv, NULL);
     ID3D11DeviceContext_ClearRenderTargetView(g_ctx, V.rtv, black);
     if (srv) {
-        if (V.shown_index != V.index) {
+        if (!previous && V.shown_index != V.index) {
             V.shown_index = V.index;
             V.shown_time = now_ms();
             schedule_slide();
@@ -1868,7 +1878,7 @@ static void render(void) {
         ID3D11DeviceContext_Draw(g_ctx, 4, 0);
 #ifdef NV_VECTOR
         DetailRect r;
-        if (detail_target(d, &r)) {
+        if (!previous && detail_target(d, &r)) {
             if (d->dsrv) {   // the sharp detail over its part of the image, scaled to the current view
                 double s = r.scale, l = r.ox + d->dx * s, t = r.oy + d->dy * s;
                 DrawParams q = {{(float)(l / V.vw * 2 - 1), (float)(1 - t / V.vh * 2)},
@@ -1882,7 +1892,7 @@ static void render(void) {
 #endif
     }
     IDXGISwapChain1_Present(V.swap, 1, 0);
-    if (srv && !V.reported) {
+    if (srv && !previous && !V.reported) {
         V.reported = 1;
         printf("[%3d] %-40s %5dx%-5d read %5.1f ms  decode %6.1f ms (%-8s %3d bands)  key->on screen %6.1f ms%s\n",
                V.index + 1, utf8(base_name(V.files[V.index])), d->width, d->height, d->read_ms, d->decode_ms,
