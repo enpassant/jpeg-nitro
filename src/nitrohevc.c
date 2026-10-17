@@ -26,7 +26,7 @@ typedef struct {
 
 static int unescape(const uint8_t *nal, size_t len, Rbsp *r) {
     r->data = malloc(len + 8);
-    r->removed = malloc(sizeof(size_t) * (len / 3 + 1));
+    r->removed = malloc(sizeof(size_t) * (len / 3 + 1));   // (two removed bytes are >= 3 bytes apart)
     if (!r->data || !r->removed) return -1;
     size_t o = 0, zeros = 0;
     r->nremoved = 0;
@@ -624,8 +624,8 @@ static void inverse_transform(const int32_t *c, int log2, int dst, int maxx, int
         return;
     }
     int32_t tmp[32 * 32];   // [y * n + x]
-    int32_t acc[32];
     if (dst) {   // 4x4 DST: directly
+        int32_t acc[4];
         for (int x = 0; x <= maxx; x++) {
             for (int y = 0; y < 4; y++) acc[y] = 0;
             for (int j = 0; j <= maxy; j++)
@@ -674,7 +674,6 @@ static void inverse_transform(const int32_t *c, int log2, int dst, int maxx, int
             res[y * n + n - 1 - x] = (int16_t)((ev[x] - od[x] + 2048) >> 12);
         }
     }
-    (void)acc;
 }
 
 // ---------------------------------------------------------------------------
