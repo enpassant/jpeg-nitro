@@ -9,9 +9,10 @@
 // result is planar Y/Cb/Cr like nitrojpeg's (colour conversion on the GPU): ~33 ms on the
 // i9, ~26 ms on the M1. Only the HEIF structure is parsed here; HEVC decoding is Apple's.
 //
-// Handled: an 8-bit 4:2:0 HEVC image or grid of them, with rotation (irot), mirroring
-// (imir) and an ICC profile. Not handled (returns an error: use ImageIO): alpha, 10-bit,
-// other chroma formats, cropping (clap), damaged files.
+// Handled: an 8-bit 4:2:0 HEVC image or grid of them (full range BT.601, as iPhones write
+// them), with rotation (irot), mirroring (imir), a crop from the top left corner (clap)
+// and an ICC profile. Not handled (returns an error: use ImageIO): alpha, 10-bit, other
+// chroma formats, BT.709 or limited range YCbCr, other crops, damaged files.
 #ifndef NITROHEIC_H
 #define NITROHEIC_H
 

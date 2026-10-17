@@ -241,7 +241,7 @@ static int orientation(int irot, int imir) {
 int nh_read_info(const uint8_t *d, size_t len, nh_info *info) {
     Heif *h = calloc(1, sizeof *h);   // (big: not on the stack)
     if (!h) return -1;
-    int rc = -1;
+    int rc = -1, wide_primaries = 0;
     h->d = d;
     h->len = len;
     Box ftyp, meta, b;
@@ -301,7 +301,6 @@ int nh_read_info(const uint8_t *d, size_t len, nh_info *info) {
             }
         }
     }
-    if (prop(h, pi, "clap")) goto out;
     if (pi->type == FOURCC("grid")) {
         size_t n;
         const uint8_t *g = item_data(h, pi, &n);
@@ -335,7 +334,7 @@ int nh_read_info(const uint8_t *d, size_t len, nh_info *info) {
             info->tile_h = hh;
         } else if (x != hvcc_index || w != info->tile_w || hh != info->tile_h)
             goto out;
-        if (prop(h, ti, "clap") || prop(h, ti, "irot") || prop(h, ti, "imir")) goto out;
+        if (ti != pi && (prop(h, ti, "clap") || prop(h, ti, "irot") || prop(h, ti, "imir"))) goto out;
         size_t n;
         const uint8_t *td = item_data(h, ti, &n);
         if (!td || ti->method != 0) goto out;
@@ -355,6 +354,22 @@ int nh_read_info(const uint8_t *d, size_t len, nh_info *info) {
         info->width = info->tile_w;
         info->height = info->tile_h;
     }
+    // clean aperture: only a crop from the top left corner (it then trims the right and bottom
+    // edges, like the grid's output size); other crops go to ImageIO
+    const Box *cl = prop(h, pi, "clap");
+    if (cl) {
+        if (cl->end - cl->start < 32) goto out;
+        const uint8_t *c = d + cl->start;
+        double cw = (double)be32(c) / be32(c + 4), ch = (double)be32(c + 8) / be32(c + 12);
+        double ox = (double)(int32_t)be32(c + 16) / be32(c + 20), oy = (double)(int32_t)be32(c + 24) / be32(c + 28);
+        if (!be32(c + 4) || !be32(c + 12) || !be32(c + 20) || !be32(c + 28)) goto out;
+        double left = ox + (info->width - 1) / 2.0 - (cw - 1) / 2.0, top = oy + (info->height - 1) / 2.0 - (ch - 1) / 2.0;
+        if (left != 0 || top != 0 || cw != (int)cw || ch != (int)ch || cw < 1 || ch < 1 || cw > info->width ||
+            ch > info->height)
+            goto out;
+        info->width = (int)cw;
+        info->height = (int)ch;
+    }
     int gw = info->cols * info->tile_w, gh = info->rows * info->tile_h;
     if (info->width < 1 || info->height < 1 || info->width > gw || info->height > gh) goto out;
     info->plane_w[0] = gw;
@@ -363,15 +378,29 @@ int nh_read_info(const uint8_t *d, size_t len, nh_info *info) {
     info->plane_h[1] = info->plane_h[2] = gh / 2;
 
     // rotation, mirroring, colour profile (of the primary image)
-    const Box *r = prop(h, pi, "irot"), *m = prop(h, pi, "imir"), *col = prop(h, pi, "colr");
+    const Box *r = prop(h, pi, "irot"), *m = prop(h, pi, "imir");
     int irot = r && r->end > r->start ? d[r->start] & 3 : 0;
     int imir = m && m->end > m->start ? d[m->start] & 1 : -1;
     info->orientation = orientation(irot, imir);
-    if (col && col->end - col->start > 4 &&
-        (be32(d + col->start) == FOURCC("prof") || be32(d + col->start) == FOURCC("rICC"))) {
-        info->icc = d + col->start + 4;
-        info->icc_len = col->end - col->start - 4;
+    for (int i = 0; i < pi->nprops; i++) {   // colr: an ICC profile and / or nclx
+        int x = pi->props[i];
+        if (x < 1 || x > h->nprops || h->props[x - 1].type != FOURCC("colr")) continue;
+        const Box *col = &h->props[x - 1];
+        if (col->end - col->start <= 4) continue;
+        uint32_t kind = be32(d + col->start);
+        if (kind == FOURCC("prof") || kind == FOURCC("rICC")) {
+            info->icc = d + col->start + 4;
+            info->icc_len = col->end - col->start - 4;
+        } else if (kind == FOURCC("nclx")) {
+            // the planes go to the GPU as full range BT.601 (as JPEG); colours: sRGB without a profile
+            if (col->end - col->start < 11) goto out;
+            uint32_t prim = be16(d + col->start + 4), matrix = be16(d + col->start + 8);
+            int full = d[col->start + 10] >> 7;
+            if (!full || (matrix != 2 && matrix != 5 && matrix != 6)) goto out;   // other YCbCr: ImageIO
+            if (prim != 1 && prim != 2) wide_primaries = 1;   // (P3, BT.2020 ...: fine with an ICC profile)
+        }
     }
+    if (wide_primaries && !info->icc) goto out;
     rc = 0;
 out:
     free(h);
@@ -394,6 +423,13 @@ static void tile_done(void *ref, void *src, OSStatus st, VTDecodeInfoFlags flags
     const nh_info *in = j->info;
     if (st || !img || CVPixelBufferGetPixelFormatType(img) != kCVPixelFormatType_420YpCbCr8BiPlanarFullRange ||
         (int)CVPixelBufferGetWidth(img) != in->tile_w || (int)CVPixelBufferGetHeight(img) != in->tile_h) {
+        atomic_store(j->failed, 1);
+        return;
+    }
+    CFTypeRef matrix = CVBufferCopyAttachment(img, kCVImageBufferYCbCrMatrixKey, NULL);
+    int other = matrix && !CFEqual(matrix, kCVImageBufferYCbCrMatrix_ITU_R_601_4);   // (BT.709 ...: ImageIO's job)
+    if (matrix) CFRelease(matrix);
+    if (other) {
         atomic_store(j->failed, 1);
         return;
     }
