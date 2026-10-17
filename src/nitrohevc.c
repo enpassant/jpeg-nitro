@@ -439,35 +439,25 @@ static const uint8_t trans_idx_lps[64] = {0,  0,  1,  2,  2,  4,  4,  5,  6,  7,
                                           24, 25, 26, 26, 27, 27, 28, 29, 29, 30, 30, 30, 31, 32, 32, 33,
                                           33, 33, 34, 34, 35, 35, 35, 36, 36, 36, 37, 37, 37, 38, 38, 63};
 
+// The arithmetic decoder keeps ivlOffset scaled: value = ivlOffset << 7 plus up to 8 bits read
+// ahead (bits_needed: -8 .. -1 how many of them are still free), so bytes are read one at a
+// time instead of bit by bit; range and value are compared with the range scaled the same way.
 typedef struct {
     const uint8_t *p, *end;
-    uint64_t cache;   // next bits, left-aligned
-    int cached;       // valid bits in cache
-    uint32_t range, offset;
+    uint32_t range, value;
+    int bits_needed;
     uint8_t state[NUM_CTX];   // pStateIdx << 1 | valMps
 } Cabac;
 
-static inline uint32_t cabac_bits(Cabac *c, int n) {   // n <= 32
-    if (c->cached < n) {
-        while (c->cached <= 56) {
-            uint64_t byte = c->p < c->end ? *c->p++ : 0;
-            c->cache |= byte << (56 - c->cached);
-            c->cached += 8;
-        }
-    }
-    uint32_t v = (uint32_t)(c->cache >> (64 - n));
-    c->cache <<= n;
-    c->cached -= n;
-    return v;
-}
+static inline uint32_t cabac_byte(Cabac *c) { return c->p < c->end ? *c->p++ : 0; }
 
 static void cabac_start(Cabac *c, const uint8_t *p, const uint8_t *end) {   // 9.3.2.5
     c->p = p;
     c->end = end;
-    c->cache = 0;
-    c->cached = 0;
     c->range = 510;
-    c->offset = cabac_bits(c, 9);
+    c->bits_needed = -8;
+    c->value = cabac_byte(c) << 8;
+    c->value |= cabac_byte(c);
 }
 
 static void cabac_init_contexts(Cabac *c, int qp) {   // 9.3.2.2
@@ -480,37 +470,51 @@ static void cabac_init_contexts(Cabac *c, int qp) {   // 9.3.2.2
     }
 }
 
-static inline void cabac_renorm(Cabac *c) {
-    int shift = __builtin_clz(c->range) - 23;   // range back to >= 256
-    c->range <<= shift;
-    c->offset = c->offset << shift | cabac_bits(c, shift);
-}
-
-static int cabac_decision(Cabac *c, int ctx) {   // 9.3.4.3.2
+static inline int cabac_decision(Cabac *c, int ctx) {   // 9.3.4.3.2
     uint8_t s = c->state[ctx];
     int p = s >> 1, mps = s & 1;
     uint32_t lps = range_lps[p][(c->range >> 6) & 3];
     c->range -= lps;
+    uint32_t scaled = c->range << 7;
     int bin;
-    if (c->offset >= c->range) {
-        bin = !mps;
-        c->offset -= c->range;
-        c->range = lps;
-        if (p == 0) mps = !mps;
-        p = trans_idx_lps[p];
-    } else {
+    if (c->value < scaled) {   // MPS
         bin = mps;
         if (p < 62) p++;
+        if (scaled < (256u << 7)) {   // one bit of renormalization
+            c->range = scaled >> 6;
+            c->value <<= 1;
+            if (++c->bits_needed == 0) {
+                c->bits_needed = -8;
+                c->value |= cabac_byte(c);
+            }
+        }
+    } else {   // LPS
+        bin = !mps;
+        c->value -= scaled;
+        int shift = __builtin_clz(lps) - 23;   // lps back to >= 256
+        c->value <<= shift;
+        c->range = lps << shift;
+        if (p == 0) mps = !mps;
+        p = trans_idx_lps[p];
+        c->bits_needed += shift;
+        if (c->bits_needed >= 0) {
+            c->value |= cabac_byte(c) << c->bits_needed;
+            c->bits_needed -= 8;
+        }
     }
     c->state[ctx] = (uint8_t)(p << 1 | mps);
-    if (c->range < 256) cabac_renorm(c);
     return bin;
 }
 
-static int cabac_bypass(Cabac *c) {   // 9.3.4.3.4
-    c->offset = c->offset << 1 | cabac_bits(c, 1);
-    if (c->offset >= c->range) {
-        c->offset -= c->range;
+static inline int cabac_bypass(Cabac *c) {   // 9.3.4.3.4
+    c->value <<= 1;
+    if (++c->bits_needed >= 0) {
+        c->bits_needed = -8;
+        c->value |= cabac_byte(c);
+    }
+    uint32_t scaled = c->range << 7;
+    if (c->value >= scaled) {
+        c->value -= scaled;
         return 1;
     }
     return 0;
@@ -524,8 +528,16 @@ static uint32_t cabac_bypass_bits(Cabac *c, int n) {
 
 static int cabac_terminate(Cabac *c) {   // 9.3.4.3.5
     c->range -= 2;
-    if (c->offset >= c->range) return 1;
-    if (c->range < 256) cabac_renorm(c);
+    uint32_t scaled = c->range << 7;
+    if (c->value >= scaled) return 1;
+    if (scaled < (256u << 7)) {
+        c->range = scaled >> 6;
+        c->value <<= 1;
+        if (++c->bits_needed == 0) {
+            c->bits_needed = -8;
+            c->value |= cabac_byte(c);
+        }
+    }
     return 0;
 }
 
@@ -596,31 +608,69 @@ static void init_dct(void) {
 
 static const int8_t dst4[4][4] = {{29, 55, 74, 84}, {74, 74, 0, -74}, {84, -29, -74, 55}, {55, -84, 74, -29}};
 
-// inverse transform of an n x n block (coefficients c[y * n + x]) into residuals
-static void inverse_transform(int32_t *c, int log2, int dst, int16_t *res) {
+// inverse transform of an n x n block (coefficients c[y * n + x], zero outside columns 0..maxx and
+// rows 0..maxy) into residuals; the loops over a matrix row vectorize
+static void inverse_transform(const int32_t *c, int log2, int dst, int maxx, int maxy, int16_t *res) {
     int n = 1 << log2, step = 32 >> log2;
-    int32_t tmp[32 * 32];
+    if (!dst && maxx == 0 && maxy == 0) {   // DC only: a constant
+        int g = (64 * c[0] + 64) >> 7;
+        g = CLIP3(-32768, 32767, g);
+        int16_t v = (int16_t)((64 * g + 2048) >> 12);
+        for (int i = 0; i < n * n; i++) res[i] = v;
+        return;
+    }
+    int32_t tmp[32 * 32];   // [y * n + x]
+    int32_t acc[32];
+    if (dst) {   // 4x4 DST: directly
+        for (int x = 0; x <= maxx; x++) {
+            for (int y = 0; y < 4; y++) acc[y] = 0;
+            for (int j = 0; j <= maxy; j++)
+                for (int y = 0; y < 4; y++) acc[y] += dst4[j][y] * c[j * 4 + x];
+            for (int y = 0; y < 4; y++) tmp[y * 4 + x] = CLIP3(-32768, 32767, (acc[y] + 64) >> 7);
+        }
+        for (int y = 0; y < 4; y++) {
+            for (int x = 0; x < 4; x++) acc[x] = 0;
+            for (int j = 0; j <= maxx; j++)
+                for (int x = 0; x < 4; x++) acc[x] += dst4[j][x] * tmp[y * 4 + j];
+            for (int x = 0; x < 4; x++) res[y * 4 + x] = (int16_t)((acc[x] + 2048) >> 12);
+        }
+        return;
+    }
+    // DCT: the even basis functions are symmetric, the odd ones antisymmetric, so only the first
+    // half is computed: out[i] = E[i] + O[i], out[n - 1 - i] = E[i] - O[i]
+    int h = n / 2;
+    int32_t ev[16], od[16];
     // columns: e[x][y] = sum over j of M[j][y] * d[x][j], then (e + 64) >> 7, clipped to 16 bits
-    for (int x = 0; x < n; x++)
-        for (int y = 0; y < n; y++) {
-            int64_t s = 0;
-            for (int j = 0; j < n; j++) {
-                int32_t v = c[j * n + x];
-                if (v) s += (int64_t)(dst ? dst4[j][y] : dct32[j * step][y]) * v;
-            }
-            int64_t g = (s + 64) >> 7;
-            tmp[y * n + x] = (int32_t)CLIP3(-32768, 32767, g);
+    for (int x = 0; x <= maxx; x++) {
+        for (int y = 0; y < h; y++) ev[y] = od[y] = 0;
+        for (int j = 0; j <= maxy; j++) {
+            int32_t v = c[j * n + x];
+            if (!v) continue;
+            const int8_t *m = dct32[j * step];
+            int32_t *a = j & 1 ? od : ev;
+            for (int y = 0; y < h; y++) a[y] += m[y] * v;
         }
-    // rows, then (r + 2048) >> 12 (bdShift = 20 - BitDepth)
-    for (int y = 0; y < n; y++)
-        for (int x = 0; x < n; x++) {
-            int64_t s = 0;
-            for (int j = 0; j < n; j++) {
-                int32_t v = tmp[y * n + j];
-                if (v) s += (int64_t)(dst ? dst4[j][x] : dct32[j * step][x]) * v;
-            }
-            res[y * n + x] = (int16_t)((s + 2048) >> 12);
+        for (int y = 0; y < h; y++) {
+            tmp[y * n + x] = CLIP3(-32768, 32767, (ev[y] + od[y] + 64) >> 7);
+            tmp[(n - 1 - y) * n + x] = CLIP3(-32768, 32767, (ev[y] - od[y] + 64) >> 7);
         }
+    }
+    // rows (only columns 0..maxx are not zero), then (r + 2048) >> 12 (bdShift = 20 - BitDepth)
+    for (int y = 0; y < n; y++) {
+        for (int x = 0; x < h; x++) ev[x] = od[x] = 0;
+        for (int j = 0; j <= maxx; j++) {
+            int32_t v = tmp[y * n + j];
+            if (!v) continue;
+            const int8_t *m = dct32[j * step];
+            int32_t *a = j & 1 ? od : ev;
+            for (int x = 0; x < h; x++) a[x] += m[x] * v;
+        }
+        for (int x = 0; x < h; x++) {
+            res[y * n + x] = (int16_t)((ev[x] + od[x] + 2048) >> 12);
+            res[y * n + n - 1 - x] = (int16_t)((ev[x] - od[x] + 2048) >> 12);
+        }
+    }
+    (void)acc;
 }
 
 // ---------------------------------------------------------------------------
@@ -652,7 +702,31 @@ typedef struct {
     Cabac cabac;
     int16_t res[32 * 32];
     int32_t coeff[32 * 32];
+    uint16_t nz[32 * 32];        // positions (y * n + x) of the coefficients of the current block
+    uint8_t sf[4][3][32 * 32];   // ScalingFactor (7.4.5): [log2 - 2][cIdx][y * n + x], intra matrices
+    int sf_ready;
 } Dec;
+
+// ScalingFactor of the picture's PPS (flat 16 without scaling lists)
+static void scaling_factors(Dec *d) {
+    for (int log2 = 2; log2 <= 5; log2++) {
+        int n = 1 << log2;
+        for (int c = 0; c < 3; c++) {
+            const uint8_t *sl = d->pps->scaling[log2 - 2][c];
+            uint8_t *f = d->sf[log2 - 2][c];
+            for (int y = 0; y < n; y++)
+                for (int x = 0; x < n; x++) {
+                    int m = 16;
+                    if (d->sps->scaling_list_enabled) {   // the 8x8 (or 4x4) list upsampled, [0][0]: DC
+                        int r = log2 == 2 ? 0 : log2 - 3;
+                        m = sl[raster_to_diag(x >> r, y >> r, log2 == 2 ? 4 : 8)];
+                        if (log2 >= 4 && x == 0 && y == 0) m = sl[64];
+                    }
+                    f[y * n + x] = (uint8_t)m;
+                }
+        }
+    }
+}
 
 static inline int avail4(const Dec *d, int x, int y, int cur_ctb_slice) {
     // luma sample (x, y): inside the picture, reconstructed and in the same slice
@@ -808,8 +882,7 @@ static int chroma_qp_table(int qpi) {   // Table 8-10 (ChromaArrayType 1)
 static int residual(Dec *d, int x0, int y0, int log2, int c, int pred_mode) {
     Cabac *cb = &d->cabac;
     int n = 1 << log2;
-    int32_t *coef = d->coeff;
-    memset(coef, 0, sizeof(int32_t) * (size_t)(n * n));
+    int32_t *coef = d->coeff;   // (all zero between blocks: cleared after use)
     if (d->pps->transform_skip) return -1;   // (transform_skip_flag: not handled yet)
 
     // scanIdx (7.4.9.11)
@@ -865,6 +938,7 @@ static int residual(Dec *d, int x0, int y0, int log2, int c, int pred_mode) {
 
     uint8_t csbf[8][8];
     memset(csbf, 0, sizeof csbf);
+    int nnz = 0, maxx = 0, maxy = 0;
     int greater1_state = 1;   // (the "c1" state carried between sub-blocks)
     int sign_hiding = d->pps->sign_data_hiding && !d->cu_transquant_bypass;
     for (int i = last_sb; i >= 0; i--) {
@@ -956,6 +1030,9 @@ static int residual(Dec *d, int x0, int y0, int log2, int c, int pred_mode) {
             int p = sig[k];
             int xc = (xs << 2) + pos_scan[p][0], yc = (ys << 2) + pos_scan[p][1];
             coef[yc * n + xc] = neg ? -level : level;
+            d->nz[nnz++] = (uint16_t)(yc * n + xc);
+            if (xc > maxx) maxx = xc;
+            if (yc > maxy) maxy = yc;
         }
     }
 
@@ -973,26 +1050,15 @@ static int residual(Dec *d, int x0, int y0, int log2, int c, int pred_mode) {
     } else {
         int bd_shift = 8 + log2 - 5;
         int64_t scale = (int64_t)level_scale[qp % 6] << (qp / 6);
-        const uint8_t *sl = d->pps->scaling[log2 - 2][c];   // (matrixId: intra Y, Cb, Cr)
-        int use_list = d->sps->scaling_list_enabled;
-        for (int y = 0; y < n; y++)
-            for (int x = 0; x < n; x++) {
-                int32_t v = coef[y * n + x];
-                if (!v) continue;
-                int m = 16;
-                if (use_list) {
-                    // ScalingFactor: the 8x8 (or 4x4) list upsampled, its [0][0] the DC value
-                    int r = log2 == 2 ? 0 : log2 - 3;   // upsampling: 1, 1, 2, 4
-                    int sx = x >> r, sy = y >> r;
-                    int size = log2 == 2 ? 4 : 8;
-                    m = sl[raster_to_diag(sx, sy, size)];
-                    if (log2 >= 4 && x == 0 && y == 0) m = sl[64];
-                }
-                int64_t t = ((int64_t)v * m * scale + (1 << (bd_shift - 1))) >> bd_shift;
-                coef[y * n + x] = (int32_t)CLIP3(-32768, 32767, t);
-            }
-        inverse_transform(coef, log2, c == 0 && log2 == 2, res);
+        const uint8_t *sf = d->sf[log2 - 2][c];
+        for (int i = 0; i < nnz; i++) {
+            int k = d->nz[i];
+            int64_t t = ((int64_t)coef[k] * sf[k] * scale + (1 << (bd_shift - 1))) >> bd_shift;
+            coef[k] = (int32_t)CLIP3(-32768, 32767, t);
+        }
+        inverse_transform(coef, log2, c == 0 && log2 == 2, maxx, maxy, res);
     }
+    for (int i = 0; i < nnz; i++) coef[d->nz[i]] = 0;
     // reconstruction
     uint8_t *dst = d->plane[c] + (size_t)y0 * d->stride[c] + x0;
     for (int y = 0; y < n; y++)
@@ -1259,7 +1325,11 @@ static int decode_slice(Dec *d, const Sps *sps_table, const Pps *pps_table, cons
     } else if (first || sps != d->sps) {
         goto out;
     }
-    d->pps = pps;
+    if (d->pps != pps || !d->sf_ready) {
+        d->pps = pps;
+        scaling_factors(d);
+        d->sf_ready = 1;
+    }
     int pic_ctbs = d->ctb_w * d->ctb_h;
     int addr = 0;
     if (!first) {

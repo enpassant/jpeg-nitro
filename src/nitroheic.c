@@ -2,6 +2,7 @@
 // Copyright (c) 2026 A'rpi - part of jpeg-nitro (https://github.com/gereoffy/jpeg-nitro)
 // nitroheic: see nitroheic.h
 #include "nitroheic.h"
+#include "nitrohevc.h"
 
 #include <CoreMedia/CoreMedia.h>
 #include <VideoToolbox/VideoToolbox.h>
@@ -453,9 +454,28 @@ static void tile_done(void *ref, void *src, OSStatus st, VTDecodeInfoFlags flags
     CVPixelBufferUnlockBaseAddress(img, kCVPixelBufferLock_ReadOnly);
 }
 
+// the tiles with nitrohevc (our own decoder; NITROHEVC=1 in the environment, for testing)
+static int decode_own(const uint8_t *data, const nh_info *info, uint8_t *const planes[3], const size_t pitch[3]) {
+    _Atomic int failed = 0;
+    _Atomic int *pfailed = &failed;
+    dispatch_apply((size_t)info->ntiles, DISPATCH_APPLY_AUTO, ^(size_t t) {
+        int col = (int)t % info->cols, row = (int)t / info->cols;
+        uint8_t *p[3];
+        for (int c = 0; c < 3; c++) {
+            int sh = c ? 1 : 0;
+            p[c] = planes[c] + (size_t)(row * (info->tile_h >> sh)) * pitch[c] + (size_t)col * (info->tile_w >> sh);
+        }
+        if (nhevc_decode(info->hvcc, info->hvcc_len, data + info->tile_off[t], info->tile_len[t], info->tile_w,
+                         info->tile_h, p, pitch))
+            atomic_store(pfailed, 1);
+    });
+    return atomic_load(&failed) ? -1 : 0;
+}
+
 int nh_decode_planes(const uint8_t *data, size_t len, const nh_info *info, uint8_t *const planes[3],
                      const size_t pitch[3], int nthreads) {
     (void)len;
+    if (getenv("NITROHEVC")) return decode_own(data, info, planes, pitch);
     CFDataRef hvcc = CFDataCreate(NULL, info->hvcc, (CFIndex)info->hvcc_len);
     const void *ak[] = {CFSTR("hvcC")}, *av[] = {hvcc};
     CFDictionaryRef atoms = CFDictionaryCreate(NULL, ak, av, 1, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
