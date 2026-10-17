@@ -762,12 +762,12 @@ static void intra_predict(Dec *d, int c, int x0, int y0, int log2, int mode) {
     int any = 0;
     for (int i = 0; i <= 2 * n; i++) {
         int yy = y0 - 1 + i;   // left column, from the corner down
-        int ok = avail4(d, (x0 - 1) << sub, yy << sub, cur_slice);
+        int ok = avail4(d, (x0 - 1) * (1 << sub), yy * (1 << sub), cur_slice);
         avl[i] = ok;
         if (ok) left[i] = d->plane[c][(size_t)yy * stride + x0 - 1];
         any |= ok;
         int xx = x0 - 1 + i;   // top row, from the corner right
-        ok = avail4(d, xx << sub, (y0 - 1) << sub, cur_slice);
+        ok = avail4(d, xx * (1 << sub), (y0 - 1) * (1 << sub), cur_slice);
         avt[i] = ok;
         if (ok) top[i] = d->plane[c][(size_t)(y0 - 1) * stride + xx];
         any |= ok;
