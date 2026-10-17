@@ -183,7 +183,10 @@ a futó néző átveszi az új fájl(oka)t.
 **Windows:** a `nitroview.exe` ([src/nitroview_win.c](src/nitroview_win.c), Win32 + Direct3D 11)
 ugyanez a néző: ugyanazok a billentyűk, egérfunkciók, nagyítás és ablakméretezés, teljes képernyő,
 diavetítés, egy fájlból a mappája, ráhúzás. A JPEG / PNG / PSD a három dekóderrel és egy compute
-shaderrel megy, minden más (progresszív JPEG, HEIC, TIFF, WebP, GIF, BMP) a Windows saját WIC-
+shaderrel megy, a HEIC-fotók a saját HEVC-dekóderünkkel (`src/nitrohevc.c`, a H.265 szabvány alapján
+írva: a Windowsban Store-bővítmény nélkül nincs HEVC-dekóder; a csempék párhuzamosan, egy 12 MP-es kép
+~55 ms; deblocking és SAO még nincs, ez szemmel alig látszik), minden más (progresszív JPEG, TIFF, WebP,
+GIF, BMP) a Windows saját WIC-
 kodekjeivel; az SVG és a CorelDRAW CDR / CMX ugyanúgy, mint macOS-en (nagyítva éles, [ / ] a rajz
 oldalai között). Egyetlen önálló .exe (csak rendszer-DLL-ek, Windows 10-től), Macen vagy Linuxon
 fordítható a `make windows`-szal (lásd lent: „A dekóderek más rendszeren”). A `nitroview.exe --register`

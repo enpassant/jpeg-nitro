@@ -40,6 +40,7 @@
 #include "nitrojpeg.h"
 #include "nitropng.h"
 #include "nitropsd.h"
+#include "nitroheic.h"
 #ifdef NV_SVG
 #include "nitrosvg.h"   // optional SVG rendering (lunasvg)
 #endif
@@ -95,7 +96,7 @@ static const wchar_t *base_name(const wchar_t *p) {
 // decoded image
 
 typedef enum { KIND_YUV = 0, KIND_BGRA = 1, KIND_PNG = 2, KIND_PLANAR = 3 } Kind;
-enum { MODE_WIC = -3, MODE_NITROPNG = -4, MODE_NITROPSD = -5, MODE_SVG = -6, MODE_CDR = -7 };
+enum { MODE_WIC = -3, MODE_NITROPNG = -4, MODE_NITROPSD = -5, MODE_SVG = -6, MODE_CDR = -7, MODE_NITROHEVC = -8 };
 
 #ifdef NV_VECTOR
 // A loaded vector document (SVG, CorelDRAW), shared by the images of its pages and the background
@@ -157,6 +158,7 @@ static const char *mode_name(int m) {
     case MODE_WIC: return "wic";
     case MODE_NITROPNG: return "nitropng";
     case MODE_NITROPSD: return "nitropsd";
+    case MODE_NITROHEVC: return "nitrohevc";
     case MODE_SVG: return "svg";
     case MODE_CDR: return "cdr";
     default: return "?";
@@ -1054,6 +1056,35 @@ static Decoded *decode_file(const wchar_t *path) {
                 d->size = total;
                 d->mode = st.mode;
                 d->bands = st.bands;
+            } else if (buf) {
+                buf_put(buf, cap);
+                buf = NULL;
+            }
+        }
+    } else if (len >= 12 && !memcmp(data + 4, "ftyp", 4)) {
+        nh_info hi;   // HEIC: its HEVC tiles decoded in parallel by our own decoder (nitroheic + nitrohevc)
+        if (!nh_read_info(data, len, &hi) && hi.plane_w[0] <= MAX_TEX && hi.plane_h[0] <= MAX_TEX) {
+            size_t total = 0;
+            for (int c = 0; c < 3; c++) {
+                d->pitch[c] = align_up((size_t)hi.plane_w[c], 64);
+                d->offset[c] = total;
+                total = align_up(total + d->pitch[c] * hi.plane_h[c], 64);
+                d->pw[c] = hi.plane_w[c];
+                d->ph[c] = hi.plane_h[c];
+            }
+            buf = buf_get(total, &cap);
+            uint8_t *planes[3] = {buf + d->offset[0], buf + d->offset[1], buf + d->offset[2]};
+            if (buf && !nh_decode_planes(data, len, &hi, planes, d->pitch, 0)) {
+                d->kind = KIND_YUV;   // (full range BT.601 4:2:0, as a JPEG; the ICC profile is not used)
+                d->width = hi.width;
+                d->height = hi.height;
+                d->ncomp = 3;
+                d->h1 = d->v1 = 1;
+                d->hmax = d->vmax = 2;
+                d->orientation = hi.orientation;
+                d->size = total;
+                d->mode = MODE_NITROHEVC;
+                d->bands = hi.ntiles;
             } else if (buf) {
                 buf_put(buf, cap);
                 buf = NULL;
