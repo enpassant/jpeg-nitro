@@ -309,6 +309,7 @@ static int parse_sps(const uint8_t *rbsp, size_t len, Sps *sps_table) {
     s->temporal_mvp = (int)bits_u(&b, 1);
     s->strong_intra_smoothing = (int)bits_u(&b, 1);
     // (VUI and extensions: not needed)
+    if (s->chroma_format_idc != 1 || s->bit_depth_luma != 8 || s->bit_depth_chroma != 8) return -1;   // 8-bit 4:2:0
     if (s->width < 8 || s->height < 8 || s->width > 16384 || s->height > 16384 || s->log2_ctb < 4 || s->log2_ctb > 6 ||
         s->log2_max_tb > 5 || s->log2_max_tb > s->log2_ctb || s->log2_min_tb >= s->log2_min_cb ||
         (s->width & ((1 << s->log2_min_cb) - 1)) || (s->height & ((1 << s->log2_min_cb) - 1)))
