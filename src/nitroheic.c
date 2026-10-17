@@ -456,8 +456,11 @@ static void tile_done(void *ref, void *src, OSStatus st, VTDecodeInfoFlags flags
         atomic_store(j->failed, 1);
         return;
     }
+    // BT.601 coefficients: matrix_coeffs 6 (ITU_R_601_4) or 5 (BT.470BG, as Samsung phones write it, which
+    // VideoToolbox names "YCbCrMatrix#5"); BT.709 ...: ImageIO's job
     CFTypeRef matrix = CVBufferCopyAttachment(img, kCVImageBufferYCbCrMatrixKey, NULL);
-    int other = matrix && !CFEqual(matrix, kCVImageBufferYCbCrMatrix_ITU_R_601_4);   // (BT.709 ...: ImageIO's job)
+    int other = matrix && !CFEqual(matrix, kCVImageBufferYCbCrMatrix_ITU_R_601_4) &&
+                !CFEqual(matrix, CFSTR("YCbCrMatrix#5"));
     if (matrix) CFRelease(matrix);
     if (other) {
         atomic_store(j->failed, 1);
