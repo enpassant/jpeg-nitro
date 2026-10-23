@@ -33,6 +33,7 @@
 #include "nitropsd.h"
 #include "nitroheic.h"
 #include "nitrodng.h"
+#include "nitrowebp.h"
 #ifdef NV_WUFFS
 #include "png_wuffs.h"   // optional fast PNG decoder
 #endif
@@ -91,6 +92,7 @@ typedef enum { KIND_YUV = 0, KIND_BGRA = 1, KIND_PNG = 2, KIND_PLANAR = 3 } Kind
 @property(nonatomic) double vectorScale;     // decoded pixels per document unit
 @property(nonatomic) int pages, page;        // a multi-page document (CDR): page count, the page shown (from 0)
 @property(nonatomic) int ev3;                // a DNG: the exposure correction it was developed with (1/3 EV)
+@property(nonatomic) int limited;            // KIND_YUV: limited range (Y 16..235, as WebP), not full range
 @end
 @implementation Decoded {
     int _pw[3], _ph[3];
@@ -269,7 +271,7 @@ done:
 
 // Decode one file into a Metal buffer. Runs on the decoder thread.
 enum { MODE_TURBOJPEG = -1, MODE_WUFFS = -2, MODE_IMAGEIO = -3, MODE_NITROPNG = -4, MODE_NITROPSD = -5, MODE_SVG = -6, MODE_CDR = -7,
-       MODE_NITROHEIC = -8, MODE_NITRODNG = -9 };
+       MODE_NITROHEIC = -8, MODE_NITRODNG = -9, MODE_NITROWEBP = -10 };
 static int g_nthreads = 0;   // -j
 static _Atomic int g_dng_ev3;   // DNG exposure correction in 1/3 EV (keys E / Shift+E)
 
@@ -285,6 +287,7 @@ static const char *mode_name(int m) {
     case MODE_NITROPSD: return "nitropsd";
     case MODE_NITROHEIC: return "nitroheic";
     case MODE_NITRODNG: return "nitrodng";
+    case MODE_NITROWEBP: return "nitrowebp";
     case MODE_SVG: return "svg";
     case MODE_CDR: return "cdr";
     default: return "?";
@@ -632,6 +635,44 @@ static Decoded *decode_file(NSString *path, BufferPool *pool, size_t align) {
             [pool put:buf];
         }
     }
+    nw_info wi;   // lossy WebP: nitrowebp (the tokens parsed on one thread, the rows reconstructed on another)
+    if (!nw_read_info(bytes, len, &wi) && wi.plane_w[0] <= MAX_TEX && wi.plane_h[0] <= MAX_TEX) {
+        size_t total = 0;
+        for (int c = 0; c < 3; c++) {
+            d.pitch[c] = align_up((size_t)wi.plane_w[c], align);
+            d.offset[c] = total;
+            total = align_up(total + d.pitch[c] * wi.plane_h[c], align);
+            d.pw[c] = wi.plane_w[c];
+            d.ph[c] = wi.plane_h[c];
+        }
+        id<MTLBuffer> buf = [pool get:total];
+        if (buf) {
+            uint8_t *base = buf.contents;
+            uint8_t *planes[3] = {base + d.offset[0], base + d.offset[1], base + d.offset[2]};
+            if (!nw_decode_planes(bytes, len, &wi, planes, d.pitch, g_nthreads)) {
+                if (buf.storageMode == MTLStorageModeManaged) [buf didModifyRange:NSMakeRange(0, total)];
+                d.buffer = buf;
+                d.kind = KIND_YUV;   // (limited range BT.601 4:2:0)
+                d.limited = 1;
+                d.width = wi.width;
+                d.height = wi.height;
+                d.ncomp = 3;
+                d.h0 = 2; d.v0 = 2;
+                d.h1 = 1; d.v1 = 1;
+                d.hmax = 2; d.vmax = 2;
+                d.orientation = wi.orientation;
+                id cs = wi.icc ? CFBridgingRelease(CGColorSpaceCreateWithICCData(
+                                     (__bridge CFDataRef)[NSData dataWithBytes:wi.icc length:wi.icc_len]))
+                               : nil;
+                d.colorSpace = cs ?: srgb_space();
+                d.mode = MODE_NITROWEBP;
+                d.bands = 1;
+                d.decode_ms = now_ms() - t1;
+                return d;
+            }
+            [pool put:buf];
+        }
+    }
     d.colorSpace = image_colorspace(data);   // tags the display layer (ICC profile or sRGB)
     if (is_png(bytes, len)) {
         // nitropng (parallel): 8-bit gray / gray+alpha / RGB / RGBA, non-interlaced
@@ -838,6 +879,7 @@ typedef struct {
         }
         else if (d.ncomp == 1) pp.kind = 1;
         else {
+            if (d.limited) pp.kind = 5;
             pp.cscale[0] = (float)d.h1 / d.hmax;
             pp.cscale[1] = (float)d.v1 / d.vmax;
             pp.cmax[0] = d.pw[1] - 1;
@@ -871,6 +913,7 @@ typedef struct {
             p.cscale[1] = (float)d.v1 / d.vmax;
             p.csize[0] = d.pw[1];
             p.csize[1] = d.ph[1];
+            if (d.limited) p.kind = 5;
         } else {
             p.kind = 1;
         }

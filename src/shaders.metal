@@ -8,7 +8,7 @@ struct ConvParams {
     uint2 size;        // output size
     float2 cscale;     // luma pixel -> chroma pixel scale (h_c/hmax, v_c/vmax)
     float2 csize;      // chroma plane size
-    uint kind;         // 0 YCbCr, 1 gray, 2 BGRA copy
+    uint kind;         // 0 YCbCr, 1 gray, 2 BGRA copy, 5 YCbCr limited range
 };
 
 kernel void convert(texture2d<float, access::read> Y [[texture(0)]],
@@ -31,6 +31,11 @@ kernel void convert(texture2d<float, access::read> Y [[texture(0)]],
             float2 uv = (float2(gid) + 0.5) * p.cscale / p.csize;
             float cb = Cb.sample(s, uv).r - 128.0 / 255.0;
             float cr = Cr.sample(s, uv).r - 128.0 / 255.0;
+            if (p.kind == 5) {   // limited range (WebP): Y 16..235, C 16..240
+                y = (y - 16.0 / 255.0) * (255.0 / 219.0);
+                cb *= 255.0 / 224.0;
+                cr *= 255.0 / 224.0;
+            }
             c = float4(y + 1.402 * cr, y - 0.344136 * cb - 0.714136 * cr, y + 1.772 * cb, 1.0);
         }
     }
@@ -92,6 +97,11 @@ kernel void convert_buf(device const uchar *src [[buffer(1)]],
             float2 cc = (float2(gid) + 0.5) * p.cscale;
             float cb = chroma(src + p.off[1], p.pitch[1], cc, p.cmax) - 128.0 / 255.0;
             float cr = chroma(src + p.off[2], p.pitch[2], cc, p.cmax) - 128.0 / 255.0;
+            if (p.kind == 5) {   // limited range (WebP): Y 16..235, C 16..240
+                y = (y - 16.0 / 255.0) * (255.0 / 219.0);
+                cb *= 255.0 / 224.0;
+                cr *= 255.0 / 224.0;
+            }
             c = float4(y + 1.402 * cr, y - 0.344136 * cb - 0.714136 * cr, y + 1.772 * cb, 1.0);
         }
     }

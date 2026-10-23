@@ -42,6 +42,7 @@
 #include "nitropsd.h"
 #include "nitroheic.h"
 #include "nitrodng.h"
+#include "nitrowebp.h"
 #ifdef NV_SVG
 #include "nitrosvg.h"   // optional SVG rendering (lunasvg)
 #endif
@@ -98,7 +99,7 @@ static const wchar_t *base_name(const wchar_t *p) {
 // decoded image
 
 typedef enum { KIND_YUV = 0, KIND_BGRA = 1, KIND_PNG = 2, KIND_PLANAR = 3 } Kind;
-enum { MODE_WIC = -3, MODE_NITROPNG = -4, MODE_NITROPSD = -5, MODE_SVG = -6, MODE_CDR = -7, MODE_NITROHEVC = -8, MODE_NITRODNG = -9 };
+enum { MODE_WIC = -3, MODE_NITROPNG = -4, MODE_NITROPSD = -5, MODE_SVG = -6, MODE_CDR = -7, MODE_NITROHEVC = -8, MODE_NITRODNG = -9, MODE_NITROWEBP = -10 };
 
 #ifdef NV_VECTOR
 // A loaded vector document (SVG, CorelDRAW), shared by the images of its pages and the background
@@ -143,6 +144,7 @@ typedef struct {
     double read_ms, decode_ms, upload_ms, conv_ms;
     int mode, bands;
     int ev3;                           // a DNG: the exposure correction it was developed with (1/3 EV)
+    int limited;                       // KIND_YUV: limited range (Y 16..235, as WebP), not full range
 #ifdef NV_VECTOR
     VectorDoc *vec;                    // SVG / CDR: the document (this is its page `page`)
     int page;
@@ -163,6 +165,7 @@ static const char *mode_name(int m) {
     case MODE_NITROPSD: return "nitropsd";
     case MODE_NITROHEVC: return "nitrohevc";
     case MODE_NITRODNG: return "nitrodng";
+    case MODE_NITROWEBP: return "nitrowebp";
     case MODE_SVG: return "svg";
     case MODE_CDR: return "cdr";
     default: return "?";
@@ -432,6 +435,7 @@ static const char g_hlsl[] =
     "            float2 cc = (float2(g) + 0.5) * CS.xy;\n"
     "            float cb = chroma(OFF.y, PI.y, cc) - 128.0 / 255.0;\n"
     "            float cr = chroma(OFF.z, PI.z, cc) - 128.0 / 255.0;\n"
+    "            if (A.z == 5) { y = (y - 16.0 / 255.0) * (255.0 / 219.0); cb *= 255.0 / 224.0; cr *= 255.0 / 224.0; }\n"
     "            c = float4(y + 1.402 * cr, y - 0.344136 * cb - 0.714136 * cr, y + 1.772 * cb, 1.0);\n"
     "        }\n"
     "    }\n"
@@ -459,6 +463,7 @@ static const char g_hlsl[] =
     "            float2 uv = (float2(g) + 0.5) * CS.xy / CS.zw;   // CS.zw: chroma plane size\n"
     "            float cb = P1.SampleLevel(sbil, uv, 0) - 128.0 / 255.0;\n"
     "            float cr = P2.SampleLevel(sbil, uv, 0) - 128.0 / 255.0;\n"
+    "            if (A.z == 5) { y = (y - 16.0 / 255.0) * (255.0 / 219.0); cb *= 255.0 / 224.0; cr *= 255.0 / 224.0; }\n"
     "            c = float4(y + 1.402 * cr, y - 0.344136 * cb - 0.714136 * cr, y + 1.772 * cb, 1.0);\n"
     "        }\n"
     "    }\n"
@@ -687,6 +692,7 @@ static ID3D11ShaderResourceView *texture_for(Decoded *d) {
         p.off[1] = (uint32_t)d->ncomp;
     } else if (d->ncomp == 1) p.a[2] = 1;
     else {
+        if (d->limited) p.a[2] = 5;   // (limited range YCbCr: WebP)
         p.cs[0] = (float)d->h1 / d->hmax;
         p.cs[1] = (float)d->v1 / d->vmax;
         p.cm[0] = d->pw[1] - 1;
@@ -1146,6 +1152,36 @@ static Decoded *decode_file(const wchar_t *path) {
                 d->size = total;
                 d->mode = MODE_NITROHEVC;
                 d->bands = hi.ntiles;
+            } else if (buf) {
+                buf_put(buf, cap);
+                buf = NULL;
+            }
+        }
+    } else if (len >= 12 && !memcmp(data, "RIFF", 4) && !memcmp(data + 8, "WEBP", 4)) {
+        nw_info wi;   // lossy WebP: nitrowebp (the tokens parsed on one thread, the rows reconstructed on another)
+        if (!nw_read_info(data, len, &wi) && wi.plane_w[0] <= MAX_TEX && wi.plane_h[0] <= MAX_TEX) {
+            size_t total = 0;
+            for (int c = 0; c < 3; c++) {
+                d->pitch[c] = align_up((size_t)wi.plane_w[c], 64);
+                d->offset[c] = total;
+                total = align_up(total + d->pitch[c] * wi.plane_h[c], 64);
+                d->pw[c] = wi.plane_w[c];
+                d->ph[c] = wi.plane_h[c];
+            }
+            buf = buf_get(total, &cap);
+            uint8_t *planes[3] = {buf + d->offset[0], buf + d->offset[1], buf + d->offset[2]};
+            if (buf && !nw_decode_planes(data, len, &wi, planes, d->pitch, g_nthreads)) {
+                d->kind = KIND_YUV;   // (limited range BT.601 4:2:0; the ICC profile is not used)
+                d->limited = 1;
+                d->width = wi.width;
+                d->height = wi.height;
+                d->ncomp = 3;
+                d->h1 = d->v1 = 1;
+                d->hmax = d->vmax = 2;
+                d->orientation = wi.orientation;
+                d->size = total;
+                d->mode = MODE_NITROWEBP;
+                d->bands = 1;
             } else if (buf) {
                 buf_put(buf, cap);
                 buf = NULL;
@@ -2298,6 +2334,13 @@ static int header_size(const wchar_t *path, double *w, double *h) {
         int swap = di.orientation >= 5;
         *w = swap ? di.height : di.width;
         *h = swap ? di.width : di.height;
+        return 1;
+    }
+    nw_info wi;   // WebP (its VP8 chunk may go on beyond what was read)
+    if (!nw_read_info(b, n, &wi)) {
+        int swap = wi.orientation >= 5;
+        *w = swap ? wi.height : wi.width;
+        *h = swap ? wi.width : wi.height;
         return 1;
     }
     nj_info ji;
