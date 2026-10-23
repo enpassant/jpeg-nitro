@@ -66,6 +66,7 @@ Also runs on Apple Silicon (M1 MacBook Air, see [below](#apple-silicon-m1)); the
 | 2 … 8 | 200% … 800%, pixel-exact: one image pixel = N×N screen pixels |
 | ← → ↑ ↓ | move a zoomed image (Shift: half a screen per step) |
 | W | back to the image's own size (small images at 100%), window follows image sizes again |
+| E / Shift + E | DNG raw images: brighter / darker by 1/3 EV (up to ±3 EV; kept while paging, shown in the title) |
 | mouse drag | move a zoomed image |
 | scroll wheel | zoom around the point under the cursor (one √2 step per notch; trackpad: smooth, pinch too) |
 | double click | fit → 100% at the clicked point; again → back to fit |

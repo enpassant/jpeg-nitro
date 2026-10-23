@@ -90,6 +90,7 @@ typedef enum { KIND_YUV = 0, KIND_BGRA = 1, KIND_PNG = 2, KIND_PLANAR = 3 } Kind
 @property(nonatomic) void (*vectorFree)(void *);
 @property(nonatomic) double vectorScale;     // decoded pixels per document unit
 @property(nonatomic) int pages, page;        // a multi-page document (CDR): page count, the page shown (from 0)
+@property(nonatomic) int ev3;                // a DNG: the exposure correction it was developed with (1/3 EV)
 @end
 @implementation Decoded {
     int _pw[3], _ph[3];
@@ -270,6 +271,7 @@ done:
 enum { MODE_TURBOJPEG = -1, MODE_WUFFS = -2, MODE_IMAGEIO = -3, MODE_NITROPNG = -4, MODE_NITROPSD = -5, MODE_SVG = -6, MODE_CDR = -7,
        MODE_NITROHEIC = -8, MODE_NITRODNG = -9 };
 static int g_nthreads = 0;   // -j
+static _Atomic int g_dng_ev3;   // DNG exposure correction in 1/3 EV (keys E / Shift+E)
 
 static const char *mode_name(int m) {
     switch (m) {
@@ -566,6 +568,8 @@ static Decoded *decode_file(NSString *path, BufferPool *pool, size_t align) {
         Decoded *d = [Decoded new];
         d.read_ms = t1 - t0;
         id<MTLBuffer> buf = bgra_buffer(d, di.width, di.height, pool, align);
+        d.ev3 = atomic_load(&g_dng_ev3);
+        di.ev = d.ev3 / 3.0f;
         if (buf && !ndng_decode(data.bytes, data.length, &di, buf.contents, d.pitch[0], g_nthreads)) {
             d.orientation = di.orientation;
             d.colorSpace = srgb_space();
@@ -905,6 +909,9 @@ typedef struct {
 // The size vector images are rendered for changed (see g_vector_tw): prefetched ones too small
 // for it are dropped and rendered again (the current one is sharpened by vectorDetail).
 - (void)vectorTargetChanged;
+// The DNG exposure correction changed (g_dng_ev3): prefetched DNGs are dropped and developed again,
+// the current one is replaced when its new development is ready (it stays on screen until then).
+- (void)dngExposureChanged;
 @property(nonatomic, copy) void (^onDecoded)(NSInteger index);
 @end
 
@@ -1002,6 +1009,37 @@ typedef struct {
     [_cond unlock];
 #endif
 }
+static BOOL stale_dng(Decoded *d) { return d.mode == MODE_NITRODNG && d.ev3 != atomic_load(&g_dng_ev3); }
+- (void)dngExposureChanged {
+    [_cond lock];
+    NSInteger ci = _cur;
+    Decoded *cur = _cache[@(ci)];
+    for (NSNumber *k in _cache.allKeys) {
+        Decoded *d = _cache[k];
+        if (d != cur && stale_dng(d)) {
+            [self recycle:d];
+            [_cache removeObjectForKey:k];
+        }
+    }
+    NSString *path = cur && stale_dng(cur) ? _files[ci] : nil;
+    unsigned gen = _gen;
+    [_cond signal];
+    [_cond unlock];
+    if (!path) return;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), ^{
+        Decoded *n;
+        @autoreleasepool { n = decode_file(path, self->_pool, self->_align); }
+        if (!n) return;
+        [self->_cond lock];
+        Decoded *old = self->_cache[@(ci)];
+        BOOL use = gen == self->_gen && old && stale_dng(old) && !stale_dng(n);   // (a later key press wins)
+        if (use) self->_cache[@(ci)] = n;
+        [self->_cond unlock];
+        [self recycle:use ? old : n];
+        void (^cb)(NSInteger) = self.onDecoded;
+        if (use && cb) dispatch_async(dispatch_get_main_queue(), ^{ cb(ci); });
+    });
+}
 - (void)focus:(NSInteger)cur direction:(int)dir {
     [_cond lock];
     _cur = cur;
@@ -1049,7 +1087,7 @@ typedef struct {
         @autoreleasepool { d = decode_file(path, _pool, _align); }
 
         [_cond lock];
-        BOOL stale = gen != _gen;   // the file list changed meanwhile: index no longer valid
+        BOOL stale = gen != _gen || (d && stale_dng(d));   // the file list or the DNG exposure changed meanwhile
         if (stale) { if (d) [self recycle:d]; }
         else if (d) _cache[next] = d;
         else [_failed addObject:next];
@@ -1229,6 +1267,7 @@ static NSArray<NSString *> *dropped_paths(id<NSDraggingInfo> info);
                     : [NSString stringWithFormat:@"%@  (%ld/%lu)  %@", name, _index + 1, _files.count,
                                                  [_loader failed:_index] ? @"CANNOT DECODE (unsupported or damaged)" : @"loading..."];
     if (d.pages > 1) t = [t stringByAppendingFormat:@"  [page %d/%d]", d.page + 1, d.pages];
+    if (d.mode == MODE_NITRODNG && d.ev3) t = [t stringByAppendingFormat:@"  %+.1f EV", d.ev3 / 3.0];
     if (_slideMs > 0)
         t = [t stringByAppendingFormat:@"   %@", _paused ? @"[slideshow paused: P]"
                                                      : [NSString stringWithFormat:@"[slideshow %g ms]", _slideMs]];
@@ -1643,6 +1682,14 @@ static int debug_zoom(void) {   // NV_DEBUG_ZOOM=1: log wheel / pinch events and
             if (cur) [self zoomTo:[ch characterAtIndex:0] - '0' image:cur view:self.drawableSize];
             return;
         case 'w': case 'W': [self windowToImage]; return;
+        case 'e': case 'E': {   // DNG: brighter / (Shift) darker, 1/3 EV
+            if (!cur || cur.mode != MODE_NITRODNG) return;
+            int ev3 = MAX(-9, MIN(9, atomic_load(&g_dng_ev3) + ((e.modifierFlags & NSEventModifierFlagShift) ? -1 : 1)));
+            if (ev3 == atomic_load(&g_dng_ev3)) return;
+            atomic_store(&g_dng_ev3, ev3);
+            [_loader dngExposureChanged];
+            return;
+        }
         default: break;
         }
     }
@@ -2469,6 +2516,7 @@ int main(int argc, const char **argv) {
                 "  2 .. 8                  200%% .. 800%%, pixel-exact (1 image pixel = NxN screen pixels)\n"
                 "  arrows                  move a zoomed image (Shift: bigger steps)\n"
                 "  W                       back to the image's own size (small images 100%%, window follows)\n"
+                "  E / Shift+E             DNG raw image: brighter / darker (1/3 EV steps, kept while paging)\n"
                 "mouse:\n"
                 "  drag                    move a zoomed image\n"
                 "  scroll wheel            zoom around the cursor (trackpad: smooth, pinch too)\n"

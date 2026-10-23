@@ -20,6 +20,7 @@
 typedef struct {
     int width, height;   // the developed image (the default crop), before rotation
     int orientation;     // EXIF-style 1..8
+    float ev;            // exposure correction in stops: set by the caller after ndng_read_info (0: none)
     // internal
     int raw_w, raw_h;    // the raw IFD's image
     int area[4];         // active area: top, left, bottom, right

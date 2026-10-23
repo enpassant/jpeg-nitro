@@ -65,6 +65,7 @@
 #define WM_APP_DECODED (WM_APP + 1)
 #define WM_APP_DETAIL (WM_APP + 2)   // a vector image's sharp detail is rendered
 #define WM_APP_PAGE (WM_APP + 3)     // another page of a multi-page document is drawn
+#define WM_APP_DNG (WM_APP + 4)      // a DNG is developed again (another exposure correction)
 #define TIMER_SLIDE 1
 #define TIMER_DETAIL 2
 
@@ -141,6 +142,7 @@ typedef struct {
     ID3D11ShaderResourceView *texsrv;
     double read_ms, decode_ms, upload_ms, conv_ms;
     int mode, bands;
+    int ev3;                           // a DNG: the exposure correction it was developed with (1/3 EV)
 #ifdef NV_VECTOR
     VectorDoc *vec;                    // SVG / CDR: the document (this is its page `page`)
     int page;
@@ -781,6 +783,7 @@ static void gpu_finish(void) {
 // decoding (decoder thread)
 
 static int g_nthreads = 0;   // -j
+static volatile LONG g_dng_ev3;   // DNG exposure correction in 1/3 EV (keys E / Shift+E)
 
 static IWICImagingFactory *wic_factory(void) {   // one per thread (COM apartment)
     static __thread IWICImagingFactory *f;
@@ -1016,6 +1019,8 @@ static Decoded *decode_file(const wchar_t *path) {
     if (!raw_read && !ndng_read_info(data, len, &di) && di.width <= MAX_TEX && di.height <= MAX_TEX) {
         size_t pitch = (size_t)di.width * 4;
         buf = buf_get(pitch * di.height, &cap);
+        d->ev3 = (int)g_dng_ev3;
+        di.ev = d->ev3 / 3.0f;
         if (buf && !ndng_decode(data, len, &di, buf, pitch, g_nthreads)) {
             d->kind = KIND_BGRA;
             d->width = di.width;
@@ -1273,12 +1278,17 @@ static void loader_vector_target_changed(void) {
     ReleaseSRWLockExclusive(&L.lock);
 }
 
-// Another page of image i drawn: it replaces old (if i still shows it). Returns whether it did.
-static int loader_replace_page(int i, Decoded *old, Decoded *d) {
+#endif
+
+static int stale_dng(const Decoded *d) { return d && d->mode == MODE_NITRODNG && d->ev3 != (int)g_dng_ev3; }
+
+// Image i decoded again (another page, another DNG exposure): d replaces old if i still shows it
+// (and d is not outdated by a later key press). Returns whether it did.
+static int loader_replace_image(int i, Decoded *old, Decoded *d) {
     int done = 0;
     AcquireSRWLockExclusive(&L.lock);
     for (int c = 0; c < L.ncache; c++)
-        if (L.cache[c].index == i && L.cache[c].d == old) {
+        if (L.cache[c].index == i && L.cache[c].d == old && !stale_dng(d)) {
             L.cache[c].d = d;
             bury_locked(old);
             done = 1;
@@ -1287,7 +1297,52 @@ static int loader_replace_page(int i, Decoded *old, Decoded *d) {
     ReleaseSRWLockExclusive(&L.lock);
     return done;
 }
-#endif
+
+typedef struct {
+    Decoded *old, *d;
+    wchar_t *path;
+    int index;
+} DngJob;
+
+static DWORD WINAPI dng_run(void *arg) {
+    DngJob *j = arg;
+    j->d = decode_file(j->path);
+    PostMessageW(L.notify, WM_APP_DNG, (WPARAM)j, 0);
+    return 0;
+}
+
+// The DNG exposure correction changed (g_dng_ev3): prefetched DNGs are dropped and developed again,
+// the current one is replaced when its new development is ready (it stays on screen until then).
+static void loader_dng_exposure_changed(void) {
+    DngJob *j = NULL;
+    AcquireSRWLockExclusive(&L.lock);
+    for (int c = 0; c < L.ncache;) {
+        Decoded *d = L.cache[c].d;
+        if (L.cache[c].index == L.cur) {
+            if (stale_dng(d) && (j = calloc(1, sizeof *j)) && (j->path = _wcsdup(L.files[L.cur]))) {
+                j->old = d;
+                j->index = L.cur;
+            }
+            c++;
+        } else if (stale_dng(d)) {
+            bury_locked(d);
+            L.cache[c] = L.cache[--L.ncache];
+        } else {
+            c++;
+        }
+    }
+    WakeConditionVariable(&L.cv);
+    ReleaseSRWLockExclusive(&L.lock);
+    if (j && j->path) {
+        HANDLE th = CreateThread(NULL, 0, dng_run, j, 0, NULL);
+        if (th) {
+            CloseHandle(th);
+            return;
+        }
+    }
+    if (j) free(j->path);
+    free(j);
+}
 
 // Priority order: current, then AHEAD in the paging direction, then BEHIND.
 static int wanted_locked(int *w) {
@@ -1333,7 +1388,7 @@ static DWORD WINAPI loader_run(void *arg) {
         Decoded *d = decode_file(path);
 
         AcquireSRWLockExclusive(&L.lock);
-        int stale = gen != L.gen;   // the file list changed meanwhile: index no longer valid
+        int stale = gen != L.gen || stale_dng(d);   // the file list or the DNG exposure changed meanwhile
         if (stale) bury_locked(d);
         else if (d && L.ncache < 16) { L.cache[L.ncache].index = next; L.cache[L.ncache].d = d; L.ncache++; }
         else if (d) bury_locked(d);
@@ -1469,6 +1524,10 @@ static void update_title(void) {
         _snwprintf(t + n, 1024 - n, L"  [page %d/%d]", d->page + 1, d->vec->pages);
     }
 #endif
+    if (d && d->mode == MODE_NITRODNG && d->ev3) {
+        size_t n = wcslen(t);
+        _snwprintf(t + n, 1024 - n, L"  %+.1f EV", d->ev3 / 3.0);
+    }
     if (V.slide_ms > 0) {
         size_t n = wcslen(t);
         if (V.paused) _snwprintf(t + n, 1024 - n, L"   [slideshow paused: P]");
@@ -1882,7 +1941,7 @@ static void show_page(int delta) {
 }
 
 static void page_done(PageJob *j) {   // WM_APP_PAGE
-    if (j->d && loader_replace_page(j->index, j->old, j->d) && j->index == V.index) {
+    if (j->d && loader_replace_image(j->index, j->old, j->d) && j->index == V.index) {
         V.zoomed = 0;   // (pages may differ in size)
         size_window_for(j->d);
         update_title();
@@ -2003,6 +2062,15 @@ static void on_char(wchar_t ch) {   // zoom keys by character: any keyboard layo
         if (cur) set_scale(ch - L'0', cur, 0, 0);
         break;
     case L'w': case L'W': window_to_image(); break;
+    case L'e': case L'E':   // DNG: brighter / (Shift) darker, 1/3 EV
+        if (cur && cur->mode == MODE_NITRODNG) {
+            int ev3 = MAX(-9, MIN(9, (int)g_dng_ev3 + (GetKeyState(VK_SHIFT) < 0 ? -1 : 1)));
+            if (ev3 != (int)g_dng_ev3) {
+                InterlockedExchange(&g_dng_ev3, ev3);
+                loader_dng_exposure_changed();
+            }
+        }
+        break;
 #ifdef NV_VECTOR
     case L'[': show_page(-1); break;   // the pages of a multi-page CorelDRAW drawing
     case L']': show_page(1); break;
@@ -2119,6 +2187,17 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         loader_reap();
         if ((int)wp >= 0) image_decoded((int)wp);
         return 0;
+    case WM_APP_DNG: {
+        DngJob *j = (DngJob *)wp;
+        if (j->d && loader_replace_image(j->index, j->old, j->d) && j->index == V.index) {
+            update_title();
+            redraw();
+        }
+        free(j->path);
+        free(j);
+        loader_reap();
+        return 0;
+    }
 #ifdef NV_VECTOR
     case WM_APP_DETAIL: detail_done((DetailJob *)wp); return 0;
     case WM_APP_PAGE: page_done((PageJob *)wp); return 0;
@@ -2525,6 +2604,7 @@ static void usage(void) {
         "  2 .. 8                  200%% .. 800%%, pixel-exact (1 image pixel = NxN screen pixels)\n"
         "  arrows                  move a zoomed image (Shift: bigger steps)\n"
         "  W                       back to the image's own size (small images 100%%, window follows)\n"
+        "  E / Shift+E             DNG raw image: brighter / darker (1/3 EV steps, kept while paging)\n"
         "mouse:\n"
         "  drag                    move a zoomed image\n"
         "  wheel                   zoom around the cursor (touchpad: smooth, pinch too)\n"

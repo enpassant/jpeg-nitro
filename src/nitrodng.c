@@ -1005,7 +1005,7 @@ int ndng_decode(const uint8_t *data, size_t len, const ndng_info *in, uint8_t *b
         float range = in->white - in->black[i];
         scale[i] = range > 0 ? (float)(wb[in->cfa[i]] / wbmin / range) : 0;
     }
-    float exposure = powf(2.0f, MIN(MAX(in->exposure, -8.0f), 8.0f));
+    float exposure = powf(2.0f, MIN(MAX(in->exposure + in->ev, -8.0f), 8.0f));
     float m[9];
     for (int i = 0; i < 9; i++) m[i] = (float)rgb_cam[i] * exposure;
     // linear 0..2 -> sRGB 8-bit, through a simple tone curve: raw converters brighten the mid
