@@ -55,11 +55,12 @@ typedef struct {
 // Parses the headers. Returns 0 if the file is a JPEG we could read at all.
 int nj_read_info(const uint8_t *data, size_t len, nj_info *info);
 
-// Camera raw files (TIFF-based: Canon CR2, Nikon NEF and others whose first image is
-// a reduced one): the full-size JPEG the camera stored beside the raw data (CR2: the
-// first image; others: the biggest JPEG of the directories and SubIFDs). Returns
-// 0 and its byte range and the EXIF orientation (1..8) if there is one; the
-// JPEG itself has no EXIF, so the orientation comes from here. It is sRGB (also
+// Camera raw files (TIFF-based: Canon CR2, Nikon NEF, Sony ARW and others whose first
+// image is a reduced one; Fujifilm RAF): the big JPEG the camera stored beside the raw
+// data (CR2: the first image; RAF: the one its header points to; others: the biggest
+// JPEG of the directories and SubIFDs). Returns 0 and its byte range and the EXIF
+// orientation (1..8) of the raw file (the JPEG itself has none; RAF: 0, its JPEG has
+// its own EXIF). It is sRGB (also
 // when the camera is set to Adobe RGB). data may be just the start of the file
 // (for the header): the range can then run past len.
 int nj_find_embedded(const uint8_t *data, size_t len, size_t *offset, size_t *size, int *orientation);

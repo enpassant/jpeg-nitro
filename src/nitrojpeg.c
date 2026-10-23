@@ -441,6 +441,16 @@ static void tiff_jpeg(const Tiff *t, uint32_t ifd, uint32_t *best_off, uint32_t 
 }
 
 int nj_find_embedded(const uint8_t *data, size_t len, size_t *offset, size_t *size, int *orientation) {
+    if (len >= 92 && !memcmp(data, "FUJIFILMCCD-RAW ", 16)) {
+        // Fujifilm RAF: the JPEG's offset and length at 84 (big-endian); it has its own EXIF
+        uint32_t off = (uint32_t)data[84] << 24 | (uint32_t)data[85] << 16 | (uint32_t)data[86] << 8 | data[87];
+        uint32_t cnt = (uint32_t)data[88] << 24 | (uint32_t)data[89] << 16 | (uint32_t)data[90] << 8 | data[91];
+        if (off < 92 || cnt < 4 || (off < len - 2 && !(data[off] == 0xFF && data[off + 1] == 0xD8))) return -1;
+        *offset = off;
+        *size = cnt;
+        *orientation = 0;   // (the JPEG's own)
+        return 0;
+    }
     if (len < 16 || !(data[0] == data[1] && (data[0] == 'I' || data[0] == 'M'))) return -1;
     Tiff t = {data, len, data[0] == 'I'};
     if (tiff16(&t, 2) != 42) return -1;

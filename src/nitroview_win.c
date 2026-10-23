@@ -296,7 +296,7 @@ static int has_ext(const wchar_t *path, const wchar_t *const *exts) {
     return 0;
 }
 static const wchar_t *const g_exts[] = {L"jpg", L"jpeg", L"jpe", L"jfif", L"png", L"heic", L"heif", L"tif", L"tiff",
-                                        L"webp", L"gif", L"bmp", L"psd", L"psb", L"cr2", L"nef", L"nrw",
+                                        L"webp", L"gif", L"bmp", L"psd", L"psb", L"cr2", L"nef", L"nrw", L"arw", L"raf", L"dng",
 #ifdef NV_SVG
                                         L"svg",
 #endif
@@ -865,7 +865,7 @@ done:
 // full-size JPEG nitrojpeg finds there, not the raw data (most of the 10-30 MB); with the zero
 // padding read_file leaves. NULL if there is no such JPEG (the caller reads it all).
 static uint8_t *read_raw_jpeg(const wchar_t *path, size_t *len, int *orientation) {
-    static const wchar_t *const e[] = {L"cr2", L"nef", L"nrw", NULL};
+    static const wchar_t *const e[] = {L"cr2", L"nef", L"nrw", L"arw", L"raf", NULL};
     if (!has_ext(path, e)) return NULL;
     HANDLE f = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
     if (f == INVALID_HANDLE_VALUE) return NULL;
@@ -996,8 +996,11 @@ static Decoded *decode_file(const wchar_t *path) {
         }
     }
     // a camera raw (CR2, NEF ...) shows its full-size JPEG (nitrojpeg finds it): only that is read
-    int raw_orientation = 0, orient = 0;
-    if (!data && (data = read_raw_jpeg(path, &len, &orient))) raw_orientation = orient;
+    int raw_orientation = 0, orient = 0, raw_read = 0;
+    if (!data && (data = read_raw_jpeg(path, &len, &orient))) {
+        raw_orientation = orient;   // (0: the JPEG's own, RAF)
+        raw_read = 1;
+    }
     if (!data) data = read_file(path, &len);
     if (!data) return NULL;
     double t1 = now_ms();
@@ -1007,7 +1010,7 @@ static Decoded *decode_file(const wchar_t *path) {
     uint8_t *buf = NULL;
     size_t cap = 0;
     size_t eoff, esize;
-    if (!raw_orientation && !nj_find_embedded(data, len, &eoff, &esize, &orient) && eoff < len && esize <= len - eoff) {
+    if (!raw_read && !nj_find_embedded(data, len, &eoff, &esize, &orient) && eoff < len && esize <= len - eoff) {
         memmove(data, data + eoff, esize);   // (a raw file with another extension: read whole)
         memset(data + esize, 0, 64);         // (the zero padding read_file leaves after the data)
         len = esize;
@@ -2208,7 +2211,7 @@ static int header_size(const wchar_t *path, double *w, double *h) {
             jn = got;
         }
         if (!nj_read_info(jp, jn, &ji)) {
-            int swap = raw_orientation >= 5;
+            int swap = (raw_orientation ? raw_orientation : ji.orientation) >= 5;   // (RAF: the JPEG's own)
             *w = swap ? ji.height : ji.width;
             *h = swap ? ji.width : ji.height;
             return 1;
@@ -2290,7 +2293,7 @@ static int create_window(const wchar_t *first) {
 // file association (--register / --unregister): for the current user, no admin rights
 
 static const wchar_t *const g_assoc_exts[] = {L".jpg", L".jpeg", L".jpe", L".jfif", L".png", L".psd", L".psb", L".heic",
-                                              L".heif", L".tif", L".tiff", L".webp", L".gif", L".bmp", L".cr2", L".nef", L".nrw",
+                                              L".heif", L".tif", L".tiff", L".webp", L".gif", L".bmp", L".cr2", L".nef", L".nrw", L".arw", L".raf", L".dng",
 #ifdef NV_SVG
                                               L".svg",
 #endif

@@ -34,6 +34,9 @@
                 <string>com.canon.cr2-raw-image</string>
                 <string>com.nikon.raw-image</string>
                 <string>com.nikon.nrw-raw-image</string>
+                <string>com.sony.arw-raw-image</string>
+                <string>com.fuji.raw-image</string>
+                <string>com.adobe.raw-image</string>
                 <string>public.svg-image</string>
                 <string>com.corel.cdr</string>
                 <string>com.corel.cmx</string>

@@ -549,13 +549,17 @@ static Decoded *decode_file(NSString *path, BufferPool *pool, size_t align) {
     }
     // a camera raw (CR2, NEF ...) shows its full-size JPEG (nitrojpeg finds it): only that is read
     int raw_orientation = 0, orient = 0;
-    if (!data && ([ext isEqualToString:@"cr2"] || [ext isEqualToString:@"nef"] || [ext isEqualToString:@"nrw"]) &&
-        (data = read_raw_jpeg(path, &orient)))
-        raw_orientation = orient;
+    static NSSet *raw_exts;
+    if (!raw_exts) raw_exts = [NSSet setWithArray:@[@"cr2", @"nef", @"nrw", @"arw", @"raf"]];
+    int raw_read = 0;
+    if (!data && [raw_exts containsObject:ext] && (data = read_raw_jpeg(path, &orient))) {
+        raw_orientation = orient;   // (0: the JPEG's own, RAF)
+        raw_read = 1;
+    }
     if (!data) data = read_file(path);
     if (!data) return nil;
     size_t eoff, esize;
-    if (!raw_orientation && !nj_find_embedded(data.bytes, data.length, &eoff, &esize, &orient) && eoff < data.length &&
+    if (!raw_read && !nj_find_embedded(data.bytes, data.length, &eoff, &esize, &orient) && eoff < data.length &&
         esize <= data.length - eoff) {   // (a raw file with another extension: read whole)
         data = [data subdataWithRange:NSMakeRange(eoff, esize)];
         raw_orientation = orient;
@@ -1910,7 +1914,7 @@ static NSArray<NSString *> *collect_files(NSArray<NSString *> *args) {
             NSString *ext = f.pathExtension.lowercaseString;
             static NSSet *exts;
             if (!exts) exts = [NSSet setWithArray:@[@"jpg", @"jpeg", @"jpe", @"png", @"heic", @"heif", @"tif", @"tiff",
-                                                    @"webp", @"gif", @"bmp", @"psd", @"psb", @"cr2", @"nef", @"nrw",
+                                                    @"webp", @"gif", @"bmp", @"psd", @"psb", @"cr2", @"nef", @"nrw", @"arw", @"raf", @"dng",
 #ifdef NV_SVG
                                                     @"svg",
 #endif
@@ -2242,7 +2246,7 @@ static BOOL header_size(NSString *path, double *w, double *h) {
     }
     int ok = raw ? !nj_read_info(buf + eoff, n - eoff, &fi) && fi.width > 0 && fi.height > 0
                  : !nj_read_info(buf, n, &fi) && fi.width > 0 && fi.height > 0;
-    if (raw && ok) fi.orientation = raw_orientation;
+    if (raw && ok && raw_orientation) fi.orientation = raw_orientation;   // (RAF: the JPEG's own)
     free(buf);
     if (!ok && n == cap) {   // unusually large header: try the whole file
         NSData *all = read_file(path);
