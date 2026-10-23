@@ -3,9 +3,13 @@
 // nitrowebp: lossy WebP images (a VP8 key frame) decoded into planar Y/Cb/Cr, written from the
 // VP8 specification (RFC 6386) and the WebP container format, without dependencies.
 //
+// The coefficient tokens are one serial stream (WebP encoders write a single token partition):
+// they are parsed on one thread while another parses the modes (a stream of their own) and a
+// third reconstructs the rows behind them, so a picture takes about as long as its tokens.
+//
 // Work in progress: no loop filter (the picture is decoded before it; intra prediction uses the
 // unfiltered pixels, so leaving it out changes only the block edges). Not handled (returns an
-// error: use another decoder): lossless WebP (VP8L), alpha, animation, damaged files.
+// error: use another decoder): lossless WebP (VP8L), alpha, animation.
 #ifndef NITROWEBP_H
 #define NITROWEBP_H
 

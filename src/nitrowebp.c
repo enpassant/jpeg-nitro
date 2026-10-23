@@ -4,6 +4,7 @@
 #include "nitrowebp.h"
 #include "nitro_os.h"
 
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -517,7 +518,7 @@ int nw_read_info(const uint8_t *d, size_t len, nw_info *in) {
     for (size_t p = 12; p + 8 <= end;) {
         size_t n = le32(d + p + 4);
         const uint8_t *c = d + p + 8;
-        if (n > end - p - 8) return -1;
+        if (n > end - p - 8) n = end - p - 8;   // (a cut file: what there is; the rest decodes as zeros)
         if (!memcmp(d + p, "VP8 ", 4)) {
             if (!in->vp8) {
                 in->vp8 = c;
@@ -553,22 +554,30 @@ int nw_read_info(const uint8_t *d, size_t len, nw_info *in) {
 // boolean entropy decoder (RFC 6386 section 7)
 
 typedef struct {
+    uint64_t value;   // coded bits not yet consumed; the current window is value >> bits (< range)
+    int bits;         // bits below the window
+    uint32_t range;   // range - 1
     const uint8_t *p, *end;
-    uint64_t value;   // the coded bits, the active ones at the top
-    int count;        // bits in value below the top 8
-    uint32_t range;
 } Bool;
 
-static void bool_fill(Bool *b) {
-    int shift = 48 - b->count;
-    while (shift >= 0) {
-        if (b->p >= b->end) {   // past the end: zeros
-            b->count += 0x4000;
-            return;
-        }
-        b->count += 8;
-        b->value |= (uint64_t)*b->p++ << shift;
-        shift -= 8;
+static void bool_load(Bool *b) {   // more bits below the window
+    if (b->end - b->p >= 8) {
+        uint64_t w;
+        memcpy(&w, b->p, 8);
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+        w >>= 8;
+#else
+        w = __builtin_bswap64(w) >> 8;
+#endif
+        b->value = b->value << 56 | w;   // (7 bytes)
+        b->p += 7;
+        b->bits += 56;
+    } else if (b->p < b->end) {
+        b->value = b->value << 8 | *b->p++;
+        b->bits += 8;
+    } else {   // past the end: zeros
+        b->value <<= 8;
+        b->bits += 8;
     }
 }
 
@@ -576,27 +585,33 @@ static void bool_init(Bool *b, const uint8_t *p, size_t n) {
     b->p = p;
     b->end = p + n;
     b->value = 0;
-    b->count = -8;
-    b->range = 255;
-    bool_fill(b);
+    b->bits = -8;
+    b->range = 254;
+    bool_load(b);
 }
 
-static inline int bool_get(Bool *b, int prob) {
-    uint32_t split = 1 + (((b->range - 1) * (uint32_t)prob) >> 8);
-    if (b->count < 0) bool_fill(b);
-    uint64_t big = (uint64_t)split << 56;
-    int bit = b->value >= big;
-    if (bit) {
-        b->range -= split;
-        b->value -= big;
-    } else {
-        b->range = split;
-    }
-    int shift = __builtin_clz(b->range) - 24;
-    b->range <<= shift;
-    b->value <<= shift;
-    b->count -= shift;
+static inline int bool_get(Bool *b, int prob) {   // (without a branch on the bit: selects)
+    if (b->bits < 0) bool_load(b);
+    uint32_t split = (b->range * (uint32_t)prob) >> 8;   // (the split point - 1)
+    int bit = (uint32_t)(b->value >> b->bits) > split;
+    uint32_t range = bit ? b->range - split : split + 1;
+    b->value -= bit ? (uint64_t)(split + 1) << b->bits : 0;
+    int shift = __builtin_clz(range) - 24;   // to 128..255 again
+    b->range = (range << shift) - 1;
+    b->bits -= shift;
     return bit;
+}
+
+static inline int bool_sign(Bool *b, int v) {   // v, negative if the next bit (probability 1/2) is set
+    if (b->bits < 0) bool_load(b);
+    uint32_t split = b->range >> 1;
+    int bit = (uint32_t)(b->value >> b->bits) > split;
+    uint32_t range = bit ? b->range - split : split + 1;   // (64..128: one shift at most)
+    b->value -= bit ? (uint64_t)(split + 1) << b->bits : 0;
+    int shift = range < 128;
+    b->range = (range << shift) - 1;
+    b->bits -= shift;
+    return bit ? -v : v;
 }
 
 static int bool_literal(Bool *b, int n) {
@@ -750,7 +765,7 @@ static int get_coeffs(Bool *b, const uint8_t (*prob)[3][11], int ctx, const int 
             }
             ctx2 = 2;
         }
-        out[zigzag[n]] = (int16_t)((bool_get(b, 128) ? -v : v) * dq[n > 0]);
+        out[zigzag[n]] = (int16_t)(bool_sign(b, v) * dq[n > 0]);
         if (++n == 16) return 16;
         p = prob[coeff_bands[n]][ctx2];
         if (!bool_get(b, p[0])) return n;   // end of block
@@ -1005,121 +1020,217 @@ static void add_residual(int16_t *c, const uint8_t *end, int k, uint8_t *dst) {
     }
 }
 
+// Reconstruction state: the unfiltered row above (the bottom pixels of the macroblocks above) and
+// the work buffers with the edges of the current macroblock.
+typedef struct {
+    int mbw, mbh, W, H;
+    uint8_t *planes[3];
+    size_t pitch[3];
+    uint8_t *top_y, *top_u, *top_v;
+    uint8_t ywork[17 * BPS], uwork[9 * BPS], vwork[9 * BPS];
+} Recon;
+
+// Predicts and reconstructs macroblock row my (modes m, coefficients c: 25 * 16 per macroblock,
+// cleared again here) into the planes.
+static void recon_row(Recon *r, int my, const Modes *ms, int16_t *coeffs, uint8_t *ends) {
+    uint8_t *Y = r->ywork + BPS + 8, *U = r->uwork + BPS + 8, *V = r->vwork + BPS + 8;
+    uint8_t *top_y = r->top_y, *top_u = r->top_u, *top_v = r->top_v;
+    int mbw = r->mbw, W = r->W, H = r->H, cw = (W + 1) / 2, ch = (H + 1) / 2;
+    uint8_t tl_y = my ? 129 : 127, tl_u = tl_y, tl_v = tl_y;   // top-left pixel (above the left column: 127 / 129)
+    for (int mx = 0; mx < mbw; mx++) {
+        const Modes *m = &ms[mx];
+        int16_t *c = coeffs + (size_t)mx * 25 * 16;
+        uint8_t *end = ends + (size_t)mx * 25;
+        // the edges: row above (127 on the top row), left column (129 at the left edge)
+        Y[-BPS - 1] = tl_y;
+        U[-BPS - 1] = tl_u;
+        V[-BPS - 1] = tl_v;
+        if (my) {
+            tl_y = top_y[16 * mx + 15];
+            tl_u = top_u[8 * mx + 7];
+            tl_v = top_v[8 * mx + 7];
+            memcpy(Y - BPS, top_y + 16 * mx, 16);
+            memcpy(U - BPS, top_u + 8 * mx, 8);
+            memcpy(V - BPS, top_v + 8 * mx, 8);
+            if (mx < mbw - 1) memcpy(Y - BPS + 16, top_y + 16 * mx + 16, 4);
+            else memset(Y - BPS + 16, top_y[16 * mx + 15], 4);
+        } else {
+            memset(Y - BPS, 127, 20);
+            memset(U - BPS, 127, 8);
+            memset(V - BPS, 127, 8);
+        }
+        for (int k = 3; k < 16; k += 4) memcpy(Y + k * BPS + 16, Y - BPS + 16, 4);   // top-right for subblocks 7, 11, 15
+        if (!mx) {
+            for (int i = 0; i < 16; i++) Y[i * BPS - 1] = 129;
+            for (int i = 0; i < 8; i++) U[i * BPS - 1] = V[i * BPS - 1] = 129;
+        }   // (else: still the right column of the macroblock before)
+        // luma
+        if (m->ymode == B_PRED) {
+            for (int k = 0; k < 16; k++) {
+                uint8_t *d = Y + (k >> 2) * 4 * BPS + (k & 3) * 4;
+                predict_sub(d, m->bmodes[k]);
+                add_residual(c, end, k, d);
+            }
+        } else {
+            predict_block(Y, 16, m->ymode, my > 0, mx > 0);
+            if (end[24]) {
+                inv_wht(c + 24 * 16, c);
+                memset(c + 24 * 16, 0, 32);
+                for (int k = 0; k < 16; k++) end[k] = MAX(end[k], 1);   // (the DC from the Y2 block)
+            }
+            for (int k = 0; k < 16; k++) add_residual(c, end, k, Y + (k >> 2) * 4 * BPS + (k & 3) * 4);
+        }
+        // chroma
+        predict_block(U, 8, m->uvmode, my > 0, mx > 0);
+        predict_block(V, 8, m->uvmode, my > 0, mx > 0);
+        for (int k = 0; k < 4; k++) {
+            add_residual(c, end, 16 + k, U + (k >> 1) * 4 * BPS + (k & 1) * 4);
+            add_residual(c, end, 20 + k, V + (k >> 1) * 4 * BPS + (k & 1) * 4);
+        }
+        // out (cropped), and the edges for the next macroblocks
+        for (int k = 0; k < 16 && 16 * my + k < H; k++)
+            memcpy(r->planes[0] + (size_t)(16 * my + k) * r->pitch[0] + 16 * mx, Y + k * BPS, (size_t)MIN(16, W - 16 * mx));
+        for (int k = 0; k < 8 && 8 * my + k < ch; k++) {
+            memcpy(r->planes[1] + (size_t)(8 * my + k) * r->pitch[1] + 8 * mx, U + k * BPS, (size_t)MIN(8, cw - 8 * mx));
+            memcpy(r->planes[2] + (size_t)(8 * my + k) * r->pitch[2] + 8 * mx, V + k * BPS, (size_t)MIN(8, cw - 8 * mx));
+        }
+        memcpy(top_y + 16 * mx, Y + 15 * BPS, 16);
+        memcpy(top_u + 8 * mx, U + 7 * BPS, 8);
+        memcpy(top_v + 8 * mx, V + 7 * BPS, 8);
+        for (int i = 0; i < 16; i++) Y[i * BPS - 1] = Y[i * BPS + 15];
+        for (int i = 0; i < 8; i++) {
+            U[i * BPS - 1] = U[i * BPS + 7];
+            V[i * BPS - 1] = V[i * BPS + 7];
+        }
+    }
+}
+
+static void parse_mode_row(Frame *f, Modes *ms, uint8_t *top_b) {   // (the first partition)
+    uint8_t left_b[4] = {0};
+    for (int mx = 0; mx < f->mbw; mx++) parse_modes(f, &ms[mx], top_b + 4 * mx, left_b);
+}
+
+// The coefficients of macroblock row my (modes ms) into coeffs / ends (see recon_row).
+static void parse_token_row(Frame *f, int my, const Modes *ms, int16_t *coeffs, uint8_t *ends, Nz *top_nz) {
+    Nz left_nz;
+    memset(&left_nz, 0, sizeof left_nz);
+    Bool *tb = &f->part[my % f->nparts];
+    for (int mx = 0; mx < f->mbw; mx++) {
+        const Modes *m = &ms[mx];
+        uint8_t *end = ends + (size_t)mx * 25;
+        if (!m->skip) {
+            parse_coeffs(tb, f, m, &top_nz[mx], &left_nz, coeffs + (size_t)mx * 25 * 16, end);
+        } else {
+            memset(end, 0, 25);
+            memset(top_nz[mx].y, 0, 4);
+            memset(top_nz[mx].u, 0, 2);
+            memset(top_nz[mx].v, 0, 2);
+            memset(left_nz.y, 0, 4);
+            memset(left_nz.u, 0, 2);
+            memset(left_nz.v, 0, 2);
+            if (m->ymode != B_PRED) top_nz[mx].y2 = left_nz.y2 = 0;
+        }
+    }
+}
+
+#define RING 8   // macroblock rows parsed ahead of the reconstruction
+
+// Three jobs: the modes (the first partition), the coefficient tokens (one serial stream: the
+// slowest part) and the reconstruction of the rows behind them. Whoever finds the ring full or
+// the parsing done reconstructs (one at a time, in order); jobs only wait for the ones before
+// them, so they also finish when they run one after the other on one thread.
+typedef struct {
+    _Atomic int modes, parsed, done, busy;   // rows with modes, rows parsed, rows reconstructed, someone reconstructing
+    Recon *r;
+    Modes *m;                                // the modes of all macroblocks
+    int16_t *ring_c;                         // the ring of parsed rows (coefficients stay zero
+    uint8_t *ring_e;                         // outside the blocks being used)
+} Pipe;
+
+static int recon_some(Pipe *p) {   // the parsed rows not yet reconstructed; 0: someone else is at it
+    if (atomic_exchange(&p->busy, 1)) return 0;
+    int d = atomic_load(&p->done), n = atomic_load_explicit(&p->parsed, memory_order_acquire);
+    size_t mbw = (size_t)p->r->mbw;
+    for (; d < n; d++) {
+        size_t s = (size_t)(d % RING);
+        recon_row(p->r, d, p->m + (size_t)d * mbw, p->ring_c + s * mbw * 25 * 16, p->ring_e + s * mbw * 25);
+        atomic_store_explicit(&p->done, d + 1, memory_order_release);
+    }
+    atomic_store(&p->busy, 0);
+    return 1;
+}
+
 int nw_decode_planes(const uint8_t *data, size_t len, const nw_info *info, uint8_t *const planes[3],
                      const size_t pitch[3], int nthreads) {
     (void)data;
     (void)len;
-    (void)nthreads;
     Frame *f = malloc(sizeof *f);
-    if (!f) return -1;
-    if (parse_header(f, info->vp8, info->vp8_len, info->width, info->height)) {
+    Recon *r = calloc(1, sizeof *r);
+    if (!f || !r || parse_header(f, info->vp8, info->vp8_len, info->width, info->height)) {
         free(f);
+        free(r);
         return -1;
     }
-    int mbw = f->mbw, mbh = f->mbh, W = info->width, H = info->height;
-    // the unfiltered row above (bottom pixels of the macroblocks above) and per-column contexts
-    uint8_t *top_y = malloc((size_t)mbw * 16 + 4), *top_u = malloc((size_t)mbw * 8), *top_v = malloc((size_t)mbw * 8);
-    uint8_t *top_b = calloc((size_t)mbw, 4);
-    Nz *top_nz = calloc((size_t)mbw, sizeof(Nz));
-    int rc = -1;
-    if (!top_y || !top_u || !top_v || !top_b || !top_nz) goto done;
-    uint8_t ywork[17 * BPS], uwork[9 * BPS], vwork[9 * BPS];
-    uint8_t *Y = ywork + BPS + 8, *U = uwork + BPS + 8, *V = vwork + BPS + 8;
-    int16_t coeffs[25 * 16];
-    uint8_t end[25];
-    memset(coeffs, 0, sizeof coeffs);
-    for (int my = 0; my < mbh; my++) {
-        uint8_t left_b[4] = {0};
-        Nz left_nz;
-        memset(&left_nz, 0, sizeof left_nz);
-        Bool *tb = &f->part[my % f->nparts];
-        uint8_t tl_y = my ? 129 : 127, tl_u = tl_y, tl_v = tl_y;   // top-left pixel (above the left column: 127 / 129)
-        for (int mx = 0; mx < mbw; mx++) {
-            Modes m;
-            parse_modes(f, &m, top_b + 4 * mx, left_b);
-            if (!m.skip) {
-                parse_coeffs(tb, f, &m, &top_nz[mx], &left_nz, coeffs, end);
-            } else {
-                memset(end, 0, sizeof end);
-                memset(top_nz[mx].y, 0, 4);
-                memset(top_nz[mx].u, 0, 2);
-                memset(top_nz[mx].v, 0, 2);
-                memset(left_nz.y, 0, 4);
-                memset(left_nz.u, 0, 2);
-                memset(left_nz.v, 0, 2);
-                if (m.ymode != B_PRED) top_nz[mx].y2 = left_nz.y2 = 0;
-            }
-            // the edges: row above (127 on the top row), left column (129 at the left edge)
-            Y[-BPS - 1] = tl_y;
-            U[-BPS - 1] = tl_u;
-            V[-BPS - 1] = tl_v;
-            if (my) {
-                tl_y = top_y[16 * mx + 15];
-                tl_u = top_u[8 * mx + 7];
-                tl_v = top_v[8 * mx + 7];
-                memcpy(Y - BPS, top_y + 16 * mx, 16);
-                memcpy(U - BPS, top_u + 8 * mx, 8);
-                memcpy(V - BPS, top_v + 8 * mx, 8);
-                if (mx < mbw - 1) memcpy(Y - BPS + 16, top_y + 16 * mx + 16, 4);
-                else memset(Y - BPS + 16, top_y[16 * mx + 15], 4);
-            } else {
-                memset(Y - BPS, 127, 20);
-                memset(U - BPS, 127, 8);
-                memset(V - BPS, 127, 8);
-            }
-            for (int r = 3; r < 16; r += 4) memcpy(Y + r * BPS + 16, Y - BPS + 16, 4);   // top-right for subblocks 7, 11, 15
-            if (!mx) {
-                for (int i = 0; i < 16; i++) Y[i * BPS - 1] = 129;
-                for (int i = 0; i < 8; i++) U[i * BPS - 1] = V[i * BPS - 1] = 129;
-            }   // (else: still the right column of the macroblock before)
-            // luma
-            if (m.ymode == B_PRED) {
-                for (int k = 0; k < 16; k++) {
-                    uint8_t *d = Y + (k >> 2) * 4 * BPS + (k & 3) * 4;
-                    predict_sub(d, m.bmodes[k]);
-                    add_residual(coeffs, end, k, d);
-                }
-            } else {
-                predict_block(Y, 16, m.ymode, my > 0, mx > 0);
-                if (!m.skip && end[24]) {
-                    inv_wht(coeffs + 24 * 16, coeffs);
-                    memset(coeffs + 24 * 16, 0, 32);
-                    for (int k = 0; k < 16; k++) end[k] = MAX(end[k], 1);   // (the DC from the Y2 block)
-                }
-                for (int k = 0; k < 16; k++) add_residual(coeffs, end, k, Y + (k >> 2) * 4 * BPS + (k & 3) * 4);
-            }
-            // chroma
-            predict_block(U, 8, m.uvmode, my > 0, mx > 0);
-            predict_block(V, 8, m.uvmode, my > 0, mx > 0);
-            for (int k = 0; k < 4; k++) {
-                add_residual(coeffs, end, 16 + k, U + (k >> 1) * 4 * BPS + (k & 1) * 4);
-                add_residual(coeffs, end, 20 + k, V + (k >> 1) * 4 * BPS + (k & 1) * 4);
-            }
-            // out (cropped), and the edges for the next macroblocks
-            for (int r = 0; r < 16 && 16 * my + r < H; r++)
-                memcpy(planes[0] + (size_t)(16 * my + r) * pitch[0] + 16 * mx, Y + r * BPS, (size_t)MIN(16, W - 16 * mx));
-            int cw = (W + 1) / 2, ch = (H + 1) / 2;
-            for (int r = 0; r < 8 && 8 * my + r < ch; r++) {
-                memcpy(planes[1] + (size_t)(8 * my + r) * pitch[1] + 8 * mx, U + r * BPS, (size_t)MIN(8, cw - 8 * mx));
-                memcpy(planes[2] + (size_t)(8 * my + r) * pitch[2] + 8 * mx, V + r * BPS, (size_t)MIN(8, cw - 8 * mx));
-            }
-            memcpy(top_y + 16 * mx, Y + 15 * BPS, 16);
-            memcpy(top_u + 8 * mx, U + 7 * BPS, 8);
-            memcpy(top_v + 8 * mx, V + 7 * BPS, 8);
-            for (int i = 0; i < 16; i++) Y[i * BPS - 1] = Y[i * BPS + 15];
-            for (int i = 0; i < 8; i++) {
-                U[i * BPS - 1] = U[i * BPS + 7];
-                V[i * BPS - 1] = V[i * BPS + 7];
-            }
-        }
+    int mbw = f->mbw, mbh = f->mbh;
+    r->mbw = mbw;
+    r->mbh = mbh;
+    r->W = info->width;
+    r->H = info->height;
+    for (int k = 0; k < 3; k++) {
+        r->planes[k] = planes[k];
+        r->pitch[k] = pitch[k];
     }
-    rc = 0;
-done:
-    free(top_y);
-    free(top_u);
-    free(top_v);
+    r->top_y = malloc((size_t)mbw * 16 + 4);
+    r->top_u = malloc((size_t)mbw * 8);
+    r->top_v = malloc((size_t)mbw * 8);
+    uint8_t *top_b = calloc((size_t)mbw, 4);   // parsing: per-column contexts
+    Nz *top_nz = calloc((size_t)mbw, sizeof(Nz));
+    // the ring of parsed rows (coefficients stay zero outside the blocks being used)
+    Modes *modes = malloc(sizeof(Modes) * (size_t)mbw * mbh);
+    int16_t *ring_c = calloc((size_t)mbw * RING * 25 * 16, sizeof(int16_t));
+    uint8_t *ring_e = malloc((size_t)mbw * RING * 25);
+    int rc = -1;
+    if (r->top_y && r->top_u && r->top_v && top_b && top_nz && modes && ring_c && ring_e) {
+        Pipe pipe = {0, 0, 0, 0, r, modes, ring_c, ring_e}, *pp = &pipe;
+        Frame *pf = f;
+        nitro_body job = ^(size_t j) {
+            if (j == 0) {
+                for (int my = 0; my < mbh; my++) {
+                    parse_mode_row(pf, modes + (size_t)my * mbw, top_b);
+                    atomic_store_explicit(&pp->modes, my + 1, memory_order_release);
+                }
+                return;
+            }
+            if (j == 1) {
+                for (int my = 0; my < mbh; my++) {
+                    while (atomic_load_explicit(&pp->modes, memory_order_acquire) <= my) nitro_yield();
+                    while (my - atomic_load_explicit(&pp->done, memory_order_acquire) >= RING)
+                        if (!recon_some(pp)) nitro_yield();
+                    size_t s = (size_t)(my % RING);
+                    parse_token_row(pf, my, modes + (size_t)my * mbw, ring_c + s * mbw * 25 * 16, ring_e + s * mbw * 25, top_nz);
+                    atomic_store_explicit(&pp->parsed, my + 1, memory_order_release);
+                }
+            }
+            while (atomic_load(&pp->done) < mbh) {
+                int d = atomic_load(&pp->done);
+                if (!recon_some(pp) || atomic_load(&pp->done) == d) nitro_yield();
+            }
+        };
+        if (nthreads == 1)
+            for (size_t j = 0; j < 3; j++) job(j);
+        else
+            nitro_parallel(3, job);
+        rc = 0;
+    }
+    free(r->top_y);
+    free(r->top_u);
+    free(r->top_v);
     free(top_b);
     free(top_nz);
+    free(modes);
+    free(ring_c);
+    free(ring_e);
     free(f);
+    free(r);
     return rc;
 }
