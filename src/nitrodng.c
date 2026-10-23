@@ -453,6 +453,8 @@ typedef struct {
     size_t sync, bridge;    // its first right code; codes from the end of the part before up to it
     uint64_t start;         // the real code run of the part: from here (the end of the part before) ...
     size_t off, n;          // ... n codes, the samples at off
+    uint16_t *diff;         // the differences decoded in step 1
+    size_t cap;
 } Part;
 
 // From p, the real start of part c, up to its first right code: *j its index, *br the codes up
@@ -487,20 +489,39 @@ static int scan_parallel(const uint8_t *d, size_t n, const Huff *hf, uint16_t *o
         return -1;
     }
     Part *pp = parts;
-    // 1. each part from a guessed start: how many codes, where its first ones start
+    // 1. each part from a guessed start: its differences, where its first codes start
+    _Atomic int failed = 0, *pfailed = &failed;
     nitro_parallel(K, ^(size_t k) {
         Part *c = &pp[k];
         uint64_t p = nbits * k / K, end = nbits * (k + 1) / K;
-        size_t cnt = 0;
-        while (p < end) {
+        size_t cnt = 0, cap = (size_t)(end - p) / 8 + 64;   // (grows when needed)
+        uint16_t *df = malloc(cap * 2);
+        while (df && p < end) {
             if (cnt < SYNC_N) c->pos[cnt] = p;
-            udiff(u, ulen, &p, hf);
-            cnt++;
+            if (cnt == cap) {
+                uint16_t *more = realloc(df, cap * 4);
+                if (!more) {
+                    free(df);
+                    df = NULL;
+                    break;
+                }
+                df = more;
+                cap *= 2;
+            }
+            df[cnt++] = (uint16_t)udiff(u, ulen, &p, hf);
         }
+        if (!df) atomic_store(pfailed, 1);
+        c->diff = df;
         c->npos = MIN(cnt, SYNC_N);
         c->count = cnt;
         c->end = p;
     });
+    if (atomic_load(&failed)) {
+        for (size_t k = 0; k < K; k++) free(parts[k].diff);
+        free(parts);
+        free(u);
+        return -1;
+    }
     // 2. from the end of the part before (right, once that part met the real codes) up to one of
     // its first codes
     if (K > 1) nitro_parallel(K - 1, ^(size_t i) {
@@ -538,15 +559,25 @@ static int scan_parallel(const uint8_t *d, size_t n, const Huff *hf, uint16_t *o
         start = end;
     }
     if (off < total) parts[K - 1].n += total - off;   // (a short scan: the zeros after it, as when serial)
-    // 3. the differences, each part from its real start
+    // 3. the differences in place: the codes up to the first right one decoded again, the rest
+    // copied (a part decoded again: all of it)
     nitro_parallel(K, ^(size_t k) {
         Part *c = &pp[k];
         if (c->off >= total) return;
-        size_t m = MIN(c->n, total - c->off);
+        size_t m = MIN(c->n, total - c->off), i = 0;
         uint64_t p = c->start;
         uint16_t *o = out + c->off;
-        for (size_t i = 0; i < m; i++) o[i] = (uint16_t)udiff(u, ulen, &p, hf);
+        if (k == 0 || c->sync != SIZE_MAX) {
+            size_t br = k ? c->bridge : 0;
+            for (; i < MIN(br, m); i++) o[i] = (uint16_t)udiff(u, ulen, &p, hf);
+            size_t cp = MIN(c->count - (k ? c->sync : 0), m - i);
+            memcpy(o + i, c->diff + (k ? c->sync : 0), cp * 2);
+            i += cp;
+            p = c->end;
+        }
+        for (; i < m; i++) o[i] = (uint16_t)udiff(u, ulen, &p, hf);   // (a short scan: the zeros after it)
     });
+    for (size_t k = 0; k < K; k++) free(parts[k].diff);
     free(parts);
     free(u);
     // 4. the samples: predictor 1 (left neighbour) row by row in parallel once the first column is
