@@ -42,9 +42,8 @@ nitroheic (`src/nitroheic.c`): an iPhone photo is a grid of 48 independent HEVC 
 in parallel (Intel: software VideoToolbox decoders, one per core; Apple Silicon: 4 sessions on the
 media engine) into Y/Cb/Cr planes converted on the GPU — 12 MP in ~33 ms instead of ImageIO's ~200 ms
 on an Intel i9 (M1: see [below](#apple-silicon-m1)). Lossy **WebP** images are decoded by nitrowebp
-(`src/nitrowebp.c`: 2× faster than ImageIO on everyday web images, 3–5× on large ones, ~1.6× on very
-high bitrates (quality 90, noise), whose single serial stream of coefficient tokens sets the pace;
-no loop filter yet, which is hard to see). TIFF, lossless or transparent WebP, GIF, BMP and other HEICs open
+(`src/nitrowebp.c`: 2× faster than ImageIO on everyday web images and on 24 MP photos at quality 90,
+3–5× on large web images; no loop filter yet, which is hard to see). TIFF, lossless or transparent WebP, GIF, BMP and other HEICs open
 through Apple ImageIO on macOS, WIC on Windows and GTK's loaders on Linux (see **Windows** and
 **GNOME / Linux** below). On macOS and Windows it also shows vector drawings, **SVG** (lunasvg) and
 **CorelDRAW** CDR / CMX (libcdr, our fork with many fixes), sharp at any zoom and paging as fast
