@@ -30,7 +30,7 @@ Times on an Intel i9. The decoders are fast on ARM too (NEON): on a 2020 M1 MacB
 24 MP JPEG decodes in ~30 ms, ~3× faster than Apple's hardware JPEG decoder on the same machine
 ([Apple Silicon](#apple-silicon-m1)). They are plain C files without dependencies and can be
 used on their own ([Using the decoders](#using-the-decoders)). Photo series such as timelapses can be "played
-back" at full resolution in real time, up to 60 images/s. On macOS and Windows **Canon CR2** raw files show
+back" at full resolution in real time, up to 60 images/s. On macOS and Windows **Canon CR2** and **Nikon NEF** raw files show
 the full-size JPEG the camera stored in them (nitrojpeg, in milliseconds instead of ImageIO's
 150–400 ms; their rotation is honoured). On macOS **HEIC** photos (iPhone) are decoded by
 nitroheic (`src/nitroheic.c`): an iPhone photo is a grid of 48 independent HEVC tiles, decoded here
@@ -512,7 +512,7 @@ if (nj_read_info(data, len, &info) == 0 && info.supported) {
 }
 ```
 
-`nj_find_embedded()` finds the full-size JPEG in a Canon CR2 raw file (with its orientation, which
+`nj_find_embedded()` finds the full-size JPEG in a camera raw file (Canon CR2, Nikon NEF and other TIFF-based ones) (with its orientation, which
 the JPEG itself lacks), to decode the same way.
 
 **nitropng** (`src/nitropng.c/.h`) works the same way: `np_read_info()`, then `np_decode()`

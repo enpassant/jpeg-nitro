@@ -396,36 +396,79 @@ static int parse(const uint8_t *d, size_t len, Jpeg *j) {
     }
 }
 
-// One value (SHORT or LONG) of a TIFF directory entry, 0 if the tag is missing.
-static uint32_t tiff_tag(const uint8_t *d, size_t len, int le, uint32_t ifd, unsigned want) {
-    #define T16(p) (le ? (unsigned)(p)[0] | (unsigned)(p)[1] << 8 : (unsigned)(p)[0] << 8 | (p)[1])
-    if (ifd < 8 || ifd > len - 2) return 0;
-    unsigned n = T16(d + ifd);
-    if (n > (len - ifd - 2) / 12) return 0;
-    for (unsigned i = 0; i < n; i++) {
-        const uint8_t *e = d + ifd + 2 + 12 * i;
-        if (T16(e) != want) continue;
-        unsigned type = T16(e + 2);
-        if (type == 3) return T16(e + 8);
-        return le ? T16(e + 8) | (uint32_t)T16(e + 10) << 16 : (uint32_t)T16(e + 8) << 16 | T16(e + 10);
+typedef struct {
+    const uint8_t *d;
+    size_t len;
+    int le;
+} Tiff;
+
+static uint32_t tiff16(const Tiff *t, size_t o) {
+    if (o > t->len - 2) return 0;
+    const uint8_t *p = t->d + o;
+    return t->le ? (uint32_t)p[0] | (uint32_t)p[1] << 8 : (uint32_t)p[0] << 8 | p[1];
+}
+
+static uint32_t tiff32(const Tiff *t, size_t o) {
+    if (o > t->len - 4) return 0;
+    return t->le ? tiff16(t, o) | tiff16(t, o + 2) << 16 : tiff16(t, o) << 16 | tiff16(t, o + 2);
+}
+
+// The first value (SHORT or LONG) of a tag in a TIFF directory, 0 if the tag is missing; *count
+// (if wanted) its number of values, *where the offset of its value(s).
+static uint32_t tiff_tag(const Tiff *t, uint32_t ifd, unsigned want, uint32_t *count, uint32_t *where) {
+    if (ifd < 8 || ifd > t->len - 2) return 0;
+    uint32_t n = tiff16(t, ifd);
+    if (n > (t->len - ifd - 2) / 12) return 0;
+    for (uint32_t i = 0; i < n; i++) {
+        size_t e = ifd + 2 + 12 * (size_t)i;
+        if (tiff16(t, e) != want) continue;
+        uint32_t type = tiff16(t, e + 2), c = tiff32(t, e + 4);
+        size_t vo = (type == 3 ? 2u : 4u) * (size_t)c <= 4 ? e + 8 : tiff32(t, e + 8);   // (inline or an offset)
+        if (count) *count = c;
+        if (where) *where = (uint32_t)vo;
+        return type == 3 ? tiff16(t, vo) : tiff32(t, vo);
     }
     return 0;
-    #undef T16
+}
+
+// The JPEG (JPEGInterchangeFormat / Length) of a directory: the bigger one wins
+static void tiff_jpeg(const Tiff *t, uint32_t ifd, uint32_t *best_off, uint32_t *best_len) {
+    uint32_t off = tiff_tag(t, ifd, 0x201, NULL, NULL), cnt = tiff_tag(t, ifd, 0x202, NULL, NULL);
+    if (!off || cnt < 4 || cnt <= *best_len) return;
+    if (off < t->len - 2 && !(t->d[off] == 0xFF && t->d[off + 1] == 0xD8)) return;   // (beyond a header: unchecked)
+    *best_off = off;
+    *best_len = cnt;
 }
 
 int nj_find_embedded(const uint8_t *data, size_t len, size_t *offset, size_t *size, int *orientation) {
-    // TIFF header ("II*\0" or "MM\0*") + "CR": a Canon CR2
-    if (len < 16 || !(data[0] == data[1] && (data[0] == 'I' || data[0] == 'M')) || data[8] != 'C' || data[9] != 'R')
-        return -1;
-    int le = data[0] == 'I';
-    uint32_t ifd0 = le ? data[4] | data[5] << 8 | (uint32_t)data[6] << 16 | (uint32_t)data[7] << 24
-                       : (uint32_t)data[4] << 24 | (uint32_t)data[5] << 16 | data[6] << 8 | data[7];
-    uint32_t off = tiff_tag(data, len, le, ifd0, 0x111);   // StripOffsets: the JPEG
-    uint32_t cnt = tiff_tag(data, len, le, ifd0, 0x117);   // StripByteCounts
-    uint32_t orient = tiff_tag(data, len, le, ifd0, 0x112);
-    if (!off || cnt < 4 || off > len - 2 || data[off] != 0xFF || data[off + 1] != 0xD8) return -1;
-    // (it is sRGB even when the camera is set to Adobe RGB: compared with the raw data, the
+    if (len < 16 || !(data[0] == data[1] && (data[0] == 'I' || data[0] == 'M'))) return -1;
+    Tiff t = {data, len, data[0] == 'I'};
+    if (tiff16(&t, 2) != 42) return -1;
+    uint32_t ifd0 = tiff32(&t, 4);
+    uint32_t off = 0, cnt = 0;
+    if (data[8] == 'C' && data[9] == 'R') {
+        // Canon CR2: the JPEG is IFD0's strip (StripOffsets / StripByteCounts)
+        off = tiff_tag(&t, ifd0, 0x111, NULL, NULL);
+        cnt = tiff_tag(&t, ifd0, 0x117, NULL, NULL);
+        if (!off || cnt < 4 || off > len - 2 || data[off] != 0xFF || data[off + 1] != 0xD8) return -1;
+    } else {
+        // other raw files (Nikon NEF ...): IFD0 is a reduced image (NewSubfileType 1), the camera's
+        // JPEGs are in it, the next directories or the SubIFDs; the biggest is the full-size one
+        if (tiff_tag(&t, ifd0, 0xFE, NULL, NULL) != 1) return -1;
+        uint32_t ifd = ifd0;
+        for (int k = 0; k < 4 && ifd; k++) {
+            tiff_jpeg(&t, ifd, &off, &cnt);
+            uint32_t n = 0, where = 0;
+            if (tiff_tag(&t, ifd, 0x14A, &n, &where))   // SubIFDs
+                for (uint32_t i = 0; i < n && i < 8; i++) tiff_jpeg(&t, tiff32(&t, where + 4 * (size_t)i), &off, &cnt);
+            uint32_t entries = tiff16(&t, ifd);
+            ifd = ifd < len - 2 ? tiff32(&t, ifd + 2 + 12 * (size_t)entries) : 0;   // the next directory
+        }
+        if (!off || cnt < 4) return -1;   // (off may lie beyond a header-only len)
+    }
+    // (it is sRGB even when a Canon is set to Adobe RGB: compared with the raw data, the
     // previews of such files look like those of sRGB ones only when shown as sRGB)
+    uint32_t orient = tiff_tag(&t, ifd0, 0x112, NULL, NULL);
     *offset = off;
     *size = cnt;
     *orientation = orient >= 1 && orient <= 8 ? (int)orient : 1;

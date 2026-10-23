@@ -522,8 +522,9 @@ static Decoded *decode_file(NSString *path, BufferPool *pool, size_t align) {
     if (!data) data = read_file(path);
     if (!data) return nil;
     size_t eoff, esize;
-    int raw_orientation = 0;   // a Canon CR2 shows its full-size JPEG (nitrojpeg finds it)
-    if (!nj_find_embedded(data.bytes, data.length, &eoff, &esize, &raw_orientation) && esize <= data.length - eoff)
+    int raw_orientation = 0;   // a camera raw (CR2, NEF ...) shows its full-size JPEG (nitrojpeg finds it)
+    if (!nj_find_embedded(data.bytes, data.length, &eoff, &esize, &raw_orientation) && eoff < data.length &&
+        esize <= data.length - eoff)
         data = [data subdataWithRange:NSMakeRange(eoff, esize)];
     else
         raw_orientation = 0;
@@ -1877,7 +1878,7 @@ static NSArray<NSString *> *collect_files(NSArray<NSString *> *args) {
             NSString *ext = f.pathExtension.lowercaseString;
             static NSSet *exts;
             if (!exts) exts = [NSSet setWithArray:@[@"jpg", @"jpeg", @"jpe", @"png", @"heic", @"heif", @"tif", @"tiff",
-                                                    @"webp", @"gif", @"bmp", @"psd", @"psb", @"cr2",
+                                                    @"webp", @"gif", @"bmp", @"psd", @"psb", @"cr2", @"nef", @"nrw",
 #ifdef NV_SVG
                                                     @"svg",
 #endif
@@ -2199,8 +2200,14 @@ static BOOL header_size(NSString *path, double *w, double *h) {
     fclose(f);
     nj_info fi;
     size_t eoff, esize;
-    int raw_orientation = 0;   // Canon CR2: the header of its JPEG
+    int raw_orientation = 0;   // camera raw (CR2, NEF ...): the header of its JPEG
     int raw = !nj_find_embedded(buf, n, &eoff, &esize, &raw_orientation);
+    if (raw && (eoff >= n || n - eoff < 65536)) {   // the JPEG's header lies beyond what was read: read it
+        FILE *g = fopen(path.fileSystemRepresentation, "rb");
+        n = g && !fseeko(g, (off_t)eoff, SEEK_SET) ? fread(buf, 1, 65536, g) : 0;
+        if (g) fclose(g);
+        eoff = 0;
+    }
     int ok = raw ? !nj_read_info(buf + eoff, n - eoff, &fi) && fi.width > 0 && fi.height > 0
                  : !nj_read_info(buf, n, &fi) && fi.width > 0 && fi.height > 0;
     if (raw && ok) fi.orientation = raw_orientation;

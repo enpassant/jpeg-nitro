@@ -296,7 +296,7 @@ static int has_ext(const wchar_t *path, const wchar_t *const *exts) {
     return 0;
 }
 static const wchar_t *const g_exts[] = {L"jpg", L"jpeg", L"jpe", L"jfif", L"png", L"heic", L"heif", L"tif", L"tiff",
-                                        L"webp", L"gif", L"bmp", L"psd", L"psb", L"cr2",
+                                        L"webp", L"gif", L"bmp", L"psd", L"psb", L"cr2", L"nef", L"nrw",
 #ifdef NV_SVG
                                         L"svg",
 #endif
@@ -973,8 +973,8 @@ static Decoded *decode_file(const wchar_t *path) {
     uint8_t *buf = NULL;
     size_t cap = 0;
     size_t eoff, esize;
-    int raw_orientation = 0;   // a Canon CR2 shows its full-size JPEG (nitrojpeg finds it)
-    if (!nj_find_embedded(data, len, &eoff, &esize, &raw_orientation) && esize <= len - eoff) {
+    int raw_orientation = 0;   // a camera raw (CR2, NEF ...) shows its full-size JPEG (nitrojpeg finds it)
+    if (!nj_find_embedded(data, len, &eoff, &esize, &raw_orientation) && eoff < len && esize <= len - eoff) {
         memmove(data, data + eoff, esize);
         memset(data + esize, 0, 64);   // (the zero padding read_file leaves after the data)
         len = esize;
@@ -2157,12 +2157,29 @@ static int header_size(const wchar_t *path, double *w, double *h) {
     np_info pi;
     ps_info si;
     size_t eoff, esize;
-    int raw_orientation;   // Canon CR2: the header of its JPEG
-    if (!nj_find_embedded(b, n, &eoff, &esize, &raw_orientation) && eoff < n && !nj_read_info(b + eoff, n - eoff, &ji)) {
-        int swap = raw_orientation >= 5;
-        *w = swap ? ji.height : ji.width;
-        *h = swap ? ji.width : ji.height;
-        return 1;
+    int raw_orientation;   // camera raw (CR2, NEF ...): the header of its JPEG
+    if (!nj_find_embedded(b, n, &eoff, &esize, &raw_orientation)) {
+        static uint8_t jb[65536 + 64];
+        const uint8_t *jp = b + eoff;
+        size_t jn = eoff < n ? n - eoff : 0;
+        if (jn < 65536) {   // the JPEG's header lies beyond what was read: read it
+            HANDLE g = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+            DWORD got = 0;
+            LARGE_INTEGER at = {.QuadPart = (LONGLONG)eoff};
+            if (g != INVALID_HANDLE_VALUE) {
+                if (SetFilePointerEx(g, at, NULL, FILE_BEGIN)) ReadFile(g, jb, 65536, &got, NULL);
+                CloseHandle(g);
+            }
+            memset(jb + got, 0, 64);
+            jp = jb;
+            jn = got;
+        }
+        if (!nj_read_info(jp, jn, &ji)) {
+            int swap = raw_orientation >= 5;
+            *w = swap ? ji.height : ji.width;
+            *h = swap ? ji.width : ji.height;
+            return 1;
+        }
     }
     if (n >= 3 && b[0] == 0xFF && b[1] == 0xD8 && !nj_read_info(b, n, &ji)) {
         int swap = ji.orientation >= 5;
@@ -2240,7 +2257,7 @@ static int create_window(const wchar_t *first) {
 // file association (--register / --unregister): for the current user, no admin rights
 
 static const wchar_t *const g_assoc_exts[] = {L".jpg", L".jpeg", L".jpe", L".jfif", L".png", L".psd", L".psb", L".heic",
-                                              L".heif", L".tif", L".tiff", L".webp", L".gif", L".bmp", L".cr2",
+                                              L".heif", L".tif", L".tiff", L".webp", L".gif", L".bmp", L".cr2", L".nef", L".nrw",
 #ifdef NV_SVG
                                               L".svg",
 #endif

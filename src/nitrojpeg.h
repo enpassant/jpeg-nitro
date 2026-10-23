@@ -55,8 +55,9 @@ typedef struct {
 // Parses the headers. Returns 0 if the file is a JPEG we could read at all.
 int nj_read_info(const uint8_t *data, size_t len, nj_info *info);
 
-// Canon CR2 raw files: the full-size JPEG the camera stored beside the raw data
-// (the first image of the file's TIFF structure, before the raw data). Returns
+// Camera raw files (TIFF-based: Canon CR2, Nikon NEF and others whose first image is
+// a reduced one): the full-size JPEG the camera stored beside the raw data (CR2: the
+// first image; others: the biggest JPEG of the directories and SubIFDs). Returns
 // 0 and its byte range and the EXIF orientation (1..8) if there is one; the
 // JPEG itself has no EXIF, so the orientation comes from here. It is sRGB (also
 // when the camera is set to Adobe RGB). data may be just the start of the file

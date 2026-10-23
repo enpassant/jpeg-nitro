@@ -31,7 +31,7 @@ Airen egy 24 MP-es JPEG ~30 ms alatt dekódolódik, ~3×-osan gyorsabban, mint u
 Apple hardveres JPEG-dekódere (lásd lent: „Apple Silicon (M1)”). A dekóderek függőség nélküli
 C-fájlok, önállóan is használhatók. A fotósorozatok (pl.
 timelapse) teljes felbontásban, valós időben „lejátszhatók”, akár 60 kép/s-mal. macOS-en és Windowson a **Canon
-CR2** raw fájlokból a gép által beléjük tett teljes méretű JPEG jelenik meg (a nitrojpeggel, néhány
+CR2** és **Nikon NEF** raw fájlokból a gép által beléjük tett teljes méretű JPEG jelenik meg (a nitrojpeggel, néhány
 ms alatt az ImageIO 150–400 ms-a helyett; az elforgatásukat is figyelembe veszi). macOS-en a **HEIC**
 fotókat (iPhone) a nitroheic (`src/nitroheic.c`) dekódolja: egy iPhone-fotó 48 független HEVC-csempéből
 álló rács, ezeket párhuzamosan bontja ki Y/Cb/Cr síkokba (Intelen magonként egy szoftveres
