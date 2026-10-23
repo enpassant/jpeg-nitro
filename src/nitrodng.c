@@ -331,8 +331,287 @@ static inline int huff_decode(BitIn *b, const Huff *h) {   // the difference of 
     return v < (1 << (s - 1)) ? v - (1 << s) + 1 : v;
 }
 
+// ---------------------------------------------------------------------------
+// a long lossless JPEG scan decoded in parallel: Huffman codes resynchronise by themselves, so the
+// scan is cut into parts decoded at once from a guessed start; where the code boundaries of a part
+// meet the real ones of the part before it, the rest of it is right. (One Huffman table, no restarts.)
+
+static inline uint64_t load_be64(const uint8_t *p) {
+    uint64_t v;
+    memcpy(&v, p, 8);
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+    return v;
+#else
+    return __builtin_bswap64(v);
+#endif
+}
+
+// The difference coded at bit *pos of u (ulen bytes without stuffing, then zeros: reads beyond give
+// zeros, as at the end of a scan). An invalid code skips one bit (only a wrong guess meets one).
+static inline int udiff(const uint8_t *u, size_t ulen, uint64_t *pos, const Huff *h) {
+    size_t q = (size_t)(*pos >> 3);
+    uint64_t w = load_be64(u + (q < ulen ? q : ulen)) << (*pos & 7);   // (at least 57 bits)
+    int32_t f = h->fast[w >> (64 - FAST_BITS)];
+    if (f) {
+        *pos += f & 255;
+        return f >> 8;
+    }
+    int s, len;
+    uint16_t g = h->code[w >> (64 - FAST_BITS)];
+    if (g) {
+        len = g >> 8;
+        s = g & 255;
+    } else {
+        len = FAST_BITS + 1;
+        int code = (int)(w >> (64 - len));
+        while (len < 16 && (h->maxcode[len] < 0 || code > h->maxcode[len])) {
+            len++;
+            code = (int)(w >> (64 - len));
+        }
+        if (h->maxcode[len] < 0 || code > h->maxcode[len]) {
+            *pos += 1;
+            return 0;
+        }
+        s = h->vals[h->valptr[len] + code - h->mincode[len]];
+    }
+    if (s >= 16) {
+        *pos += len;
+        return 32768;
+    }
+    *pos += len + s;
+    if (!s) return 0;
+    int v = (int)((w << len) >> (64 - s));
+    return v < (1 << (s - 1)) ? v - (1 << s) + 1 : v;
+}
+
+// The entropy-coded data at d (up to its first marker) without the stuffed zero bytes, in a new
+// buffer followed by 16 zero bytes; *ulen: its length. In parallel, by 1 MB pieces.
+static uint8_t *unstuff(const uint8_t *d, size_t n, size_t *ulen) {
+    const size_t PS = 1 << 20;
+    size_t np = (n + PS - 1) / PS;
+    size_t *drops = calloc(np + 1, sizeof(size_t)), *marker = malloc(np * sizeof(size_t));
+    uint8_t *u = NULL;
+    if (!drops || !marker) goto done;
+    size_t *pd = drops, *pm = marker;
+    // per piece: the FF bytes whose next byte lies in it: stuffing (FF 00) or the marker that ends the data
+    nitro_parallel(np, ^(size_t k) {
+        size_t a = k * PS, b = MIN(n, a + PS), i = a ? a - 1 : 0, lim = b == n ? n : b - 1, cnt = 0, mk = SIZE_MAX;
+        while (i < lim) {
+            const uint8_t *f = memchr(d + i, 0xFF, lim - i);
+            if (!f) break;
+            i = (size_t)(f - d);
+            if (i + 1 < n && d[i + 1] == 0) {
+                cnt++;
+                i += 2;
+            } else {
+                mk = i;
+                break;
+            }
+        }
+        pd[k + 1] = cnt;
+        pm[k] = mk;
+    });
+    size_t end = n;
+    for (size_t k = 0; k < np; k++) {
+        drops[k + 1] += drops[k];   // dropped bytes before piece k + 1
+        if (marker[k] != SIZE_MAX) {
+            end = marker[k];
+            break;
+        }
+    }
+    size_t kend = MIN(np, end / PS + 1);
+    *ulen = end - drops[kend];
+    u = malloc(*ulen + 16);
+    if (!u) goto done;
+    memset(u + *ulen, 0, 16);
+    uint8_t *pu = u;
+    nitro_parallel(kend, ^(size_t k) {
+        size_t a = k * PS, lim = MIN(a + PS, end), i = a;
+        if (a >= end) return;
+        uint8_t *o = pu + a - pd[k];
+        if (a > 0 && d[a - 1] == 0xFF && d[a] == 0) i++;   // (its FF ended the piece before)
+        while (i < lim) {
+            const uint8_t *f = memchr(d + i, 0xFF, lim - i);
+            size_t j = f ? (size_t)(f - d) + 1 : lim;
+            memcpy(o, d + i, j - i);
+            o += j - i;
+            i = j;
+            if (f && i < lim && d[i] == 0) i++;
+        }
+    });
+done:
+    free(drops);
+    free(marker);
+    return u;
+}
+
+#define SYNC_N 256
+typedef struct {
+    uint64_t pos[SYNC_N];   // where its first (guessed) codes start
+    uint64_t end;           // where the first code after it starts
+    size_t count, npos;     // codes decoded in it, positions kept
+    size_t sync, bridge;    // its first right code; codes from the end of the part before up to it
+    uint64_t start;         // the real code run of the part: from here (the end of the part before) ...
+    size_t off, n;          // ... n codes, the samples at off
+} Part;
+
+// From p, the real start of part c, up to its first right code: *j its index, *br the codes up
+// to it. Returns -1 if none of its first codes is met.
+static int resync(const Part *c, uint64_t p, const uint8_t *u, size_t ulen, const Huff *hf, size_t *j, size_t *br) {
+    size_t k = 0, b = 0;
+    for (;;) {
+        while (k < c->npos && c->pos[k] < p) k++;
+        if (k == c->npos) return -1;
+        if (c->pos[k] == p) break;
+        udiff(u, ulen, &p, hf);
+        b++;
+    }
+    *j = k;
+    *br = b;
+    return 0;
+}
+
+// Decodes the scan at d (n bytes) into out (w x nc samples per row, h rows; the predictor's
+// initial value, point transform pt) in parallel. Returns -1 if it cannot (the caller decodes it
+// serially).
+static int scan_parallel(const uint8_t *d, size_t n, const Huff *hf, uint16_t *out, int w, int h, int nc, int pred,
+                         int initial, int pt) {
+    size_t total = (size_t)w * nc * h, L = (size_t)w * nc, ulen = 0;
+    uint8_t *u = unstuff(d, n, &ulen);
+    if (!u) return -1;
+    uint64_t nbits = (uint64_t)ulen * 8;
+    size_t K = MAX(1, MIN(512, ulen / (128 << 10)));
+    Part *parts = calloc(K, sizeof(Part));
+    if (!parts) {
+        free(u);
+        return -1;
+    }
+    Part *pp = parts;
+    // 1. each part from a guessed start: how many codes, where its first ones start
+    nitro_parallel(K, ^(size_t k) {
+        Part *c = &pp[k];
+        uint64_t p = nbits * k / K, end = nbits * (k + 1) / K;
+        size_t cnt = 0;
+        while (p < end) {
+            if (cnt < SYNC_N) c->pos[cnt] = p;
+            udiff(u, ulen, &p, hf);
+            cnt++;
+        }
+        c->npos = MIN(cnt, SYNC_N);
+        c->count = cnt;
+        c->end = p;
+    });
+    // 2. from the end of the part before (right, once that part met the real codes) up to one of
+    // its first codes
+    if (K > 1) nitro_parallel(K - 1, ^(size_t i) {
+        Part *c = &pp[i + 1];
+        if (resync(c, pp[i].end, u, ulen, hf, &c->sync, &c->bridge)) c->sync = SIZE_MAX;
+    });
+    // the real code runs in order; a part that did not meet the real codes (rare: long runs of the
+    // same short codes) is decoded once more from its real start, the next one then resynchronised
+    uint64_t start = 0, guessed_end = 0;   // (step 2 started part k at the guessed end of part k - 1)
+    size_t off = 0;
+    for (size_t k = 0; k < K; k++) {
+        Part *c = &parts[k];
+        uint64_t end = c->end;
+        if (k == 0) {
+            c->n = c->count;
+        } else if (start != guessed_end && resync(c, start, u, ulen, hf, &c->sync, &c->bridge)) {
+            c->sync = SIZE_MAX;
+        }
+        guessed_end = c->end;
+        if (k > 0 && c->sync != SIZE_MAX) {
+            c->n = c->bridge + c->count - c->sync;
+        } else if (k > 0) {
+            uint64_t p = start, lim = nbits * (k + 1) / K;
+            size_t cnt = 0;
+            while (p < lim) {
+                udiff(u, ulen, &p, hf);
+                cnt++;
+            }
+            c->n = cnt;
+            end = p;
+        }
+        c->start = start;
+        c->off = off;
+        off += c->n;
+        start = end;
+    }
+    if (off < total) parts[K - 1].n += total - off;   // (a short scan: the zeros after it, as when serial)
+    // 3. the differences, each part from its real start
+    nitro_parallel(K, ^(size_t k) {
+        Part *c = &pp[k];
+        if (c->off >= total) return;
+        size_t m = MIN(c->n, total - c->off);
+        uint64_t p = c->start;
+        uint16_t *o = out + c->off;
+        for (size_t i = 0; i < m; i++) o[i] = (uint16_t)udiff(u, ulen, &p, hf);
+    });
+    free(parts);
+    free(u);
+    // 4. the samples: predictor 1 (left neighbour) row by row in parallel once the first column is
+    // known; the others need the row above: a wavefront (a block of a row once the row above has
+    // finished it)
+    int wave = pred != 1 && h > 1;
+    _Atomic int *progress = wave ? calloc((size_t)h, sizeof(_Atomic int)) : NULL;
+    if (wave && !progress) return -1;   // (the caller decodes it serially)
+    if (!wave) {
+        for (int y = 0; y < h; y++)
+            for (int c = 0; c < nc; c++) out[y * L + c] = (uint16_t)(out[y * L + c] + (y ? out[(y - 1) * L + c] : initial));
+        size_t groups = ((size_t)h + 15) / 16;
+        nitro_parallel(groups, ^(size_t g) {
+            for (size_t y = g * 16; y < MIN((size_t)h, g * 16 + 16); y++) {
+                uint16_t *r = out + y * L;
+                for (size_t i = (size_t)nc; i < L; i++) r[i] = (uint16_t)(r[i] + r[i - nc]);
+            }
+        });
+    } else {
+        for (int c = 0; c < nc; c++) out[c] = (uint16_t)(out[c] + initial);   // the first row: predictor 1
+        for (size_t i = (size_t)nc; i < L; i++) out[i] = (uint16_t)(out[i] + out[i - nc]);
+        const size_t BS = 512;
+        int nb = (int)((L + BS - 1) / BS);
+        progress[0] = nb;
+        _Atomic int next = 1, *pnext = &next, *pprog = progress;
+        nitro_parallel((size_t)MIN(nitro_ncpu(), h - 1), ^(size_t worker) {
+            (void)worker;
+            for (;;) {
+                int y = atomic_fetch_add(pnext, 1);
+                if (y >= h) break;
+                uint16_t *cur = out + y * L;
+                const uint16_t *prev = cur - L;
+                for (int b = 0; b < nb; b++) {
+                    while (atomic_load_explicit(&pprog[y - 1], memory_order_acquire) <= b) nitro_yield();
+                    size_t i0 = b ? b * BS : (size_t)nc, i1 = MIN(L, (size_t)(b + 1) * BS);
+                    if (!b)
+                        for (int c = 0; c < nc; c++) cur[c] = (uint16_t)(cur[c] + prev[c]);
+                    #define ROW(PX) for (size_t i = i0; i < i1; i++) { \
+                            int ra = cur[i - nc], rb = prev[i], rcc = prev[i - nc]; \
+                            (void)ra; (void)rb; (void)rcc; \
+                            cur[i] = (uint16_t)((PX) + cur[i]); \
+                        }
+                    switch (pred) {
+                    case 2: ROW(rb) break;
+                    case 3: ROW(rcc) break;
+                    case 4: ROW(ra + rb - rcc) break;
+                    case 5: ROW(ra + ((rb - rcc) >> 1)) break;
+                    case 6: ROW(rb + ((ra - rcc) >> 1)) break;
+                    default: ROW((ra + rb) >> 1) break;
+                    }
+                    #undef ROW
+                    atomic_store_explicit(&pprog[y], b + 1, memory_order_release);
+                }
+            }
+        });
+        free((void *)progress);
+    }
+    if (pt)
+        for (size_t i = 0; i < total; i++) out[i] = (uint16_t)(out[i] << pt);
+    return 0;
+}
+
 // Decodes one lossless JPEG (a tile or strip) into out (tw x th samples, row stride ostride).
-static int lossless_jpeg(const uint8_t *d, size_t n, uint16_t *out, int tw, int th, size_t ostride) {
+// par: a long scan is decoded in parallel.
+static int lossless_jpeg(const uint8_t *d, size_t n, uint16_t *out, int tw, int th, size_t ostride, int par) {
     if (n < 4 || d[0] != 0xFF || d[1] != 0xD8) return -1;
     Huff *huff = malloc(4 * sizeof(Huff));
     if (!huff) return -1;
@@ -389,6 +668,14 @@ static int lossless_jpeg(const uint8_t *d, size_t n, uint16_t *out, int tw, int 
             // the samples fill the tile row by row (a JPEG row may hold one or two raw rows; the
             // last strip may be shorter)
             if ((uint64_t)w * nc * h > (uint64_t)tw * th) goto out;
+            int initial = 1 << (prec - pt - 1);
+            int one_table = 1;
+            for (int c = 1; c < nc; c++) one_table &= tbl[c] == tbl[0];
+            if (par && !ri && one_table && ostride == (size_t)tw && n - (p + 2 + l) >= (1 << 20) &&
+                !scan_parallel(d + p + 2 + l, n - (p + 2 + l), &huff[tbl[0]], out, w, h, nc, pred, initial, pt)) {
+                rc = 0;
+                goto out;
+            }
             size_t rowlen = (size_t)w * nc;
             uint16_t *prev = calloc(rowlen, 2), *cur = calloc(rowlen, 2);
             if (!prev || !cur) {
@@ -397,7 +684,6 @@ static int lossless_jpeg(const uint8_t *d, size_t n, uint16_t *out, int tw, int 
                 goto out;
             }
             BitIn b = {d + p + 2 + l, d + n, 0, 0};
-            int initial = 1 << (prec - pt - 1);
             int mcus = 0, first_row = 1;
             size_t ox = 0, oy = 0;   // output position
             for (int y = 0; y < h; y++) {
@@ -614,7 +900,9 @@ int ndng_decode(const uint8_t *data, size_t len, const ndng_info *in, uint8_t *b
     const ndng_info *pin = in;
     Tiff *pt = &t;
     uint16_t *praw = raw;
-    run((size_t)in->ntiles, nthreads, ^(size_t i) {
+    // few long lossless JPEG scans (one strip ...): one after the other, each decoded in parallel
+    int par = in->compression == 7 && in->ntiles < 4 && nthreads != 1;
+    run((size_t)in->ntiles, par ? 1 : nthreads, ^(size_t i) {
         Entry eo = {pin->tile_off_type, (uint32_t)pin->ntiles, pin->tile_off_pos, 1};
         Entry ec = {pin->tile_cnt_type, (uint32_t)pin->ntiles, pin->tile_cnt_pos, 1};
         uint64_t off = (uint64_t)val(pt, eo, (uint32_t)i), cnt = (uint64_t)val(pt, ec, (uint32_t)i);
@@ -625,10 +913,12 @@ int ndng_decode(const uint8_t *data, size_t len, const ndng_info *in, uint8_t *b
         int tx = (int)(i % (size_t)across) * pin->tile_w, ty = (int)(i / (size_t)across) * pin->tile_h;
         int w = MIN(pin->tile_w, rw - tx), h = MIN(pin->tile_h, rh - ty);
         const uint8_t *src = data + off;
-        if (pin->compression == 7) {
+        if (pin->compression == 7 && pin->tile_w == rw && ty + pin->tile_h <= rh) {   // whole rows: in place
+            if (lossless_jpeg(src, (size_t)cnt, praw + (size_t)ty * rw, rw, pin->tile_h, (size_t)rw, par)) atomic_store(pf, 1);
+        } else if (pin->compression == 7) {
             // a whole tile is coded (also its part beyond the image): decode into a scratch buffer
             uint16_t *tile = malloc((size_t)pin->tile_w * pin->tile_h * 2);
-            if (!tile || lossless_jpeg(src, (size_t)cnt, tile, pin->tile_w, pin->tile_h, (size_t)pin->tile_w)) {
+            if (!tile || lossless_jpeg(src, (size_t)cnt, tile, pin->tile_w, pin->tile_h, (size_t)pin->tile_w, par)) {
                 free(tile);
                 atomic_store(pf, 1);
                 return;
