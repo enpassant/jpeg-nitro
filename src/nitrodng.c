@@ -476,14 +476,127 @@ out:
     return rc;
 }
 
-// ---------------------------------------------------------------------------
-// development
-
 static void run(size_t n, int nthreads, nitro_body body) {   // nthreads 1: on the calling thread
     if (nthreads == 1)
         for (size_t i = 0; i < n; i++) body(i);
     else
         nitro_parallel(n, body);
+}
+
+// ---------------------------------------------------------------------------
+// development, row by row: the samples of five rows around the current one normalised (black /
+// white levels, white balance) and split into even and odd columns, so that the loops over a
+// row run without branches (the compiler vectorizes them)
+
+typedef struct {
+    const uint16_t *raw;          // the raw image, its row length
+    size_t rw;
+    int ax, ay, aw, ah;           // the active area
+    const uint16_t *lin;          // linearization table or NULL
+    int lin_n;
+    const float *bh, *bv;         // black level deltas per column / row of the active area
+    float black[4], scale[4];     // per 2x2 position: (v - black) * scale
+} Dev;
+
+static float edge_sample(const Dev *g, const uint16_t *src, int xx, float bv, int p) {   // mirrored inside the area
+    if (xx < 0) xx = -xx;
+    else if (xx >= g->aw) xx = 2 * g->aw - 2 - xx;
+    int k = p + (xx & 1);
+    unsigned v = src[xx];
+    if (g->lin) v = g->lin[MIN(v, (unsigned)g->lin_n - 1)];
+    float f = ((float)v - g->black[k] - g->bh[xx] - bv) * g->scale[k];
+    return f < 0 ? 0 : f > 1 ? 1 : f;
+}
+
+// Row yy of the active area (mirrored at its edges), columns x0, x0 + 1 ... normalised: x0 + 2i into
+// e[i], x0 + 2i + 1 into o[i] (i < n). (Mirroring keeps the colour of a sample: an even distance.)
+static void norm_row(const Dev *g, int yy, int x0, int n, float *e, float *o) {
+    if (yy < 0) yy = -yy;
+    else if (yy >= g->ah) yy = 2 * g->ah - 2 - yy;
+    const uint16_t *src = g->raw + (size_t)(g->ay + yy) * g->rw + g->ax;
+    const float *bh = g->bh;
+    float bv = g->bv[yy];
+    int p = (yy & 1) * 2;
+    int lo = x0 >= 0 ? 0 : 1, hi = MAX(lo, MIN(n, (g->aw - 2 - x0) / 2 + 1));   // [lo, hi): inside the area
+    for (int i = 0; i < n; i++) {   // the edges
+        if (i == lo) i = hi;
+        if (i >= n) break;
+        e[i] = edge_sample(g, src, x0 + 2 * i, bv, p);
+        o[i] = edge_sample(g, src, x0 + 2 * i + 1, bv, p);
+    }
+    int ke = p + (x0 & 1), ko = p + ((x0 + 1) & 1);
+    float be = g->black[ke], bo = g->black[ko], se = g->scale[ke], so = g->scale[ko];
+    const uint16_t *lin = g->lin;
+    #define NORM(VE, VO) \
+        for (int i = lo; i < hi; i++) { \
+            int xe = x0 + 2 * i; \
+            float fe = ((float)(VE) - be - bh[xe] - bv) * se, fo = ((float)(VO) - bo - bh[xe + 1] - bv) * so; \
+            e[i] = fe < 0 ? 0 : fe > 1 ? 1 : fe; \
+            o[i] = fo < 0 ? 0 : fo > 1 ? 1 : fo; \
+        }
+    if (!lin) {
+        NORM(src[xe], src[xe + 1])
+    } else {
+        unsigned last = (unsigned)g->lin_n - 1;
+        NORM(lin[MIN((unsigned)src[xe], last)], lin[MIN((unsigned)src[xe + 1], last)])
+    }
+    #undef NORM
+}
+
+// Malvar-He-Cutler at one pixel: x is the colour beside it in its row, y the one above / below
+// (at green), or x its own colour and y the other one (at red / blue).
+typedef struct {
+    float x, g, y;
+} Px;
+
+static inline Px px_green(float v, float L, float R, float L2, float R2, float U, float D, float U2, float D2, float diag) {
+    Px p = {(5 * v + 4 * (L + R) - diag - (L2 + R2) + 0.5f * (U2 + D2)) / 8, v,
+            (5 * v + 4 * (U + D) - diag - (U2 + D2) + 0.5f * (L2 + R2)) / 8};
+    return p;
+}
+
+static inline Px px_other(float v, float L, float R, float L2, float R2, float U, float D, float U2, float D2, float diag) {
+    float cross = L + R + U + D, outer = L2 + R2 + U2 + D2;
+    Px p = {v, (4 * v + 2 * cross - outer) / 8, (6 * v + 2 * diag - 1.5f * outer) / 8};
+    return p;
+}
+
+// One row of n pairs of pixels: demosaiced, converted (m: camera to linear sRGB) and quantised to
+// indices of the output curve: pixel 2k into ie[k], ie[n + k], ie[2n + k] (B, G, R), pixel 2k + 1
+// into io. e / o [0..4] are the five rows around it (even / odd columns); pixel 2k is e[2][k + 1],
+// pixel 2k + 1 is o[2][k + 1]. green_even: the even pixels are green; red_row: red is in this row.
+static void develop_row(float *const e[5], float *const o[5], int n, int green_even, int red_row, const float m[9],
+                        uint16_t *restrict ie, uint16_t *restrict io) {
+    const float *e0 = e[0], *e1 = e[1], *e2 = e[2], *e3 = e[3], *e4 = e[4];
+    const float *o0 = o[0], *o1 = o[1], *o2 = o[2], *o3 = o[3], *o4 = o[4];
+    float m0 = m[0], m1 = m[1], m2 = m[2], m3 = m[3], m4 = m[4], m5 = m[5], m6 = m[6], m7 = m[7], m8 = m[8];
+    #define EVEN(K) K(e2[k + 1], o2[k], o2[k + 1], e2[k], e2[k + 2], e1[k + 1], e3[k + 1], e0[k + 1], e4[k + 1], \
+                      o1[k] + o1[k + 1] + o3[k] + o3[k + 1])
+    #define ODD(K) K(o2[k + 1], e2[k + 1], e2[k + 2], o2[k], o2[k + 2], o1[k + 1], o3[k + 1], o0[k + 1], o4[k + 1], \
+                     e1[k + 1] + e1[k + 2] + e3[k + 1] + e3[k + 2])
+    #define Q(X) (!((X) > 0) ? 0 : (X) >= 2 ? 8192 : (int)((X) * 4096))   // (NaN: 0)
+    #define STORE_PX(P, I) { \
+        float r = red_row ? P.x : P.y, g = P.g, b = red_row ? P.y : P.x; \
+        float R = m0 * r + m1 * g + m2 * b; \
+        float G = m3 * r + m4 * g + m5 * b; \
+        float B = m6 * r + m7 * g + m8 * b; \
+        I[k] = (uint16_t)Q(B); \
+        I[n + k] = (uint16_t)Q(G); \
+        I[2 * n + k] = (uint16_t)Q(R); }
+    if (green_even)
+        for (int k = 0; k < n; k++) {
+            Px pe = EVEN(px_green), po = ODD(px_other);
+            STORE_PX(pe, ie) STORE_PX(po, io)
+        }
+    else
+        for (int k = 0; k < n; k++) {
+            Px pe = EVEN(px_other), po = ODD(px_green);
+            STORE_PX(pe, ie) STORE_PX(po, io)
+        }
+    #undef EVEN
+    #undef ODD
+    #undef Q
+    #undef STORE_PX
 }
 
 static const float xyz_rgb[9] = {0.412453f, 0.357580f, 0.180423f, 0.212671f, 0.715160f,
@@ -583,8 +696,7 @@ int ndng_decode(const uint8_t *data, size_t len, const ndng_info *in, uint8_t *b
         v = v <= 0.0031308 ? 12.92 * v : 1.055 * pow(v, 1 / 2.4) - 0.055;
         lut[i] = (uint8_t)lrint(MIN(MAX(v, 0), 1) * 255);
     }
-    // 3. demosaic (Malvar-He-Cutler) and convert, row by row: the active area's samples are
-    // normalised on the fly (mirrored at its edges)
+    // 3. demosaic and convert, in bands of rows
     int ax = in->area[1], ay = in->area[0], aw = in->area[3] - ax, ah = in->area[2] - ay;
     int cx = in->crop[0], cy = in->crop[1], ow = in->crop[2], oh = in->crop[3];
     // per column / row black level deltas of the active area; the linearization table
@@ -609,68 +721,46 @@ int ndng_decode(const uint8_t *data, size_t len, const ndng_info *in, uint8_t *b
         Entry e = {in->delta_v[0], in->delta_v[1], in->delta_v[2], 1};
         for (int i = 0; i < ah && (uint32_t)i < e.count; i++) bv[i] = (float)val(&t, e, (uint32_t)i);
     }
-    const float *pbh = bh, *pbv = bv;
-    const uint16_t *plin = lin;
-    const float *pscale = scale, *pblack = black, *pm = m;
+    Dev dev = {raw, (size_t)rw, ax, ay, aw, ah, lin, lin_n, bh, bv, {0}, {0}};
+    memcpy(dev.black, black, sizeof black);
+    memcpy(dev.scale, scale, sizeof scale);
+    const Dev *pdev = &dev;
+    const float *pm = m;
     const uint8_t *plut = lut;
     const int *pcfa = in->cfa;
-    size_t bands = (size_t)(oh + 15) / 16;
+    int npairs = (ow + 1) / 2, n = npairs + 2;   // n: samples per row and plane (window: +-2 columns)
+    size_t bands = (size_t)(oh + 31) / 32;
     run(bands, nthreads, ^(size_t band) {
-        int y0 = (int)band * 16, y1 = MIN(y0 + 16, oh);
-        int pw = ow + 4;
-        float *win = malloc(sizeof(float) * (size_t)pw * (y1 - y0 + 4));   // the band's normalised samples, +-2 rows / columns
-        if (!win) return;
-        // normalised sample at active-area coordinates (mirrored inside the area)
-        #define SAMPLE(X, Y) ({ \
-            int xx_ = (X), yy_ = (Y); \
-            if (xx_ < 0) xx_ = -xx_; else if (xx_ >= aw) xx_ = 2 * aw - 2 - xx_; \
-            if (yy_ < 0) yy_ = -yy_; else if (yy_ >= ah) yy_ = 2 * ah - 2 - yy_; \
-            int k_ = (yy_ & 1) * 2 + (xx_ & 1); \
-            unsigned v_ = praw[(size_t)(ay + yy_) * rw + ax + xx_]; \
-            if (plin) v_ = plin[MIN(v_, (unsigned)lin_n - 1)]; \
-            float f_ = ((float)v_ - pblack[k_] - pbh[xx_] - pbv[yy_]) * pscale[k_]; \
-            f_ < 0 ? 0 : f_ > 1 ? 1 : f_; })
-        for (int r = 0; r < y1 - y0 + 4; r++)
-            for (int x = 0; x < pw; x++) win[r * pw + x] = SAMPLE(cx + x - 2, cy + y0 + r - 2);
-        for (int y = y0; y < y1; y++) {
-            int sy = cy + y;
-            uint8_t *o = bgrx + (size_t)y * pitch;
-            for (int x = 0; x < ow; x++) {
-                int sx = cx + x;
-                const float *c = win + (y - y0 + 2) * pw + x + 2;   // the current sample; rows +-pw
-                #define P(dx, dy) c[(dy) * pw + (dx)]
-                int col = pcfa[(sy & 1) * 2 + (sx & 1)];
-                float r, g, b, v = P(0, 0);
-                float cross = P(-1, 0) + P(1, 0) + P(0, -1) + P(0, 1), outer = P(-2, 0) + P(2, 0) + P(0, -2) + P(0, 2);
-                float diag = P(-1, -1) + P(1, -1) + P(-1, 1) + P(1, 1);
-                if (col == 1) {   // green: red / blue horizontally or vertically
-                    float h = (5 * v + 4 * (P(-1, 0) + P(1, 0)) - diag - (P(-2, 0) + P(2, 0)) + 0.5f * (P(0, -2) + P(0, 2))) / 8;
-                    float vv = (5 * v + 4 * (P(0, -1) + P(0, 1)) - diag - (P(0, -2) + P(0, 2)) + 0.5f * (P(-2, 0) + P(2, 0))) / 8;
-                    int next = pcfa[(sy & 1) * 2 + ((sx + 1) & 1)];   // the colour beside it in this row
-                    g = v;
-                    r = next == 0 ? h : vv;
-                    b = next == 0 ? vv : h;
-                } else {
-                    float gg = (4 * v + 2 * cross - outer) / 8;
-                    float other = (6 * v + 2 * diag - 1.5f * outer) / 8;
-                    g = gg;
-                    if (col == 0) { r = v; b = other; }
-                    else { b = v; r = other; }
-                }
-                #undef P
-                float R = pm[0] * r + pm[1] * g + pm[2] * b;
-                float G = pm[3] * r + pm[4] * g + pm[5] * b;
-                float B = pm[6] * r + pm[7] * g + pm[8] * b;
-                #define Q(X) (!((X) > 0) ? 0 : (X) >= 2 ? 8192 : (int)((X) * 4096))   // (NaN: 0)
-                o[4 * x + 0] = plut[Q(B)];
-                o[4 * x + 1] = plut[Q(G)];
-                o[4 * x + 2] = plut[Q(R)];
-                #undef Q
-                o[4 * x + 3] = 255;
-            }
+        int y0 = (int)band * 32, y1 = MIN(y0 + 32, oh);
+        float *mem = malloc(sizeof(float) * (size_t)n * 10 + sizeof(uint16_t) * (size_t)npairs * 6);
+        if (!mem) return;
+        float *ring[5][2];   // window rows (by row index mod 5): even / odd columns
+        for (int k = 0; k < 5; k++) {
+            ring[k][0] = mem + (size_t)n * (2 * k);
+            ring[k][1] = mem + (size_t)n * (2 * k + 1);
         }
-        #undef SAMPLE
-        free(win);
+        uint16_t *ie = (uint16_t *)(mem + (size_t)n * 10), *io = ie + 3 * npairs;
+        for (int r = 0; r < 4; r++) norm_row(pdev, cy + y0 + r - 2, cx - 2, n, ring[r % 5][0], ring[r % 5][1]);
+        for (int y = y0; y < y1; y++) {
+            int r = y - y0 + 4;   // the window's newest row
+            norm_row(pdev, cy + y + 2, cx - 2, n, ring[r % 5][0], ring[r % 5][1]);
+            float *e[5], *o[5];
+            for (int k = 0; k < 5; k++) {
+                e[k] = ring[(r - 4 + k) % 5][0];
+                o[k] = ring[(r - 4 + k) % 5][1];
+            }
+            int sy = cy + y, ce = pcfa[(sy & 1) * 2 + (cx & 1)], co = pcfa[(sy & 1) * 2 + ((cx + 1) & 1)];
+            develop_row(e, o, npairs, ce == 1, ce == 0 || co == 0, pm, ie, io);
+            uint32_t *out = (uint32_t *)(bgrx + (size_t)y * pitch);   // B G R X
+            #define PACK(I, k) (plut[I[k]] | plut[I[npairs + (k)]] << 8 | plut[I[2 * npairs + (k)]] << 16 | 0xFF000000u)
+            for (int k = 0; k < ow / 2; k++) {
+                out[2 * k] = PACK(ie, k);
+                out[2 * k + 1] = PACK(io, k);
+            }
+            if (ow & 1) out[ow - 1] = PACK(ie, ow / 2);
+            #undef PACK
+        }
+        free(mem);
     });
     free(bh);
     free(raw);
