@@ -15,7 +15,7 @@ GNOME/Linux**:
 
 All three are built on our own decoders: three that decode a *single* image on all CPU cores —
 although JPEG, PNG and PSD compression are all sequential by design —, one that decodes the tiles of
-HEIC photos in parallel, and two for vector drawings:
+HEIC photos in parallel, one that develops DNG raw images, and two for vector drawings:
 
 | decoder | format | how | time | usual decoders |
 |---|---|---|---|---|
@@ -23,6 +23,7 @@ HEIC photos in parallel, and two for vector drawings:
 | **nitropng** | PNG (8-bit, non-interlaced) | speculative parallel inflate (back-references into not yet known data resolved later, Adler-32 verified) + "wavefront" filter reversal | 38 real PNGs: **~43 ms** avg. | Wuffs ~171 ms, ImageIO ~318 ms |
 | **nitropsd** | Photoshop PSD/PSB (8-bit RGB / gray) | merged image: RLE rows in parallel, ZIP via nitropng's inflate; reads only the merged image of huge layered files | 24 MP RLE: **~5 ms** | ImageIO ~170 ms |
 | **nitroheic** (macOS) | HEIC (8-bit 4:2:0 HEVC, iPhone grids) | own HEIF parsing; the 48 independent HEVC tiles of an iPhone photo decoded in parallel by VideoToolbox into Y/Cb/Cr for the GPU | 12 MP iPhone photo: **~33 ms** | ImageIO ~200 ms |
+| **nitrodng** | DNG raw (Bayer; lossless JPEG or uncompressed) | own raw development: lossless JPEG tiles in parallel, black / white levels, white balance, Malvar–He–Cutler demosaicing, colour matrix, tone curve | 20 MP DNG: **~20 ms**; 25 MP in one lossless JPEG strip: ~110 ms | ImageIO ~170 ms / ~210 ms |
 | **nitrosvg** | SVG (without filters) | lunasvg parser + plutovg renderer, with font lookup in the system and user font folders | 38 MB SVG: **~0.53 s** | WebKit ~1.4 s, CoreSVG ~2.4 s |
 | **nitrocdr** | CorelDRAW 5 – X6 (CDR), CMX | our [libcdr fork](https://github.com/gereoffy/libcdr) with many fixes (text styles, line spacing, clipping, bitmap transparency) and a 2× faster librevenge; draws directly with plutovg | 17.7 MB all-vector CDR: **~1.8 s**, ~3× faster | original libcdr `cdr2xhtml` ~5.4 s (only converting to SVG) |
 
@@ -30,9 +31,12 @@ Times on an Intel i9. The decoders are fast on ARM too (NEON): on a 2020 M1 MacB
 24 MP JPEG decodes in ~30 ms, ~3× faster than Apple's hardware JPEG decoder on the same machine
 ([Apple Silicon](#apple-silicon-m1)). They are plain C files without dependencies and can be
 used on their own ([Using the decoders](#using-the-decoders)). Photo series such as timelapses can be "played
-back" at full resolution in real time, up to 60 images/s. On macOS and Windows **Canon CR2** and **Nikon NEF** raw files show
+back" at full resolution in real time, up to 60 images/s. On macOS and Windows **Canon CR2**, **Nikon NEF**, **Sony ARW** and **Fujifilm RAF** raw files show
 the full-size JPEG the camera stored in them (nitrojpeg, in milliseconds instead of ImageIO's
-150–400 ms; their rotation is honoured). On macOS **HEIC** photos (iPhone) are decoded by
+150–400 ms; their rotation is honoured); **DNG** raw images (drones, Leica, Ricoh, phones,
+Adobe DNG Converter) are developed by nitrodng (`src/nitrodng.c`) at full resolution — a quick look at
+what is in the picture, not a raw converter: no noise reduction, lens corrections or other
+DNG opcodes. On macOS **HEIC** photos (iPhone) are decoded by
 nitroheic (`src/nitroheic.c`): an iPhone photo is a grid of 48 independent HEVC tiles, decoded here
 in parallel (Intel: software VideoToolbox decoders, one per core; Apple Silicon: 4 sessions on the
 media engine) into Y/Cb/Cr planes converted on the GPU — 12 MP in ~33 ms instead of ImageIO's ~200 ms
@@ -92,7 +96,7 @@ the same viewer: the same keys, mouse, zoom and window behaviour, full screen, s
 its folder, drag & drop. JPEG / PNG / PSD go through the three decoders and a compute shader,
 HEIC photos through our own HEVC decoder (`src/nitrohevc.c`, written from the H.265 specification:
 Windows has no HEVC decoder without a Store extension; its tiles in parallel, ~55 ms for 12 MP; no
-deblocking / SAO yet, which is hard to see), everything else (progressive JPEG, TIFF, WebP, GIF, BMP)
+deblocking / SAO yet, which is hard to see), DNG raw images through nitrodng, everything else (progressive JPEG, TIFF, WebP, GIF, BMP)
 through Windows' own WIC codecs;
 SVG and CorelDRAW CDR / CMX as on macOS (sharp when zoomed in, [ / ] for the pages of a drawing).
 One self-contained .exe (only system DLLs, Windows 10 or later), built on the Mac or on Linux with
@@ -512,8 +516,12 @@ if (nj_read_info(data, len, &info) == 0 && info.supported) {
 }
 ```
 
-`nj_find_embedded()` finds the full-size JPEG in a camera raw file (Canon CR2, Nikon NEF and other TIFF-based ones) (with its orientation, which
-the JPEG itself lacks), to decode the same way.
+`nj_find_embedded()` finds the full-size JPEG in a camera raw file (Canon CR2, Nikon NEF, Sony ARW and other
+TIFF-based ones, Fujifilm RAF) (with its orientation, which the JPEG itself lacks), to decode the same way.
+
+**nitrodng** (`src/nitrodng.c/.h`): `ndng_read_info()` checks whether the raw image of a DNG can be
+developed (a 2×2 Bayer pattern, uncompressed 8 / 16-bit or lossless JPEG) and gives its size
+(the default crop) and orientation; `ndng_decode()` develops it into 8-bit sRGB, B G R X order.
 
 **nitropng** (`src/nitropng.c/.h`) works the same way: `np_read_info()`, then `np_decode()`
 into `info.raw_size` bytes — the unfiltered rows, each still preceded by its filter byte
@@ -614,6 +622,9 @@ symlink). The measurements above were made on 50 private photos that are not in 
   `bench/sustain.c`: sustained load, `bench/ab.sh`: noise-resistant A/B comparison
 - `src/nitropng.c/.h`: self-contained parallel PNG decoder
 - `src/nitropsd.c/.h`: parallel PSD/PSB merged-image decoder
+- `src/nitroheic.c/.h`: HEIC (HEIF) reading, the tiles decoded in parallel (VideoToolbox on macOS,
+  else nitrohevc); `src/nitrohevc.c/.h`: our HEVC intra decoder
+- `src/nitrodng.c/.h`: DNG raw development (lossless JPEG, demosaicing, colour)
 - `src/nitro_os.h`: what the decoders need from the OS (parallel loop, clock, CPU count)
 - `src/png_wuffs.c/.h`: optional Wuffs PNG decoding for the viewer (PNG types nitropng skips)
 - `bench/pngbench.m`, `bench/pngsplit.c`: PNG decoder comparison and time split,

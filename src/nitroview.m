@@ -32,6 +32,7 @@
 #include "nitropng.h"
 #include "nitropsd.h"
 #include "nitroheic.h"
+#include "nitrodng.h"
 #ifdef NV_WUFFS
 #include "png_wuffs.h"   // optional fast PNG decoder
 #endif
@@ -267,7 +268,7 @@ done:
 
 // Decode one file into a Metal buffer. Runs on the decoder thread.
 enum { MODE_TURBOJPEG = -1, MODE_WUFFS = -2, MODE_IMAGEIO = -3, MODE_NITROPNG = -4, MODE_NITROPSD = -5, MODE_SVG = -6, MODE_CDR = -7,
-       MODE_NITROHEIC = -8 };
+       MODE_NITROHEIC = -8, MODE_NITRODNG = -9 };
 static int g_nthreads = 0;   // -j
 
 static const char *mode_name(int m) {
@@ -281,6 +282,7 @@ static const char *mode_name(int m) {
     case MODE_NITROPNG: return "nitropng";
     case MODE_NITROPSD: return "nitropsd";
     case MODE_NITROHEIC: return "nitroheic";
+    case MODE_NITRODNG: return "nitrodng";
     case MODE_SVG: return "svg";
     case MODE_CDR: return "cdr";
     default: return "?";
@@ -558,6 +560,20 @@ static Decoded *decode_file(NSString *path, BufferPool *pool, size_t align) {
     }
     if (!data) data = read_file(path);
     if (!data) return nil;
+    ndng_info di;   // a DNG: its raw image developed by nitrodng (else its largest preview below)
+    if (!raw_read && !ndng_read_info(data.bytes, data.length, &di) && di.width <= MAX_TEX && di.height <= MAX_TEX) {
+        double t1 = now_ms();
+        Decoded *d = [Decoded new];
+        d.read_ms = t1 - t0;
+        id<MTLBuffer> buf = bgra_buffer(d, di.width, di.height, pool, align);
+        if (buf && !ndng_decode(data.bytes, data.length, &di, buf.contents, d.pitch[0], g_nthreads)) {
+            d.orientation = di.orientation;
+            d.colorSpace = srgb_space();
+            bgra_done(d, buf, MODE_NITRODNG, t1);
+            return d;
+        }
+        if (buf) [pool put:buf];
+    }
     size_t eoff, esize;
     if (!raw_read && !nj_find_embedded(data.bytes, data.length, &eoff, &esize, &orient) && eoff < data.length &&
         esize <= data.length - eoff) {   // (a raw file with another extension: read whole)
@@ -2244,6 +2260,14 @@ static BOOL header_size(NSString *path, double *w, double *h) {
     uint8_t *buf = malloc(cap);
     size_t n = fread(buf, 1, cap, f);
     fclose(f);
+    ndng_info di;   // a DNG: its developed raw image
+    if (!ndng_read_info(buf, n, &di)) {
+        free(buf);
+        BOOL swap = di.orientation >= 5;
+        *w = swap ? di.height : di.width;
+        *h = swap ? di.width : di.height;
+        return YES;
+    }
     nj_info fi;
     size_t eoff, esize;
     int raw_orientation = 0;   // camera raw (CR2, NEF ...): the header of its JPEG

@@ -41,6 +41,7 @@
 #include "nitropng.h"
 #include "nitropsd.h"
 #include "nitroheic.h"
+#include "nitrodng.h"
 #ifdef NV_SVG
 #include "nitrosvg.h"   // optional SVG rendering (lunasvg)
 #endif
@@ -96,7 +97,7 @@ static const wchar_t *base_name(const wchar_t *p) {
 // decoded image
 
 typedef enum { KIND_YUV = 0, KIND_BGRA = 1, KIND_PNG = 2, KIND_PLANAR = 3 } Kind;
-enum { MODE_WIC = -3, MODE_NITROPNG = -4, MODE_NITROPSD = -5, MODE_SVG = -6, MODE_CDR = -7, MODE_NITROHEVC = -8 };
+enum { MODE_WIC = -3, MODE_NITROPNG = -4, MODE_NITROPSD = -5, MODE_SVG = -6, MODE_CDR = -7, MODE_NITROHEVC = -8, MODE_NITRODNG = -9 };
 
 #ifdef NV_VECTOR
 // A loaded vector document (SVG, CorelDRAW), shared by the images of its pages and the background
@@ -159,6 +160,7 @@ static const char *mode_name(int m) {
     case MODE_NITROPNG: return "nitropng";
     case MODE_NITROPSD: return "nitropsd";
     case MODE_NITROHEVC: return "nitrohevc";
+    case MODE_NITRODNG: return "nitrodng";
     case MODE_SVG: return "svg";
     case MODE_CDR: return "cdr";
     default: return "?";
@@ -1010,6 +1012,24 @@ static Decoded *decode_file(const wchar_t *path) {
     uint8_t *buf = NULL;
     size_t cap = 0;
     size_t eoff, esize;
+    ndng_info di;   // a DNG: its raw image developed by nitrodng (else its largest preview below)
+    if (!raw_read && !ndng_read_info(data, len, &di) && di.width <= MAX_TEX && di.height <= MAX_TEX) {
+        size_t pitch = (size_t)di.width * 4;
+        buf = buf_get(pitch * di.height, &cap);
+        if (buf && !ndng_decode(data, len, &di, buf, pitch, g_nthreads)) {
+            d->kind = KIND_BGRA;
+            d->width = di.width;
+            d->height = di.height;
+            d->pitch[0] = pitch;
+            d->size = pitch * di.height;
+            d->bands = 1;
+            d->orientation = di.orientation;
+            d->mode = MODE_NITRODNG;
+            goto decoded;
+        }
+        if (buf) buf_put(buf, cap);
+        buf = NULL;
+    }
     if (!raw_read && !nj_find_embedded(data, len, &eoff, &esize, &orient) && eoff < len && esize <= len - eoff) {
         memmove(data, data + eoff, esize);   // (a raw file with another extension: read whole)
         memset(data + esize, 0, 64);         // (the zero padding read_file leaves after the data)
@@ -1127,6 +1147,7 @@ static Decoded *decode_file(const wchar_t *path) {
             }
         }
     }
+decoded:
     if (!buf) {   // everything else, and what the own decoders could not handle (damaged, progressive ...)
         int o = d->orientation;
         buf = decode_wic(data, len, d, &cap);
@@ -2189,6 +2210,13 @@ static int header_size(const wchar_t *path, double *w, double *h) {
     ReadFile(f, b, 1 << 20, &n, NULL);
     CloseHandle(f);
     memset(b + n, 0, 64);
+    ndng_info di;   // a DNG: its developed raw image
+    if (!ndng_read_info(b, n, &di)) {
+        int swap = di.orientation >= 5;
+        *w = swap ? di.height : di.width;
+        *h = swap ? di.width : di.height;
+        return 1;
+    }
     nj_info ji;
     np_info pi;
     ps_info si;
