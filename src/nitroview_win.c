@@ -2070,7 +2070,11 @@ static void open_paths(wchar_t **args, int n) {
     collect_files(&l, args, n);
     int lazy = n == 1 && !wcspbrk(args[0], L"*?") && !(GetFileAttributesW(args[0]) & FILE_ATTRIBUTE_DIRECTORY);
     if (l.n) {
-        if (IsIconic(V.hwnd)) ShowWindow(V.hwnd, SW_RESTORE);
+        if (IsIconic(V.hwnd)) {
+            V.self_resizing = 1;
+            ShowWindow(V.hwnd, SW_RESTORE);
+            V.self_resizing = 0;
+        }
         open_files(&l, lazy);
         SetForegroundWindow(V.hwnd);
     }
@@ -2584,7 +2588,9 @@ int wmain(int argc, wchar_t **argv) {
     } else {
         SetWindowTextW(V.hwnd, L"nitroview - drop images here");
     }
+    V.self_resizing = 1;   // (the first show sends WM_SIZE: not a resize by the user)
     ShowWindow(V.hwnd, SW_SHOW);
+    V.self_resizing = 0;
     if (full) toggle_fullscreen();
     if (slide_ms > 0) { V.slide_ms = slide_ms; update_title(); }
     MSG msg;
