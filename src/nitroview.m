@@ -1774,9 +1774,19 @@ static int debug_zoom(void) {   // NV_DEBUG_ZOOM=1: log wheel / pinch events and
     id<MTLCommandBuffer> cb = [_gpu.queue commandBuffer];
     Decoded *d = [_loader get:_index];
     id<MTLTexture> tex = d ? [_gpu textureFor:d commandBuffer:cb] : nil;
+    // not decoded yet (a slow raw / HEIC, a slideshow faster than decoding): the previous image stays
+    // on screen until it is, rather than a black window (a failed one is not waited for)
+    BOOL previous = NO;
+    if (!tex && _shownIndex >= 0 && _shownIndex != _index && ![_loader failed:_index]) {
+        Decoded *o = [_loader get:_shownIndex];
+        if (o && (tex = [_gpu textureFor:o commandBuffer:cb])) {
+            d = o;
+            previous = YES;
+        }
+    }
     id<MTLRenderCommandEncoder> re = [cb renderCommandEncoderWithDescriptor:rpd];
     if (tex) {
-        if (_shownIndex != _index) {
+        if (!previous && _shownIndex != _index) {
             _shownIndex = _index;
             _shownTime = now_ms();
             [self scheduleSlide];
@@ -1791,11 +1801,11 @@ static int debug_zoom(void) {   // NV_DEBUG_ZOOM=1: log wheel / pinch events and
         [re setFragmentTexture:tex atIndex:0];
         [re drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
 #ifdef NV_VECTOR
-        if (d.vector) [self vectorDetail:d encoder:re view:view.drawableSize];
+        if (d.vector && !previous) [self vectorDetail:d encoder:re view:view.drawableSize];
 #endif
     }
     [re endEncoding];
-    if (tex && !_reported) {
+    if (tex && !previous && !_reported) {
         _reported = YES;
         static int dbg = -1;
         if (dbg < 0) dbg = getenv("NV_DEBUG_WINDOW") != NULL;
