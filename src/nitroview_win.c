@@ -861,6 +861,37 @@ done:
     return buf;
 }
 
+// Camera raw files (CR2, NEF ...): reads only the start (the TIFF directories) and the
+// full-size JPEG nitrojpeg finds there, not the raw data (most of the 10-30 MB); with the zero
+// padding read_file leaves. NULL if there is no such JPEG (the caller reads it all).
+static uint8_t *read_raw_jpeg(const wchar_t *path, size_t *len, int *orientation) {
+    static const wchar_t *const e[] = {L"cr2", L"nef", L"nrw", NULL};
+    if (!has_ext(path, e)) return NULL;
+    HANDLE f = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+    if (f == INVALID_HANDLE_VALUE) return NULL;
+    uint8_t *out = NULL;
+    LARGE_INTEGER sz;
+    DWORD cap = 1 << 20, n = 0;   // (Nikon puts the SubIFD directories after the maker notes: ~270 KB in)
+    uint8_t *hdr = malloc(cap);
+    size_t off, size;
+    if (hdr && GetFileSizeEx(f, &sz) && ReadFile(f, hdr, cap, &n, NULL) && n > 0 &&
+        !nj_find_embedded(hdr, n, &off, &size, orientation) && off < (uint64_t)sz.QuadPart &&
+        size <= (uint64_t)sz.QuadPart - off && size < ((size_t)1 << 31) && (out = malloc(size + 64))) {
+        LARGE_INTEGER at = {.QuadPart = (LONGLONG)off};
+        DWORD got = 0;
+        if (SetFilePointerEx(f, at, NULL, FILE_BEGIN) && ReadFile(f, out, (DWORD)size, &got, NULL) && got == size) {
+            memset(out + size, 0, 64);
+            *len = size;
+        } else {
+            free(out);
+            out = NULL;
+        }
+    }
+    free(hdr);
+    CloseHandle(f);
+    return out;
+}
+
 static int is_psd_name(const wchar_t *p) {
     static const wchar_t *const e[] = {L"psd", L"psb", NULL};
     return has_ext(p, e);
@@ -964,6 +995,9 @@ static Decoded *decode_file(const wchar_t *path) {
             data = NULL;
         }
     }
+    // a camera raw (CR2, NEF ...) shows its full-size JPEG (nitrojpeg finds it): only that is read
+    int raw_orientation = 0, orient = 0;
+    if (!data && (data = read_raw_jpeg(path, &len, &orient))) raw_orientation = orient;
     if (!data) data = read_file(path, &len);
     if (!data) return NULL;
     double t1 = now_ms();
@@ -973,13 +1007,12 @@ static Decoded *decode_file(const wchar_t *path) {
     uint8_t *buf = NULL;
     size_t cap = 0;
     size_t eoff, esize;
-    int raw_orientation = 0;   // a camera raw (CR2, NEF ...) shows its full-size JPEG (nitrojpeg finds it)
-    if (!nj_find_embedded(data, len, &eoff, &esize, &raw_orientation) && eoff < len && esize <= len - eoff) {
-        memmove(data, data + eoff, esize);
-        memset(data + esize, 0, 64);   // (the zero padding read_file leaves after the data)
+    if (!raw_orientation && !nj_find_embedded(data, len, &eoff, &esize, &orient) && eoff < len && esize <= len - eoff) {
+        memmove(data, data + eoff, esize);   // (a raw file with another extension: read whole)
+        memset(data + esize, 0, 64);         // (the zero padding read_file leaves after the data)
         len = esize;
-    } else
-        raw_orientation = 0;
+        raw_orientation = orient;
+    }
 #ifdef NV_VECTOR
     VectorDoc *vec = load_vector(path, data, len);
     if (vec) {
@@ -2144,13 +2177,13 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     return DefWindowProcW(h, msg, wp, lp);
 }
 
-// Image size from the file header (first 256 KB), for the first window size.
+// Image size from the file header (first MB), for the first window size.
 static int header_size(const wchar_t *path, double *w, double *h) {
     HANDLE f = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
     if (f == INVALID_HANDLE_VALUE) return 0;
-    static uint8_t b[262144 + 64];
+    static uint8_t b[(1 << 20) + 64];   // (camera raw: Nikon's SubIFD directories are ~270 KB in)
     DWORD n = 0;
-    ReadFile(f, b, 262144, &n, NULL);
+    ReadFile(f, b, 1 << 20, &n, NULL);
     CloseHandle(f);
     memset(b + n, 0, 64);
     nj_info ji;

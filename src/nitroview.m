@@ -177,6 +177,34 @@ static NSData *read_file(NSString *path) {
     return got == (size_t)st.st_size ? d : nil;
 }
 
+// Camera raw files (CR2, NEF ...): reads only the start (the TIFF directories) and the
+// full-size JPEG nitrojpeg finds there, not the raw data (most of the 10-30 MB). nil if there
+// is no such JPEG (the caller reads it all).
+static NSData *read_raw_jpeg(NSString *path, int *orientation) {
+    int fd = open(path.fileSystemRepresentation, O_RDONLY);
+    if (fd < 0) return nil;
+    NSData *out = nil;
+    struct stat st;
+    size_t cap = 1 << 20;   // (Nikon puts the SubIFD directories after the maker notes: ~270 KB in)
+    uint8_t *hdr = malloc(cap);
+    ssize_t n = hdr && !fstat(fd, &st) ? pread(fd, hdr, cap, 0) : -1;
+    size_t off, len;
+    if (n > 0 && !nj_find_embedded(hdr, (size_t)n, &off, &len, orientation) && off < (size_t)st.st_size &&
+        len <= (size_t)st.st_size - off) {
+        NSMutableData *d = [NSMutableData dataWithLength:len];
+        size_t got = 0;
+        while (got < len) {
+            ssize_t r = pread(fd, (uint8_t *)d.mutableBytes + got, len - got, (off_t)(off + got));
+            if (r <= 0) break;
+            got += (size_t)r;
+        }
+        if (got == len) out = d;
+    }
+    free(hdr);
+    close(fd);
+    return out;
+}
+
 // PSD/PSB: reads only what the merged image needs. Big PSDs are mostly layer
 // data (~80% of the file); the merged image is at the end. Builds a slim PSD in
 // memory: header + colour mode data + image resources (ICC profile) + an empty
@@ -519,15 +547,19 @@ static Decoded *decode_file(NSString *path, BufferPool *pool, size_t align) {
         if (data && (ps_read_info(data.bytes, data.length, &pi) || !pi.supported || pi.width > MAX_TEX || pi.height > MAX_TEX))
             data = nil;
     }
+    // a camera raw (CR2, NEF ...) shows its full-size JPEG (nitrojpeg finds it): only that is read
+    int raw_orientation = 0, orient = 0;
+    if (!data && ([ext isEqualToString:@"cr2"] || [ext isEqualToString:@"nef"] || [ext isEqualToString:@"nrw"]) &&
+        (data = read_raw_jpeg(path, &orient)))
+        raw_orientation = orient;
     if (!data) data = read_file(path);
     if (!data) return nil;
     size_t eoff, esize;
-    int raw_orientation = 0;   // a camera raw (CR2, NEF ...) shows its full-size JPEG (nitrojpeg finds it)
-    if (!nj_find_embedded(data.bytes, data.length, &eoff, &esize, &raw_orientation) && eoff < data.length &&
-        esize <= data.length - eoff)
+    if (!raw_orientation && !nj_find_embedded(data.bytes, data.length, &eoff, &esize, &orient) && eoff < data.length &&
+        esize <= data.length - eoff) {   // (a raw file with another extension: read whole)
         data = [data subdataWithRange:NSMakeRange(eoff, esize)];
-    else
-        raw_orientation = 0;
+        raw_orientation = orient;
+    }
     double t1 = now_ms();
     Decoded *d = [Decoded new];
     d.read_ms = t1 - t0;
