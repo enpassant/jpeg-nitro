@@ -2097,8 +2097,7 @@ static void show_page(int delta) {
 
 static void page_done(PageJob *j) {   // WM_APP_PAGE
     if (j->d && loader_replace_image(j->index, j->old, j->d) && j->index == V.index) {
-        V.zoomed = 0;   // (pages may differ in size)
-        size_window_for(j->d);
+        fit_window_to(j->d);   // (zoomed in: zoom and position stay, as when paging images)
         update_title();
         redraw();
     }

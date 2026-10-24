@@ -1830,7 +1830,6 @@ static int debug_zoom(void) {   // NV_DEBUG_ZOOM=1: log wheel / pinch events and
     // [ ] (Option+F / G on a Hungarian keyboard, or the keys where US has them): the pages of a document
     unichar typed = e.characters.length == 1 ? [e.characters characterAtIndex:0] : 0;
     if (cur && cur.pages > 1 && (typed == '[' || typed == ']' || e.keyCode == 33 || e.keyCode == 30)) {
-        _zoomed = NO;   // (pages may differ in size)
         [_loader showPage:cur.page + (typed == ']' || (typed != '[' && e.keyCode == 30) ? 1 : -1) of:_index];
         return;
     }
