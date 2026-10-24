@@ -51,6 +51,35 @@
           "type": "patch",
           "path": "../../patches/lunasvg.patch",
           "dest": "third_party/lunasvg"
+        },
+        {
+          "type": "archive",
+          "url": "https://github.com/gereoffy/libcdr/archive/551bab4aef5b2541c88180b01070f9c4ec9f3539.tar.gz",
+          "sha256": "09dd79028678f9c39bc3dbab5b3976ca4db2b4a3959e1cfe135a32064ed525c1",
+          "dest": "third_party/libcdr"
+        },
+        {
+          "type": "archive",
+          "url": "https://dev-www.libreoffice.org/src/librevenge-0.0.6.tar.bz2",
+          "sha256": "52a65e904d255dbdd97a8b7bb28d6574e14f999eb01416aff004502406d0904d",
+          "dest": "third_party/librevenge"
+        },
+        {
+          "type": "patch",
+          "path": "../../patches/librevenge.patch",
+          "dest": "third_party/librevenge"
+        },
+        {
+          "type": "archive",
+          "url": "https://dev-www.libreoffice.org/src/lcms2-2.19.1.tar.gz",
+          "sha256": "bfc54f7bab59fbc921012014a8032e4cba4abd46db47d46b76416a8c0b2815c8",
+          "dest": "third_party/lcms2"
+        },
+        {
+          "type": "archive",
+          "url": "https://archives.boost.io/release/1.89.0/source/boost_1_89_0.tar.bz2",
+          "sha256": "85a33fa22621b4f314f8e85e1a5e2a9363d22e4f4992925d4bb3bc631b5a0c7a",
+          "dest": "third_party/boost"
         }
       ]
     }
