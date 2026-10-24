@@ -261,7 +261,8 @@ flatpak: $(FLATPAK_MANIFEST) packaging/flatpak/$(GNOME_APP_ID).metainfo.xml $(GN
 	fi; \
 	$(FLATPAK_BUILDER) $$scope --install-deps-from=flathub --force-clean --repo=$(CURDIR)/$(FLATPAK_REPO) $(CURDIR)/$(FLATPAK_BUILD) \
 	  $(CURDIR)/$(FLATPAK_MANIFEST)
-	flatpak build-bundle $(FLATPAK_REPO) $(FLATPAK_BUNDLE) $(GNOME_APP_ID) stable
+	flatpak build-bundle --runtime-repo=https://flathub.org/repo/flathub.flatpakrepo $(FLATPAK_REPO) $(FLATPAK_BUNDLE) \
+	  $(GNOME_APP_ID) stable   # (installing it fetches the GNOME runtime from Flathub if needed)
 	@echo "built $(FLATPAK_BUNDLE)"
 
 # optional Wuffs PNG decoder (third_party/wuffs.c, Apache-2.0), compiled once
