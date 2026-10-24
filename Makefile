@@ -57,10 +57,11 @@ FRAMEWORKS := -framework Cocoa -framework Metal -framework MetalKit -framework Q
 DEC_SRC    := src/nitrojpeg.c src/nitropng.c src/nitropsd.c
 DEC_HDR    := src/nitrojpeg.h src/nitropng.h src/nitropsd.h src/nitro_os.h
 
-# Linux library: the three production decoders in one native C library.
+# Linux library: the decoders in one native C library (JPEG, PNG, PSD, and HEIC, DNG, WebP).
 # Keep dedicated PIC objects so the existing benchmark/test objects stay unchanged.
 LIBDIR     := build/lib
-LIB_OBJS   := $(LIBDIR)/nitrojpeg.o $(LIBDIR)/nitropng.o $(LIBDIR)/nitropsd.o
+LIB_OBJS   := $(LIBDIR)/nitrojpeg.o $(LIBDIR)/nitropng.o $(LIBDIR)/nitropsd.o $(LIBDIR)/nitroheic.o $(LIBDIR)/nitrohevc.o \
+              $(LIBDIR)/nitrodng.o $(LIBDIR)/nitrowebp.o
 LIB_SHARED := $(LIBDIR)/libnitro.so
 LIB_STATIC := $(LIBDIR)/libnitro.a
 LIB_CFLAGS := $(CFLAGS) -fPIC
@@ -176,6 +177,22 @@ $(LIBDIR)/nitropsd.o: src/nitropsd.c src/nitropsd.h src/nitropng.h src/nitro_os.
 	@mkdir -p $(LIBDIR)
 	$(CC) $(LIB_CFLAGS) -c $< -o $@
 
+$(LIBDIR)/nitroheic.o: src/nitroheic.c src/nitroheic.h src/nitrohevc.h src/nitro_os.h
+	@mkdir -p $(LIBDIR)
+	$(CC) $(LIB_CFLAGS) -c $< -o $@
+
+$(LIBDIR)/nitrohevc.o: src/nitrohevc.c src/nitrohevc.h src/nitro_os.h
+	@mkdir -p $(LIBDIR)
+	$(CC) $(LIB_CFLAGS) -c $< -o $@
+
+$(LIBDIR)/nitrodng.o: src/nitrodng.c src/nitrodng.h src/nitro_os.h
+	@mkdir -p $(LIBDIR)
+	$(CC) $(LIB_CFLAGS) -c $< -o $@
+
+$(LIBDIR)/nitrowebp.o: src/nitrowebp.c src/nitrowebp.h src/nitro_os.h
+	@mkdir -p $(LIBDIR)
+	$(CC) $(LIB_CFLAGS) -c $< -o $@
+
 $(LIB_SHARED): $(LIB_OBJS) src/libnitro.map
 	$(CC) -shared -Wl,-soname,libnitro.so -Wl,--version-script=src/libnitro.map -o $@ $(LIB_OBJS) $(THREADLIBS)
 
@@ -189,16 +206,22 @@ $(GNOME_RES): $(GNOME_DIR)/nitroview.gresource.xml $(GNOME_DIR)/nitro-window.ui 
 	@mkdir -p $(@D)
 	glib-compile-resources $< --sourcedir=$(GNOME_DIR) --sourcedir=. --target=$@ --generate-source
 
-$(GNOME_BIN): $(GNOME_SRC) $(GNOME_HDR) $(LIB_SHARED)
+# SVG in the GNOME viewer: the same nitrosvg (lunasvg) as on macOS / Windows, as PIC objects
+GNOME_SVG := $(if $(filter 1,$(SVG)),$(LIBDIR)/libnitrosvg.a)
+$(LIBDIR)/libnitrosvg.a: src/nitrosvg.cpp src/nitrosvg.h $(SVG_STAMP)
+	$(call svg_lib,$(CPUFLAGS) -fPIC)
+
+$(GNOME_BIN): $(GNOME_SRC) $(GNOME_HDR) $(LIB_SHARED) $(GNOME_SVG)
 	@pkg-config --exists $(GNOME_PKGS) || { echo "missing GNOME development packages: gtk4 libadwaita-1"; exit 1; }
-	@pkg-config --atleast-version=4.10 gtk4 || { echo "GNOME frontend requires GTK 4.10 or newer"; exit 1; }
-	@pkg-config --atleast-version=1.4 libadwaita-1 || { echo "GNOME frontend requires libadwaita 1.4 or newer"; exit 1; }
+	@pkg-config --atleast-version=4.6 gtk4 || { echo "GNOME frontend requires GTK 4.6 or newer"; exit 1; }
+	@pkg-config --atleast-version=1.1 libadwaita-1 || { echo "GNOME frontend requires libadwaita 1.1 or newer"; exit 1; }
 	$(CC) -std=gnu11 -O2 $(CPUFLAGS) $(PORTFLAGS) -Wall -Wextra -Wno-unused-parameter -Isrc -I$(GNOME_DIR) $(GNOME_CFLAGS) \
-	  $(GNOME_SRC) -L$(LIBDIR) -lnitro -Wl,-rpath,'$(GNOME_RPATH)' $(GNOME_LIBS) $(THREADLIBS) -lm -o $@
+	  $(if $(GNOME_SVG),-DNV_SVG) $(GNOME_SRC) $(GNOME_SVG) -L$(LIBDIR) -lnitro -Wl,-rpath,'$(GNOME_RPATH)' $(GNOME_LIBS) \
+	  $(if $(GNOME_SVG),-lstdc++) $(THREADLIBS) -lm -o $@
 
 # GNOME viewer: command-line open plus a native Open/Quit application shell.
 gnome: $(GNOME_BIN)
-	@echo "built $(GNOME_BIN)"
+	@echo "built $(GNOME_BIN) (SVG: $(if $(GNOME_SVG),nitrosvg,GTK's loaders))"
 
 # Development desktop registration for GNOME Shell. The generated desktop entry uses
 # the absolute path of this source-tree binary so it also works without installing it.

@@ -13,7 +13,6 @@
 struct _NitroWindow {
     AdwApplicationWindow parent_instance;
 
-    AdwToolbarView *toolbar_view;
     GtkStack *stack;
     NitroView *view;
     AdwStatusPage *status_page;
@@ -39,20 +38,38 @@ struct _NitroWindow {
     double drag_last_y;
     double page_accum;
     double pinch_last_scale;
+
+    GPtrArray *deleted;            // Del: for undo (DeletedFile)
+    gboolean sized;                // the window was sized to the first image
+    guint present_source;          // shows the window if the first image takes long
 };
+
+typedef struct {
+    GFile *original, *moved;       // where it was, where it is now (in .delete)
+    int index;                     // its place in the list
+} DeletedFile;
+
+static void deleted_file_free(gpointer data) {
+    DeletedFile *d = data;
+    g_object_unref(d->original);
+    g_object_unref(d->moved);
+    g_free(d);
+}
 
 G_DEFINE_FINAL_TYPE(NitroWindow, nitro_window, ADW_TYPE_APPLICATION_WINDOW)
 
 static void update_title(NitroWindow *self);
 static void schedule_slideshow(NitroWindow *self);
 static void page(NitroWindow *self, gint delta);
+static void size_window(NitroWindow *self, gboolean fill);
 
 static gboolean supported_extension(const char *name) {
     const char *dot = name ? strrchr(name, '.') : NULL;
     if (!dot || !dot[1]) return FALSE;
     dot++;
-    // our decoders (JPEG, PNG, PSD/PSB), native GtkSvg, and GTK fallback loaders (see nitro-image.c)
-    static const char *const exts[] = {"jpg", "jpeg", "jpe", "jfif", "png", "psd", "psb",
+    // our decoders (JPEG, PNG, PSD/PSB), SVG (nitrosvg), and GTK fallback loaders (see nitro-image.c)
+    static const char *const exts[] = {"jpg", "jpeg", "jpe", "jfif", "png", "psd", "psb", "heic", "heif",
+                                       "dng", "cr2", "nef", "nrw", "arw", "raf",
                                        "tif", "tiff", "gif", "bmp", "webp", "svg", NULL};
     for (int i = 0; exts[i]; i++)
         if (g_ascii_strcasecmp(dot, exts[i]) == 0) return TRUE;
@@ -165,6 +182,12 @@ static void update_title(NitroWindow *self) {
                                 self->loading ? "loading..." : "CANNOT DECODE (unsupported or damaged)");
     }
 
+    if (self->image && self->image->dng && self->image->ev3) {
+        char *with_ev = g_strdup_printf("%s  %+.1f EV", title, self->image->ev3 / 3.0);
+        g_free(title);
+        title = with_ev;
+    }
+
     if (self->slideshow_ms > 0) {
         char *suffix = self->slideshow_paused
             ? g_strdup("[slideshow paused: P]")
@@ -265,10 +288,14 @@ static void show_current(NitroWindow *self) {
         return;
     }
 
-    nitro_view_set_image(self->view, image->texture, image->svg_bytes, image->orientation);
-    if (image->svg_bytes) {
-        image->source_width = image->width = nitro_view_get_image_width(self->view);
-        image->source_height = image->height = nitro_view_get_image_height(self->view);
+    nitro_view_set_image(self->view, image->texture, image->svg, image->svg_scale, image->orientation);
+    if (!self->sized) {   // the first image: the window to its size, then shown
+        self->sized = TRUE;
+        size_window(self, FALSE);
+        if (self->present_source) {
+            g_clear_handle_id(&self->present_source, g_source_remove);
+            gtk_window_present(GTK_WINDOW(self));
+        }
     }
     gtk_stack_set_visible_child(self->stack, GTK_WIDGET(self->view));
     update_title(self);
@@ -306,6 +333,84 @@ static void page_last(NitroWindow *self) {
     if (self->files && self->files->len) go_to(self, (gint)self->files->len - 1, -1);
 }
 
+// Del: the current file goes to the ".delete" folder next to it: nothing is lost (undo with U /
+// Ctrl+Z, or move it back by hand). The next image follows; the last one is not deleted.
+static void delete_current(NitroWindow *self) {
+    expand_directory(self);
+    if (!self->files || self->files->len < 2) {
+        gtk_widget_error_bell(GTK_WIDGET(self));
+        return;
+    }
+    GFile *file = g_ptr_array_index(self->files, self->index);
+    GFile *parent = g_file_get_parent(file);
+    if (!parent) {
+        gtk_widget_error_bell(GTK_WIDGET(self));
+        return;
+    }
+    GFile *bin = g_file_get_child(parent, ".delete");
+    g_file_make_directory(bin, NULL, NULL);   // (or it is there already)
+    char *name = g_file_get_basename(file);
+    GFile *to = g_file_get_child(bin, name);
+    for (int n = 2; g_file_query_exists(to, NULL); n++) {   // (never over an earlier one)
+        const char *dot = strrchr(name, '.');
+        char *alt = dot && dot != name ? g_strdup_printf("%.*s (%d)%s", (int)(dot - name), name, n, dot)
+                                       : g_strdup_printf("%s (%d)", name, n);
+        g_object_unref(to);
+        to = g_file_get_child(bin, alt);
+        g_free(alt);
+    }
+    GError *error = NULL;
+    if (!g_file_move(file, to, G_FILE_COPY_NOFOLLOW_SYMLINKS, NULL, NULL, NULL, &error)) {
+        g_warning("cannot move %s: %s", name, error->message);
+        g_clear_error(&error);
+        gtk_widget_error_bell(GTK_WIDGET(self));
+        g_object_unref(to);
+    } else {
+        DeletedFile *d = g_new(DeletedFile, 1);
+        d->original = g_object_ref(file);
+        d->moved = to;
+        d->index = self->index;
+        g_ptr_array_add(self->deleted, d);
+        gint i = self->index;
+        nitro_loader_remove_file(self->loader, i);   // (from self->files too: the same list)
+        self->started = FALSE;
+        go_to(self, MIN(i, (gint)self->files->len - 1), 1);
+    }
+    g_free(name);
+    g_object_unref(bin);
+    g_object_unref(parent);
+}
+
+// Undo the last Del: the file goes back to its place in the folder and in the list.
+static void undo_delete(NitroWindow *self) {
+    if (!self->deleted->len || !self->files) {
+        gtk_widget_error_bell(GTK_WIDGET(self));
+        return;
+    }
+    DeletedFile *d = g_ptr_array_index(self->deleted, self->deleted->len - 1);
+    if (g_file_query_exists(d->original, NULL) ||   // (something is there again, or it was moved away)
+        !g_file_move(d->moved, d->original, G_FILE_COPY_NOFOLLOW_SYMLINKS, NULL, NULL, NULL, NULL)) {
+        gtk_widget_error_bell(GTK_WIDGET(self));
+        return;
+    }
+    gint i = MIN(d->index, (gint)self->files->len);
+    nitro_loader_insert_file(self->loader, i, d->original);
+    g_ptr_array_remove_index(self->deleted, self->deleted->len - 1);
+    self->started = FALSE;
+    go_to(self, i, 1);
+}
+
+// DNG: brighter / darker by 1/3 EV (up to 3 EV; kept while paging): the DNGs are developed again,
+// the current one stays on screen until then.
+static void dng_exposure(NitroWindow *self, int delta) {
+    if (!self->image || !self->image->dng) return;
+    int ev3 = CLAMP(nitro_image_get_dng_ev3() + delta, -9, 9);
+    if (ev3 == nitro_image_get_dng_ev3()) return;
+    nitro_image_set_dng_ev3(ev3);
+    nitro_loader_dng_changed(self->loader);
+    show_current(self);
+}
+
 static void set_files(NitroWindow *self, GPtrArray *files, gboolean lazy_directory) {
     if (!files || files->len == 0) {
         if (files) g_ptr_array_unref(files);
@@ -323,6 +428,37 @@ static void set_files(NitroWindow *self, GPtrArray *files, gboolean lazy_directo
     go_to(self, 0, 1);
 }
 
+// The window to the image's size (larger than the screen: as large as fits), or with fill (key 0)
+// maximized. (Under Wayland a program cannot move its window, only resize it, through its default
+// size in GTK 4: the top-left corner stays; so the first window is shown only when it has its
+// size, and fill maximizes it instead of growing it past the screen's bottom.)
+static void size_window(NitroWindow *self, gboolean fill) {
+    if (!self->image || gtk_window_is_fullscreen(GTK_WINDOW(self))) return;
+    if (fill) {
+        gtk_window_maximize(GTK_WINDOW(self));
+        return;
+    }
+    GdkSurface *surface = gtk_native_get_surface(GTK_NATIVE(self));
+    GdkDisplay *display = gtk_widget_get_display(GTK_WIDGET(self));
+    GdkMonitor *monitor = surface ? gdk_display_get_monitor_at_surface(display, surface) : NULL;
+    if (!monitor) {   // (not shown yet: the first monitor)
+        GListModel *monitors = gdk_display_get_monitors(display);
+        monitor = g_list_model_get_n_items(monitors) ? g_list_model_get_item(monitors, 0) : NULL;
+        if (monitor) g_object_unref(monitor);   // (the list keeps it)
+    }
+    if (!monitor) return;
+    GdkRectangle geo;
+    gdk_monitor_get_geometry(monitor, &geo);
+    int factor = MAX(1, gtk_widget_get_scale_factor(GTK_WIDGET(self)));
+    int bar = gtk_widget_get_visible(GTK_WIDGET(self->header_bar)) ? MAX(gtk_widget_get_height(GTK_WIDGET(self->header_bar)), 46) : 0;
+    // (GTK 4 tells no work area: room for the panels and the dock)
+    double maxw = geo.width * 0.85, maxh = geo.height * 0.85 - bar;
+    double iw = (double)self->image->width / factor, ih = (double)self->image->height / factor;   // (100%: pixel for pixel)
+    double k = MIN(1.0, MIN(maxw / iw, maxh / ih));
+    if (gtk_window_is_maximized(GTK_WINDOW(self))) gtk_window_unmaximize(GTK_WINDOW(self));
+    gtk_window_set_default_size(GTK_WINDOW(self), MAX(320, (int)floor(iw * k)), MAX(200, (int)floor(ih * k)) + bar);
+}
+
 static void toggle_fullscreen(NitroWindow *self) {
     if (gtk_window_is_fullscreen(GTK_WINDOW(self))) gtk_window_unfullscreen(GTK_WINDOW(self));
     else gtk_window_fullscreen(GTK_WINDOW(self));
@@ -330,11 +466,13 @@ static void toggle_fullscreen(NitroWindow *self) {
 
 static void window_to_image(NitroWindow *self) {
     nitro_view_fit(self->view, FALSE);
+    size_window(self, FALSE);
     update_title(self);
 }
 
 static void fit_to_screen(NitroWindow *self) {
     nitro_view_fit(self->view, TRUE);
+    size_window(self, TRUE);
     update_title(self);
 }
 
@@ -390,6 +528,15 @@ static gboolean key_pressed(GtkEventControllerKey *controller, guint keyval, gui
         toggle_slideshow_pause(self); return TRUE;
     case GDK_KEY_w: case GDK_KEY_W:
         window_to_image(self); return TRUE;
+    case GDK_KEY_Delete: case GDK_KEY_KP_Delete:
+        delete_current(self); return TRUE;
+    case GDK_KEY_u: case GDK_KEY_U:
+        undo_delete(self); return TRUE;
+    case GDK_KEY_z: case GDK_KEY_Z:
+        if (!(state & GDK_CONTROL_MASK)) return FALSE;
+        undo_delete(self); return TRUE;
+    case GDK_KEY_e: case GDK_KEY_E:
+        dng_exposure(self, shift ? -1 : 1); return TRUE;
     default:
         return FALSE;
     }
@@ -450,10 +597,14 @@ static void scroll_begin(GtkEventControllerScroll *controller, gpointer user_dat
 static gboolean scroll_cb(GtkEventControllerScroll *controller, double dx, double dy, gpointer user_data) {
     NitroWindow *self = NITRO_WINDOW(user_data);
     GdkModifierType state = gtk_event_controller_get_current_event_state(GTK_EVENT_CONTROLLER(controller));
-    GdkScrollUnit unit = gtk_event_controller_scroll_get_unit(controller);
+#if GTK_CHECK_VERSION(4, 8, 0)
+    gboolean wheel = gtk_event_controller_scroll_get_unit(controller) == GDK_SCROLL_UNIT_WHEEL;
+#else
+    gboolean wheel = TRUE;   // (GTK 4.6 does not tell a wheel from a touchpad: steps)
+#endif
 
     if (state & GDK_CONTROL_MASK) {
-        if (unit == GDK_SCROLL_UNIT_WHEEL) {
+        if (wheel) {
             if (dy > 0) page(self, 1);
             else if (dy < 0) page(self, -1);
         } else {
@@ -465,7 +616,7 @@ static gboolean scroll_cb(GtkEventControllerScroll *controller, double dx, doubl
     }
 
     if (dy == 0.0) return FALSE;
-    gboolean continuous = unit == GDK_SCROLL_UNIT_SURFACE;
+    gboolean continuous = !wheel;
     double factor = continuous ? exp(-dy * 0.01) : (dy < 0 ? NITRO_SQRT2 : NITRO_INV_SQRT2);
     double x = self->pointer_valid ? self->pointer_x : gtk_widget_get_width(GTK_WIDGET(self->view)) / 2.0;
     double y = self->pointer_valid ? self->pointer_y : gtk_widget_get_height(GTK_WIDGET(self->view)) / 2.0;
@@ -523,27 +674,32 @@ static void fullscreened_notify(GObject *object, GParamSpec *pspec, gpointer use
     NitroWindow *self = NITRO_WINDOW(user_data);
     gboolean fullscreen = gtk_window_is_fullscreen(GTK_WINDOW(self));
     nitro_view_set_fullscreen(self->view, fullscreen);
-    adw_toolbar_view_set_reveal_top_bars(self->toolbar_view, !fullscreen);
+    gtk_widget_set_visible(GTK_WIDGET(self->header_bar), !fullscreen);
     update_title(self);
 }
 
+static void open_chosen(NitroWindow *self, GListModel *model) {   // files and folders from the Open dialog
+    guint count = g_list_model_get_n_items(model);
+    GPtrArray *inputs = g_ptr_array_new_with_free_func(g_object_unref);
+    for (guint i = 0; i < count; i++) {
+        GFile *file = g_list_model_get_item(model, i);
+        if (file) g_ptr_array_add(inputs, file);
+    }
+    if (inputs->len) {
+        GPtrArray *files = collect_inputs((GFile **)inputs->pdata, (gint)inputs->len);
+        set_files(self, files, FALSE);
+    }
+    g_ptr_array_unref(inputs);
+}
+
+#if GTK_CHECK_VERSION(4, 10, 0)
 static void open_dialog_done(GObject *source, GAsyncResult *result, gpointer user_data) {
     NitroWindow *self = NITRO_WINDOW(user_data);
     GError *error = NULL;
     GListModel *model = gtk_file_dialog_open_multiple_finish(GTK_FILE_DIALOG(source), result, &error);
 
     if (model) {
-        guint count = g_list_model_get_n_items(model);
-        GPtrArray *inputs = g_ptr_array_new_with_free_func(g_object_unref);
-        for (guint i = 0; i < count; i++) {
-            GFile *file = g_list_model_get_item(model, i);
-            if (file) g_ptr_array_add(inputs, file);
-        }
-        if (inputs->len) {
-            GPtrArray *files = collect_inputs((GFile **)inputs->pdata, (gint)inputs->len);
-            set_files(self, files, FALSE);
-        }
-        g_ptr_array_unref(inputs);
+        open_chosen(self, model);
         g_object_unref(model);
     } else if (!g_error_matches(error, GTK_DIALOG_ERROR, GTK_DIALOG_ERROR_DISMISSED)) {
         g_warning("Open dialog failed: %s", error ? error->message : "unknown error");
@@ -552,15 +708,31 @@ static void open_dialog_done(GObject *source, GAsyncResult *result, gpointer use
     g_clear_error(&error);
     g_object_unref(self);
 }
+#else
+static void chooser_response(GtkNativeDialog *dialog, int response, gpointer user_data) {   // (GTK < 4.10)
+    NitroWindow *self = NITRO_WINDOW(user_data);
+    if (response == GTK_RESPONSE_ACCEPT) {
+        GListModel *model = gtk_file_chooser_get_files(GTK_FILE_CHOOSER(dialog));
+        open_chosen(self, model);
+        g_object_unref(model);
+    }
+    g_object_unref(dialog);
+    g_object_unref(self);
+}
+#endif
 
 static void nitro_window_dispose(GObject *object) {
     NitroWindow *self = NITRO_WINDOW(object);
     cancel_slideshow(self);
+    g_clear_handle_id(&self->present_source, g_source_remove);
     g_clear_pointer(&self->loader, nitro_loader_free);   // first: no more image_ready() calls
     nitro_image_free(self->image);
     self->image = NULL;
     g_clear_pointer(&self->files, g_ptr_array_unref);
+    g_clear_pointer(&self->deleted, g_ptr_array_unref);
+#if GTK_CHECK_VERSION(4, 8, 0)
     gtk_widget_dispose_template(GTK_WIDGET(object), NITRO_TYPE_WINDOW);
+#endif
     G_OBJECT_CLASS(nitro_window_parent_class)->dispose(object);
 }
 
@@ -571,7 +743,6 @@ static void nitro_window_class_init(NitroWindowClass *klass) {
     object_class->dispose = nitro_window_dispose;
 
     gtk_widget_class_set_template_from_resource(widget_class, "/com/github/gereoffy/nitroview/nitro-window.ui");
-    gtk_widget_class_bind_template_child(widget_class, NitroWindow, toolbar_view);
     gtk_widget_class_bind_template_child(widget_class, NitroWindow, stack);
     gtk_widget_class_bind_template_child(widget_class, NitroWindow, view);
     gtk_widget_class_bind_template_child(widget_class, NitroWindow, status_page);
@@ -584,6 +755,7 @@ static void nitro_window_init(NitroWindow *self) {
 
     self->index = -1;
     self->loader = nitro_loader_new(image_ready, self);
+    self->deleted = g_ptr_array_new_with_free_func(deleted_file_free);
     self->pointer_x = 0.0;
     self->pointer_y = 0.0;
     self->pointer_valid = FALSE;
@@ -632,6 +804,22 @@ static void nitro_window_init(NitroWindow *self) {
     g_signal_connect(self, "notify::fullscreened", G_CALLBACK(fullscreened_notify), self);
 }
 
+static gboolean present_anyway(gpointer data) {   // the first image is slow (or failed): shown at the default size
+    NitroWindow *self = NITRO_WINDOW(data);
+    self->present_source = 0;
+    gtk_window_present(GTK_WINDOW(self));
+    return G_SOURCE_REMOVE;
+}
+
+void nitro_window_present(NitroWindow *self) {
+    g_return_if_fail(NITRO_IS_WINDOW(self));
+    if (self->sized || !self->files || gtk_widget_get_mapped(GTK_WIDGET(self))) {
+        if (!self->present_source) gtk_window_present(GTK_WINDOW(self));
+        return;
+    }
+    if (!self->present_source) self->present_source = g_timeout_add(400, present_anyway, self);
+}
+
 NitroWindow *nitro_window_new(AdwApplication *application) {
     return g_object_new(NITRO_TYPE_WINDOW, "application", application, NULL);
 }
@@ -662,11 +850,20 @@ void nitro_window_open_files(NitroWindow *self, GFile **files, gint n_files) {
 void nitro_window_open_dialog(NitroWindow *self) {
     g_return_if_fail(NITRO_IS_WINDOW(self));
 
+#if GTK_CHECK_VERSION(4, 10, 0)
     GtkFileDialog *dialog = gtk_file_dialog_new();
     gtk_file_dialog_set_title(dialog, "Open Images");
     gtk_file_dialog_set_modal(dialog, TRUE);
     gtk_file_dialog_open_multiple(dialog, GTK_WINDOW(self), NULL, open_dialog_done, g_object_ref(self));
     g_object_unref(dialog);
+#else
+    GtkFileChooserNative *chooser = gtk_file_chooser_native_new("Open Images", GTK_WINDOW(self),
+                                                                GTK_FILE_CHOOSER_ACTION_OPEN, "_Open", "_Cancel");
+    gtk_file_chooser_set_select_multiple(GTK_FILE_CHOOSER(chooser), TRUE);
+    gtk_native_dialog_set_modal(GTK_NATIVE_DIALOG(chooser), TRUE);
+    g_signal_connect(chooser, "response", G_CALLBACK(chooser_response), g_object_ref(self));
+    gtk_native_dialog_show(GTK_NATIVE_DIALOG(chooser));
+#endif
 }
 
 void nitro_window_set_options(NitroWindow *self, gboolean fullscreen, int slideshow_ms) {
@@ -675,7 +872,7 @@ void nitro_window_set_options(NitroWindow *self, gboolean fullscreen, int slides
     self->slideshow_paused = FALSE;
     if (fullscreen) {
         nitro_view_set_fullscreen(self->view, TRUE);
-        adw_toolbar_view_set_reveal_top_bars(self->toolbar_view, FALSE);
+        gtk_widget_set_visible(GTK_WIDGET(self->header_bar), FALSE);
         gtk_window_fullscreen(GTK_WINDOW(self));
     }
     if (self->image) {

@@ -6,12 +6,19 @@
         nj_set_bands;
         nj_set_scalar_idct;
         nj_set_chunks;
+        nj_find_embedded;
         np_read_info;
         np_decode;
         np_zlib_decompress;
         np_set_chunks;
         ps_read_info;
         ps_decode;
+        nh_read_info;
+        nh_decode_planes;
+        ndng_read_info;
+        ndng_decode;
+        nw_read_info;
+        nw_decode_planes;
     local:
         *;
 };

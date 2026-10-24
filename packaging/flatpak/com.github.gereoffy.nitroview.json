@@ -40,6 +40,17 @@
           "type": "git",
           "path": "../..",
           "branch": "main"
+        },
+        {
+          "type": "archive",
+          "url": "https://github.com/sammycage/lunasvg/archive/90d6ff333862acf3f5551ffbbcb1e45957661881.tar.gz",
+          "sha256": "bd87c3954771089836516e94ffbf1a57cc029a5d1afa8537fbd898dfe9f70f17",
+          "dest": "third_party/lunasvg"
+        },
+        {
+          "type": "patch",
+          "path": "../../patches/lunasvg.patch",
+          "dest": "third_party/lunasvg"
         }
       ]
     }

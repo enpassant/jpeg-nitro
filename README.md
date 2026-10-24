@@ -47,7 +47,7 @@ on an Intel i9 (M1: see [below](#apple-silicon-m1)). Lossy **WebP** images are d
 through Apple ImageIO on macOS, WIC on Windows and GTK's loaders on Linux (see **Windows** and
 **GNOME / Linux** below). On macOS and Windows it also shows vector drawings, **SVG** (lunasvg) and
 **CorelDRAW** CDR / CMX (libcdr, our fork with many fixes), sharp at any zoom and paging as fast
-as photos (see **SVG** and **CorelDRAW** below); the GNOME viewer shows SVG through GTK.
+as photos (see **SVG** and **CorelDRAW** below); the GNOME viewer shows SVG the same way.
 (The name: racing cars boost the turbo with nitro.)
 
 Developed and measured on an Intel x86-64 Mac (i9 13th gen, 8 cores / 16 threads, AMD RX 580).
@@ -115,15 +115,20 @@ colour management (images are shown as sRGB); touchpad gestures are untested.
 
 **GNOME / Linux:** `nitroview-gnome` ([src/gnome/](src/gnome), GTK 4 + libadwaita, contributed by
 Ferenc Czirok) has the same keys, mouse and trackpad gestures, zoom and pan, full screen, slideshow
-(`-s`), one file → its folder, drag & drop and an Open dialog. JPEG / PNG / PSD go through the three
-decoders (as `libnitro.so`); the JPEG colour conversion is multi-threaded and gives exactly
+(`-s`), one file → its folder, drag & drop and an Open dialog, Del / U and E / Shift+E. JPEG, PNG,
+PSD, HEIC (through nitrohevc), lossy WebP, DNG and the JPEG of camera raw files go through our
+decoders (as `libnitro.so`), SVG through nitrosvg (sharp when zoomed in, when `scripts/get-deps.sh`
+has fetched lunasvg); the JPEG colour conversion is multi-threaded and gives exactly
 libjpeg-turbo's RGB (`bench/rgbverify`), PNG rows go to GTK without a copy, and the EXIF
 orientation is applied when drawing. Images are decoded on a background thread with the same
 prefetch as on macOS / Windows (3 ahead, 2 behind). Everything else (progressive JPEG, TIFF, GIF,
-WebP ...) is opened by GTK's own loaders. The window keeps its size while paging (under Wayland an
-application doesn't resize its own window freely). `make gnome` needs GTK 4.10+ and libadwaita 1.4+;
-`make gnome-register` adds it to the desktop for the current user; `make flatpak` builds
-`nitroview-gnome.flatpak` on the GNOME 50 runtime.
+lossless WebP ...) is opened by GTK's own loaders. The window opens at the size of the first image,
+W sets it to the image again, 0 maximizes it; it keeps its size while paging (under Wayland an
+application cannot move its window, so it does not grow it freely). `make gnome` needs GTK 4.6+ and
+libadwaita 1.1+ (Ubuntu 22.04; there clang also needs `libstdc++-12-dev` for nitrosvg). Before GTK
+4.10 textures are drawn only with a linear filter: large images get mipmaps made on the CPU, and the
+pixel-exact 200–800% zoom is smoothed. `make gnome-register` adds it to the desktop for the current
+user; `make flatpak` builds `nitroview-gnome.flatpak` on the GNOME 50 runtime.
 
 The window is sized to the image: at exactly 100% if it is smaller than the screen, otherwise
 with the image's aspect ratio as large as fits (no black bars). When zooming in, the window grows with the image up to the screen
@@ -600,9 +605,9 @@ PNG or PSD file into memory and decodes it several times (`-r`, default 5), `-j 
 threads.
 
 `make gnome` builds `nitroview-gnome` against `build/lib/libnitro.so` (GTK4 + libadwaita).
-It opens JPEG, PNG and PSD/PSB through the Nitro decoders; files can be opened from the command
-line, the desktop or the native Open dialog. `make gnome-register` installs the desktop file
-and icon for the current user.
+It opens JPEG, PNG, PSD/PSB, HEIC, lossy WebP, DNG and camera raw files through the Nitro decoders,
+SVG through nitrosvg; files can be opened from the command line, the desktop or the native Open
+dialog. `make gnome-register` installs the desktop file and icon for the current user.
 
 On macOS the pthread pool can be tried with `-DNITRO_PTHREAD_POOL`: there it is as fast as GCD
 and passes all checks (`verify`, `pngverify`, `psdverify`, the ASan robustness tests,

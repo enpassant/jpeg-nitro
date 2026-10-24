@@ -13,17 +13,20 @@
 #define FIX(x) ((int32_t)((x) * (1L << SCALEBITS) + 0.5))
 
 typedef struct {
-    int cr_r[256], cb_b[256];
+    int y[256], cr_r[256], cb_b[256];
     int32_t cr_g[256], cb_g[256];
 } Tables;
 
-static void build_tables(Tables *t) {
+// full range (JPEG, HEIC); limited range (WebP / VP8: Y 16..235, Cb Cr 16..240): the same, scaled
+static void build_tables(Tables *t, int limited) {
+    double ky = limited ? 255.0 / 219 : 1, kc = limited ? 255.0 / 224 : 1;
     for (int i = 0; i < 256; i++) {
         int32_t x = i - 128;
-        t->cr_r[i] = (int)((FIX(1.40200) * x + ONE_HALF) >> SCALEBITS);
-        t->cb_b[i] = (int)((FIX(1.77200) * x + ONE_HALF) >> SCALEBITS);
-        t->cr_g[i] = -FIX(0.71414) * x;
-        t->cb_g[i] = -FIX(0.34414) * x + ONE_HALF;
+        t->y[i] = limited ? (int)((FIX(ky) * (i - 16) + ONE_HALF) >> SCALEBITS) : i;
+        t->cr_r[i] = (int)((FIX(1.40200 * kc) * x + ONE_HALF) >> SCALEBITS);
+        t->cb_b[i] = (int)((FIX(1.77200 * kc) * x + ONE_HALF) >> SCALEBITS);
+        t->cr_g[i] = -FIX(0.71414 * kc) * x;
+        t->cb_g[i] = -FIX(0.34414 * kc) * x + ONE_HALF;
     }
 }
 
@@ -76,22 +79,12 @@ static void upsample_row(const Comp *c, int y, int width, uint8_t *out, int *cs)
     }
 }
 
-void nc_jpeg_to_rgb(const nj_info *fi, uint8_t *const planes[3], const size_t pitch[3], uint8_t *dst, size_t stride) {
-    const int W = fi->width, H = fi->height, nc = fi->ncomp;
-    Comp comps[3];
+static void convert(const Comp *comps, int nc, int W, int H, int limited, uint8_t *dst, size_t stride) {
     int maxcw = W;
-    for (int k = 0; k < nc; k++) {
-        Comp *c = &comps[k];
-        c->p = planes[k];
-        c->pitch = pitch[k];
-        c->cw = (W * fi->h[k] + fi->hmax - 1) / fi->hmax;
-        c->ch = (H * fi->v[k] + fi->vmax - 1) / fi->vmax;
-        c->hr = fi->hmax / fi->h[k];
-        c->vr = fi->vmax / fi->v[k];
-        if (2 * c->cw > maxcw) maxcw = 2 * c->cw;
-    }
+    for (int k = 0; k < nc; k++)
+        if (2 * comps[k].cw > maxcw) maxcw = 2 * comps[k].cw;
     Tables tab;
-    build_tables(&tab);
+    build_tables(&tab, limited);
     const Comp *cp = comps;
     const Tables *t = &tab;
     size_t bands = (size_t)nitro_ncpu() * 4;
@@ -113,7 +106,7 @@ void nc_jpeg_to_rgb(const nj_info *fi, uint8_t *const planes[3], const size_t pi
             upsample_row(&cp[1], y, W, cbr, cs);
             upsample_row(&cp[2], y, W, crr, cs);
             for (int x = 0; x < W; x++) {
-                int Y = yr[x], cb = cbr[x], cr = crr[x];
+                int Y = t->y[yr[x]], cb = cbr[x], cr = crr[x];
                 o[3 * x] = clamp255(Y + t->cr_r[cr]);
                 o[3 * x + 1] = clamp255(Y + (int)((t->cb_g[cb] + t->cr_g[cr]) >> SCALEBITS));
                 o[3 * x + 2] = clamp255(Y + t->cb_b[cb]);
@@ -122,6 +115,35 @@ void nc_jpeg_to_rgb(const nj_info *fi, uint8_t *const planes[3], const size_t pi
         free(rows);
         free(cs);
     });
+}
+
+void nc_jpeg_to_rgb(const nj_info *fi, uint8_t *const planes[3], const size_t pitch[3], uint8_t *dst, size_t stride) {
+    const int W = fi->width, H = fi->height;
+    Comp comps[3];
+    for (int k = 0; k < fi->ncomp; k++) {
+        Comp *c = &comps[k];
+        c->p = planes[k];
+        c->pitch = pitch[k];
+        c->cw = (W * fi->h[k] + fi->hmax - 1) / fi->hmax;
+        c->ch = (H * fi->v[k] + fi->vmax - 1) / fi->vmax;
+        c->hr = fi->hmax / fi->h[k];
+        c->vr = fi->vmax / fi->v[k];
+    }
+    convert(comps, fi->ncomp, W, H, 0, dst, stride);
+}
+
+void nc_yuv420_to_rgb(int width, int height, uint8_t *const planes[3], const size_t pitch[3], int limited, uint8_t *dst,
+                      size_t stride) {
+    Comp comps[3];
+    for (int k = 0; k < 3; k++) {
+        Comp *c = &comps[k];
+        c->p = planes[k];
+        c->pitch = pitch[k];
+        c->cw = k ? (width + 1) / 2 : width;
+        c->ch = k ? (height + 1) / 2 : height;
+        c->hr = c->vr = k ? 2 : 1;
+    }
+    convert(comps, 3, width, height, limited, dst, stride);
 }
 
 void nc_psd_to_rgb(const ps_info *si, const uint8_t *planes, uint8_t *dst, size_t stride) {

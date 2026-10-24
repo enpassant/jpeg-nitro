@@ -127,7 +127,8 @@ static gpointer run(gpointer data) {
         g_object_unref(file);
 
         g_mutex_lock(&l->lock);
-        gboolean stale = gen != l->gen;   // the file list changed meanwhile: index no longer valid
+        // the file list (index no longer valid) or the DNG exposure correction changed meanwhile
+        gboolean stale = gen != l->gen || (image && image->dng && image->ev3 != nitro_image_get_dng_ev3());
         if (image && (stale || l->ncache == MAX_CACHE)) {
             g_ptr_array_add(l->grave, image);
         } else if (image) {
@@ -200,6 +201,59 @@ void nitro_loader_set_files(NitroLoader *l, GPtrArray *files, int keep_index, in
     g_mutex_unlock(&l->lock);
 }
 
+static void shift_locked(NitroLoader *l, int from, int delta) {   // indices >= from move by delta
+    for (int c = 0; c < l->ncache; c++)
+        if (l->cache[c].index >= from) l->cache[c].index += delta;
+    GHashTable *failed = g_hash_table_new_full(g_direct_hash, g_direct_equal, NULL, g_free);
+    GHashTableIter it;
+    gpointer key, value;
+    g_hash_table_iter_init(&it, l->failed);
+    while (g_hash_table_iter_next(&it, &key, &value)) {
+        int i = GPOINTER_TO_INT(key) - 1;
+        g_hash_table_iter_steal(&it);
+        g_hash_table_insert(failed, GINT_TO_POINTER((i >= from ? i + delta : i) + 1), value);
+    }
+    g_hash_table_unref(l->failed);
+    l->failed = failed;
+    l->gen++;   // (a decode in flight would land at the old index)
+    g_cond_signal(&l->cond);
+}
+
+void nitro_loader_remove_file(NitroLoader *l, int index) {
+    g_mutex_lock(&l->lock);
+    for (int c = 0; c < l->ncache; c++)
+        if (l->cache[c].index == index) {
+            g_ptr_array_add(l->grave, l->cache[c].image);
+            l->cache[c] = l->cache[--l->ncache];
+            break;
+        }
+    g_hash_table_remove(l->failed, GINT_TO_POINTER(index + 1));
+    if (l->files && index >= 0 && index < (int)l->files->len) g_ptr_array_remove_index(l->files, (guint)index);
+    shift_locked(l, index + 1, -1);
+    g_mutex_unlock(&l->lock);
+}
+
+void nitro_loader_insert_file(NitroLoader *l, int index, GFile *file) {
+    g_mutex_lock(&l->lock);
+    shift_locked(l, index, 1);
+    if (l->files) g_ptr_array_insert(l->files, index, g_object_ref(file));
+    g_mutex_unlock(&l->lock);
+}
+
+void nitro_loader_dng_changed(NitroLoader *l) {
+    int ev3 = nitro_image_get_dng_ev3();
+    g_mutex_lock(&l->lock);
+    for (int c = 0; c < l->ncache;)
+        if (l->cache[c].image->dng && l->cache[c].image->ev3 != ev3) {
+            g_ptr_array_add(l->grave, l->cache[c].image);
+            l->cache[c] = l->cache[--l->ncache];
+        } else {
+            c++;
+        }
+    g_cond_signal(&l->cond);
+    g_mutex_unlock(&l->lock);
+}
+
 void nitro_loader_focus(NitroLoader *l, int index, int direction) {
     g_mutex_lock(&l->lock);
     l->cur = index;
@@ -216,7 +270,7 @@ NitroImage *nitro_loader_get(NitroLoader *l, int index) {
             copy = g_new(NitroImage, 1);
             *copy = *l->cache[i].image;
             if (copy->texture) g_object_ref(copy->texture);
-            if (copy->svg_bytes) g_bytes_ref(copy->svg_bytes);
+            nitro_svg_ref(copy->svg);
             break;
         }
     g_mutex_unlock(&l->lock);

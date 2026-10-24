@@ -4,23 +4,107 @@
 
 #include <gtk/gtk.h>   // GTK_CHECK_VERSION
 
+#include "../nitrodng.h"
+#include "../nitroheic.h"
 #include "../nitrojpeg.h"
 #include "../nitropng.h"
 #include "../nitropsd.h"
+#include "../nitrowebp.h"
+#ifdef NV_SVG
+#include "../nitrosvg.h"   // optional SVG rendering (lunasvg)
+#endif
 
+#include <math.h>
 #include <string.h>
 
 #define NITRO_READ_PADDING 64
 
 static int decode_threads;
+static gint dng_ev3;   // DNG exposure correction in 1/3 EV (key E / Shift+E)
 
-static gboolean is_svg_file(GFile *file) {
+// ---------------------------------------------------------------------------
+// SVG (nitrosvg): rendered at a fixed size here, its visible part again at screen resolution
+// when zoomed in (nitro-view.c). Without nitrosvg, SVG goes through GTK's loaders.
+
+struct _NitroSvg {
+    gint refs;
+#ifdef NV_SVG
+    nitrosvg *doc;
+#endif
+};
+
+NitroSvg *nitro_svg_ref(NitroSvg *svg) {
+    if (svg) g_atomic_int_inc(&svg->refs);
+    return svg;
+}
+
+void nitro_svg_unref(NitroSvg *svg) {
+    if (!svg || !g_atomic_int_dec_and_test(&svg->refs)) return;
+#ifdef NV_SVG
+    nitrosvg_free(svg->doc);
+#endif
+    g_free(svg);
+}
+
+GdkTexture *nitro_svg_render(NitroSvg *svg, double svg_scale, int w, int h, double scale, double x0, double y0) {
+#ifdef NV_SVG
+    if (!svg || w <= 0 || h <= 0 || (gsize)w > G_MAXSIZE / 4 / (gsize)h) return NULL;
+    gsize stride = (gsize)w * 4;
+    guint8 *px = g_try_malloc(stride * (gsize)h);
+    if (!px) return NULL;
+    double k = scale * svg_scale;   // device pixels per SVG unit
+    if (nitrosvg_render(svg->doc, px, w, h, stride, k, x0 / k, y0 / k)) {
+        g_free(px);
+        return NULL;
+    }
+    GBytes *bytes = g_bytes_new_take(px, stride * (gsize)h);
+    GdkTexture *t = gdk_memory_texture_new(w, h, GDK_MEMORY_B8G8R8A8_PREMULTIPLIED, bytes, stride);
+    g_bytes_unref(bytes);
+    return t;
+#else
+    (void)svg, (void)svg_scale, (void)w, (void)h, (void)scale, (void)x0, (void)y0;
+    return NULL;
+#endif
+}
+
+#ifdef NV_SVG
+static gboolean maybe_svg(GFile *file, const guint8 *data, gsize len) {   // .svg, or text starting with '<'
     char *name = g_file_get_basename(file);
     const char *dot = name ? strrchr(name, '.') : NULL;
     gboolean svg = dot && g_ascii_strcasecmp(dot, ".svg") == 0;
     g_free(name);
-    return svg;
+    gsize i = len >= 3 && !memcmp(data, "\xef\xbb\xbf", 3) ? 3 : 0;   // (UTF-8 byte order mark)
+    while (i < len && g_ascii_isspace(data[i])) i++;
+    return svg || (i < len && data[i] == '<');
 }
+
+// An SVG document: rendered with its long side 1024..4096 pixels (small icons enlarged, huge
+// drawings reduced), as the macOS / Windows viewers do. NULL if nitrosvg cannot read it.
+static NitroImage *load_svg(const guint8 *data, gsize len) {
+    nitrosvg *doc = nitrosvg_load(data, len);
+    if (!doc) return NULL;
+    double w = 0, h = 0;
+    nitrosvg_size(doc, &w, &h);
+    double l = MAX(w, h), k = l < 1024 ? 1024 / l : l > 4096 ? 4096 / l : 1;
+    NitroSvg *svg = g_new0(NitroSvg, 1);
+    svg->refs = 1;
+    svg->doc = doc;
+    int iw = MAX(1, (int)lround(w * k)), ih = MAX(1, (int)lround(h * k));
+    GdkTexture *t = w > 0 && h > 0 ? nitro_svg_render(svg, k, iw, ih, 1.0, 0, 0) : NULL;
+    if (!t) {
+        nitro_svg_unref(svg);
+        return NULL;
+    }
+    NitroImage *image = g_new0(NitroImage, 1);
+    image->texture = t;
+    image->svg = svg;
+    image->svg_scale = k;
+    image->orientation = 1;
+    image->width = image->source_width = iw;
+    image->height = image->source_height = ih;
+    return image;
+}
+#endif
 
 // Decoded pixels in a format GdkMemoryTexture takes as it is (no RGBA copy); the EXIF
 // orientation is applied when drawing (nitro-view.c), not by moving pixels.
@@ -255,6 +339,153 @@ static gboolean decode_psd(const guint8 *data, gsize len, DecodedPixels *out, GE
     return TRUE;
 }
 
+// 4:2:0 planes (HEIC, WebP) -> RGB
+static gboolean yuv420_pixels(int width, int height, int plane_w0, int plane_h0, int limited, int orientation,
+                              gboolean (*decode)(const guint8 *, gsize, const void *, guint8 *const[3], const gsize[3]),
+                              const guint8 *data, gsize len, const void *info, DecodedPixels *out, GError **error) {
+    guint8 *planes[3] = {NULL, NULL, NULL};
+    gsize pitch[3] = {(gsize)plane_w0, (gsize)(plane_w0 + 1) / 2, (gsize)(plane_w0 + 1) / 2};
+    gsize rows[3] = {(gsize)plane_h0, (gsize)(plane_h0 + 1) / 2, (gsize)(plane_h0 + 1) / 2};
+    gsize stride, size;
+    if (!checked_size(width, height, 3, &stride, &size, error) || !checked_size(plane_w0, plane_h0, 1, &pitch[0], &rows[0], error))
+        return FALSE;
+    rows[0] = (gsize)plane_h0;
+    gboolean ok = FALSE;
+    for (int c = 0; c < 3; c++) planes[c] = g_malloc(pitch[c] * rows[c]);
+    if (!decode(data, len, info, planes, pitch)) {
+        g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA, "decode failed");
+    } else {
+        guint8 *rgb = g_malloc(size);
+        nc_yuv420_to_rgb(width, height, planes, pitch, limited, rgb, stride);
+        out->bytes = g_bytes_new_take(rgb, size);
+        out->format = GDK_MEMORY_R8G8B8;
+        out->stride = stride;
+        out->width = width;
+        out->height = height;
+        out->orientation = orientation;
+        ok = TRUE;
+    }
+    for (int c = 0; c < 3; c++) g_free(planes[c]);
+    return ok;
+}
+
+static gboolean heic_planes(const guint8 *data, gsize len, const void *info, guint8 *const planes[3], const gsize pitch[3]) {
+    return !nh_decode_planes(data, len, info, planes, pitch, decode_threads);
+}
+
+static gboolean webp_planes(const guint8 *data, gsize len, const void *info, guint8 *const planes[3], const gsize pitch[3]) {
+    return !nw_decode_planes(data, len, info, planes, pitch, decode_threads);
+}
+
+// HEIC (nitroheic: its HEVC tiles in parallel through nitrohevc; full range BT.601)
+static gboolean decode_heic(const guint8 *data, gsize len, DecodedPixels *out, GError **error) {
+    nh_info info;
+    if (nh_read_info(data, len, &info)) {
+        g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED, "Unsupported HEIC");
+        return FALSE;
+    }
+    return yuv420_pixels(info.width, info.height, info.plane_w[0], info.plane_h[0], 0, info.orientation, heic_planes, data,
+                         len, &info, out, error);
+}
+
+// lossy WebP (nitrowebp; limited range)
+static gboolean decode_webp(const guint8 *data, gsize len, DecodedPixels *out, GError **error) {
+    nw_info info;
+    if (nw_read_info(data, len, &info)) {
+        g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED, "Unsupported WebP (lossless, alpha, animation)");
+        return FALSE;
+    }
+    return yuv420_pixels(info.width, info.height, info.plane_w[0], info.plane_h[0], 1, info.orientation, webp_planes, data,
+                         len, &info, out, error);
+}
+
+// DNG: its raw image developed by nitrodng (with the exposure correction of keys E / Shift+E)
+static gboolean decode_dng(const guint8 *data, gsize len, DecodedPixels *out, int *ev3, GError **error) {
+    ndng_info info;
+    if (ndng_read_info(data, len, &info)) {
+        g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED, "Unsupported DNG");
+        return FALSE;
+    }
+    gsize stride, size;
+    if (!checked_size(info.width, info.height, 4, &stride, &size, error)) return FALSE;
+    *ev3 = g_atomic_int_get(&dng_ev3);
+    info.ev = *ev3 / 3.0f;
+    guint8 *bgrx = g_malloc(size);
+    if (ndng_decode(data, len, &info, bgrx, stride, decode_threads)) {
+        g_free(bgrx);
+        g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA, "DNG decode failed");
+        return FALSE;
+    }
+    out->bytes = g_bytes_new_take(bgrx, size);
+    out->format = GDK_MEMORY_B8G8R8A8;   // (X: 255)
+    out->stride = stride;
+    out->width = info.width;
+    out->height = info.height;
+    out->orientation = info.orientation;
+    return TRUE;
+}
+
+// A camera raw file (Canon CR2, Nikon NEF, Sony ARW, Fujifilm RAF ...): the full-size JPEG the camera
+// stored in it, with the raw file's orientation (0: the JPEG's own)
+static gboolean decode_raw_jpeg(const guint8 *data, gsize len, DecodedPixels *out, GError **error) {
+    size_t off, size;
+    int orientation = 0;
+    if (nj_find_embedded(data, len, &off, &size, &orientation) || off >= len || size > len - off) return FALSE;
+    guint8 *jpeg = g_malloc(size + NITRO_READ_PADDING);   // (zero padding after it, as for a file)
+    memcpy(jpeg, data + off, size);
+    memset(jpeg + size, 0, NITRO_READ_PADDING);
+    gboolean ok = decode_jpeg(jpeg, size, out, error);
+    g_free(jpeg);
+    if (ok && orientation) out->orientation = orientation;
+    return ok;
+}
+
+#if !GTK_CHECK_VERSION(4, 10, 0)
+static void mips_free(gpointer data) {   // (see NitroMips)
+    NitroMips *m = data;
+    for (int i = 0; i < m->n; i++) g_object_unref(m->t[i]);
+    g_free(m);
+}
+
+static void attach_mips(GdkTexture *texture) {
+    int w = gdk_texture_get_width(texture), h = gdk_texture_get_height(texture);
+    if (MAX(w, h) <= 1024 || (gsize)w > G_MAXSIZE / 4 / (gsize)h) return;
+    gsize stride = (gsize)w * 4;
+    guint8 *first = g_try_malloc(stride * (gsize)h);
+    if (!first) return;
+    gdk_texture_download(texture, first, stride);   // (B G R A premultiplied: GDK_MEMORY_DEFAULT)
+    const guint8 *src = first;
+    NitroMips *m = g_new0(NitroMips, 1);
+    while (MAX(w, h) > 512 && m->n < 16) {
+        int nw = (w + 1) / 2, nh = (h + 1) / 2;
+        gsize ns = (gsize)nw * 4;
+        guint8 *dst = g_try_malloc(ns * (gsize)nh);
+        if (!dst) break;
+        for (int y = 0; y < nh; y++) {
+            const guint8 *r0 = src + (gsize)(2 * y) * stride, *r1 = src + (gsize)MIN(2 * y + 1, h - 1) * stride;
+            guint8 *o = dst + (gsize)y * ns;
+            for (int x = 0; x < nw; x++) {
+                int a = 8 * x, b = 4 * MIN(2 * x + 1, w - 1);
+                for (int c = 0; c < 4; c++) o[4 * x + c] = (guint8)((r0[a + c] + r0[b + c] + r1[a + c] + r1[b + c] + 2) >> 2);
+            }
+        }
+        GBytes *bytes = g_bytes_new_take(dst, ns * (gsize)nh);
+        m->t[m->n++] = gdk_memory_texture_new(nw, nh, GDK_MEMORY_DEFAULT, bytes, ns);
+        g_bytes_unref(bytes);   // (the texture keeps it: the next level reads it)
+        src = dst;
+        w = nw;
+        h = nh;
+        stride = ns;
+    }
+    g_free(first);
+    if (m->n) g_object_set_data_full(G_OBJECT(texture), NITRO_MIPS, m, mips_free);
+    else g_free(m);
+}
+#endif
+
+void nitro_image_set_dng_ev3(int ev3) { g_atomic_int_set(&dng_ev3, ev3); }
+int nitro_image_get_dng_ev3(void) { return g_atomic_int_get(&dng_ev3); }
+
 void nitro_image_set_threads(int threads) {
     decode_threads = MAX(threads, 0);
     nj_set_max_workers(decode_threads);
@@ -279,23 +510,37 @@ NitroImage *nitro_image_load(GFile *file, GError **error) {
     memset(data + len, 0, NITRO_READ_PADDING);
     g_free(contents);
 
-    if (is_svg_file(file)) {
-        NitroImage *image = g_new0(NitroImage, 1);
-        image->svg_bytes = g_bytes_new_take(data, len);
-        image->orientation = 1;
-        image->decode_ms = (g_get_monotonic_time() - start) / 1000.0;
-        return image;
+#ifdef NV_SVG
+    NitroImage *svg_image = maybe_svg(file, data, len) ? load_svg(data, len) : NULL;
+    if (svg_image) {
+        g_free(data);
+        svg_image->decode_ms = (g_get_monotonic_time() - start) / 1000.0;
+        return svg_image;
     }
+#endif
 
     DecodedPixels pixels = {0};
     GError *nitro_error = NULL;
     gboolean ok = FALSE;
+    int ev3 = 0, dng = 0;
     if (len >= 3 && data[0] == 0xff && data[1] == 0xd8)
         ok = decode_jpeg(data, len, &pixels, &nitro_error);
     else if (len >= 8 && memcmp(data, "\x89PNG\r\n\x1a\n", 8) == 0)
         ok = decode_png(data, len, &pixels, &nitro_error);
     else if (len >= 4 && memcmp(data, "8BPS", 4) == 0)
         ok = decode_psd(data, len, &pixels, &nitro_error);
+    else if (len >= 12 && memcmp(data, "RIFF", 4) == 0 && memcmp(data + 8, "WEBP", 4) == 0)
+        ok = decode_webp(data, len, &pixels, &nitro_error);
+    else if (len >= 12 && memcmp(data + 4, "ftyp", 4) == 0)
+        ok = decode_heic(data, len, &pixels, &nitro_error);
+    else if (len >= 4 && (memcmp(data, "II*", 4) == 0 || memcmp(data, "MM\0*", 4) == 0) &&
+             (ok = decode_dng(data, len, &pixels, &ev3, &nitro_error)))
+        dng = 1;
+    if (!ok && !dng) {   // (a raw file: its JPEG; the error of the decoder before stays if it is not one)
+        GError *raw_error = NULL;
+        if ((ok = decode_raw_jpeg(data, len, &pixels, &raw_error))) g_clear_error(&nitro_error);
+        g_clear_error(&raw_error);
+    }
 
     GdkTexture *texture = NULL;
     if (ok) {
@@ -333,6 +578,9 @@ NitroImage *nitro_image_load(GFile *file, GError **error) {
         pixels.height = gdk_texture_get_height(texture);
     }
 
+#if !GTK_CHECK_VERSION(4, 10, 0)
+    attach_mips(texture);
+#endif
     int orientation = pixels.orientation >= 1 && pixels.orientation <= 8 ? pixels.orientation : 1;
     int swap = orientation >= 5;   // EXIF 5..8: rotated by 90 degrees
     NitroImage *image = g_new0(NitroImage, 1);
@@ -342,6 +590,8 @@ NitroImage *nitro_image_load(GFile *file, GError **error) {
     image->height = swap ? pixels.width : pixels.height;
     image->source_width = pixels.width;
     image->source_height = pixels.height;
+    image->dng = dng;
+    image->ev3 = ev3;
     image->decode_ms = (g_get_monotonic_time() - start) / 1000.0;
     return image;
 }
@@ -349,6 +599,6 @@ NitroImage *nitro_image_load(GFile *file, GError **error) {
 void nitro_image_free(NitroImage *image) {
     if (!image) return;
     g_clear_object(&image->texture);
-    g_clear_pointer(&image->svg_bytes, g_bytes_unref);
+    g_clear_pointer(&image->svg, nitro_svg_unref);
     g_free(image);
 }

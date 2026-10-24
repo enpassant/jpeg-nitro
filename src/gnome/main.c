@@ -14,7 +14,7 @@ static NitroWindow *get_window(AdwApplication *application) {
 static void activate_cb(GApplication *application, gpointer user_data) {
     (void)user_data;
     NitroWindow *window = get_window(ADW_APPLICATION(application));
-    gtk_window_present(GTK_WINDOW(window));
+    nitro_window_present(window);
 }
 
 static void open_cb(GApplication *application, GFile **files, gint n_files, const gchar *hint, gpointer user_data) {
@@ -23,7 +23,7 @@ static void open_cb(GApplication *application, GFile **files, gint n_files, cons
 
     NitroWindow *window = get_window(ADW_APPLICATION(application));
     if (n_files > 0) nitro_window_open_files(window, files, n_files);
-    gtk_window_present(GTK_WINDOW(window));
+    nitro_window_present(window);
 }
 
 static gint command_line_cb(GApplication *application, GApplicationCommandLine *command_line, gpointer user_data) {
@@ -59,7 +59,7 @@ static gint command_line_cb(GApplication *application, GApplicationCommandLine *
     }
     g_strfreev(argv);
 
-    gtk_window_present(GTK_WINDOW(window));
+    nitro_window_present(window);
     return 0;
 }
 
@@ -69,7 +69,7 @@ static void open_action_cb(GSimpleAction *action, GVariant *parameter, gpointer 
 
     AdwApplication *application = ADW_APPLICATION(user_data);
     NitroWindow *window = get_window(application);
-    gtk_window_present(GTK_WINDOW(window));
+    nitro_window_present(window);
     nitro_window_open_dialog(window);
 }
 

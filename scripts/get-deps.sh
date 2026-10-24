@@ -15,7 +15,7 @@ mkdir -p third_party && cd third_party
 TP=$PWD
 LJT_VER=3.1.2
 NASM_VER=2.16.03
-LUNASVG_COMMIT=90d6ff333862acf3f5551ffbbcb1e45957661881   # 2026-10-15
+LUNASVG_COMMIT=90d6ff333862acf3f5551ffbbcb1e45957661881   # 2026-10-15 (also in packaging/flatpak/*.json, with its sha256)
 LIBCDR_COMMIT=551bab4aef5b2541c88180b01070f9c4ec9f3539    # 2026-10-16, github.com/gereoffy/libcdr
 LIBREVENGE_VER=0.0.6
 LCMS2_VER=2.19.1
