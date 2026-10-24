@@ -319,6 +319,18 @@ The M1's media engine serves 4 tiles at once, the i9's Radeon RX 580 one at a ti
 with more sessions), while the software decoder scales with the cores: so nitroheic uses the
 hardware on Apple Silicon and one software decoder per core on Intel.
 
+WebP (`nitroview --bench` on everyday lossy WebPs from the web, without synthetic noise and quality 90
+photos: 119 files on the M1, 137 on the i9; decode, ms/image):
+
+| decoder | M1 | i9 |
+|---|---|---|
+| Apple ImageIO | 42.9 | 54.2 |
+| **nitrowebp** | **25.5** | **27.2** |
+
+WebP has no hardware decoder either. nitrowebp's pace is set by its one serial stream of
+coefficient tokens, where a single M1 core does well, and so does ImageIO there: 1.7× on the M1,
+2× on the i9.
+
 ### Three machines, macOS and Linux
 
 `bench/nbench` (portable, same code on every system), best of 5 decodes, ms/image; JPEG: the 50
