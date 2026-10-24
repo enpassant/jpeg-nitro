@@ -15,6 +15,7 @@
 #include <plutovg.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstring>
 #include <memory>
@@ -890,14 +891,34 @@ nitrocdr *nitrocdr_load(const void *data, size_t len) {
     if (!ok || painter.pages.empty()) return nullptr;
     // the shown area is the drawing's bounding box (+ a small margin), not the page set in the
     // file: a small logo on an A4 page fills the view, a scan much larger than its page shows
-    // in full (an empty page keeps its size)
-    for (Page &pg : painter.pages) {
+    // in full (an empty page keeps its size). A drawing of several pages gets one area, the
+    // bounding box of all its pages: what lies above each other on them (the floors of a
+    // building) stays in place when paging.
+    double ux0 = 1e30, uy0 = 1e30, ux1 = -1e30, uy1 = -1e30;
+    std::vector<std::array<double, 4>> boxes;
+    for (const Page &pg : painter.pages) {
         double x0 = 1e30, y0 = 1e30, x1 = -1e30, y1 = -1e30;
         for (const Item &it : pg.items) {
             x0 = std::min(x0, (double)it.bx0);
             y0 = std::min(y0, (double)it.by0);
             x1 = std::max(x1, (double)it.bx1);
             y1 = std::max(y1, (double)it.by1);
+        }
+        boxes.push_back({x0, y0, x1, y1});
+        if (x1 <= x0 || y1 <= y0) continue;
+        ux0 = std::min(ux0, x0);
+        uy0 = std::min(uy0, y0);
+        ux1 = std::max(ux1, x1);
+        uy1 = std::max(uy1, y1);
+    }
+    for (size_t i = 0; i < painter.pages.size(); i++) {
+        Page &pg = painter.pages[i];
+        double x0 = boxes[i][0], y0 = boxes[i][1], x1 = boxes[i][2], y1 = boxes[i][3];
+        if (painter.pages.size() > 1 && ux1 > ux0 && uy1 > uy0) {
+            x0 = ux0;
+            y0 = uy0;
+            x1 = ux1;
+            y1 = uy1;
         }
         if (x1 <= x0 || y1 <= y0) continue;
         double m = std::max(2.0, 0.015 * std::max(x1 - x0, y1 - y0));
