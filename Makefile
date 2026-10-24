@@ -239,9 +239,12 @@ gnome-register: $(GNOME_DESKTOP) packaging/icon.png
 	@echo "registered $(GNOME_APP_ID) for the current user"
 
 # Self-contained Flatpak bundle built against the GNOME 50 runtime.
+# flatpak-builder: Flathub's org.flatpak.Builder if installed (older distributions' own, e.g. Ubuntu
+# 22.04's 1.2, still call appstream-compose, which the GNOME 50 SDK no longer has)
+FLATPAK_BUILDER ?= $(if $(shell flatpak info org.flatpak.Builder >/dev/null 2>&1 && echo y),flatpak run --filesystem=$(CURDIR) org.flatpak.Builder,flatpak-builder)
 flatpak: $(FLATPAK_MANIFEST) packaging/flatpak/$(GNOME_APP_ID).metainfo.xml $(GNOME_DESKTOP_SOURCE) packaging/icon.png
 	@command -v flatpak >/dev/null 2>&1 || { echo "missing flatpak"; exit 1; }
-	@command -v flatpak-builder >/dev/null 2>&1 || { echo "missing flatpak-builder"; exit 1; }
+	@case "$(FLATPAK_BUILDER)" in flatpak\ run*) ;; *) command -v flatpak-builder >/dev/null 2>&1 || { echo "missing flatpak-builder"; exit 1; } ;; esac
 	rm -rf $(FLATPAK_BUILD) $(FLATPAK_REPO) $(FLATPAK_BUNDLE)
 	@if flatpak remote-list --user --columns=name | grep -qx flathub; then \
 		scope=--user; \
@@ -252,7 +255,8 @@ flatpak: $(FLATPAK_MANIFEST) packaging/flatpak/$(GNOME_APP_ID).metainfo.xml $(GN
 		echo "  flatpak remote-add --user --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo"; \
 		exit 1; \
 	fi; \
-	flatpak-builder $$scope --install-deps-from=flathub --force-clean --repo=$(FLATPAK_REPO) $(FLATPAK_BUILD) $(FLATPAK_MANIFEST)
+	$(FLATPAK_BUILDER) $$scope --install-deps-from=flathub --force-clean --repo=$(CURDIR)/$(FLATPAK_REPO) $(CURDIR)/$(FLATPAK_BUILD) \
+	  $(CURDIR)/$(FLATPAK_MANIFEST)
 	flatpak build-bundle $(FLATPAK_REPO) $(FLATPAK_BUNDLE) $(GNOME_APP_ID) stable
 	@echo "built $(FLATPAK_BUNDLE)"
 

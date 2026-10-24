@@ -128,7 +128,9 @@ application cannot move its window, so it does not grow it freely). `make gnome`
 libadwaita 1.1+ (Ubuntu 22.04; there clang also needs `libstdc++-12-dev` for nitrosvg). Before GTK
 4.10 textures are drawn only with a linear filter: large images get mipmaps made on the CPU, and the
 pixel-exact 200–800% zoom is smoothed. `make gnome-register` adds it to the desktop for the current
-user; `make flatpak` builds `nitroview-gnome.flatpak` on the GNOME 50 runtime.
+user; `make flatpak` builds `nitroview-gnome.flatpak` on the GNOME 50 runtime (with Flathub's
+`org.flatpak.Builder` if installed: older distributions' own flatpak-builder, e.g. Ubuntu 22.04's,
+cannot finish a GNOME 50 build).
 
 The window is sized to the image: at exactly 100% if it is smaller than the screen, otherwise
 with the image's aspect ratio as large as fits (no black bars). When zooming in, the window grows with the image up to the screen
