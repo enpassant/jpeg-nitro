@@ -45,8 +45,8 @@
 #endif
 #if defined(NV_SVG) || defined(NV_CDR)
 #define NV_VECTOR 1      // vector images: rendered again, sharp, when zoomed in
-#include <stdatomic.h>
 #endif
+#include <stdatomic.h>
 // renders a vector document's area into BGRA (see nitrosvg_render / nitrocdr_render)
 typedef int (*VectorRender)(void *doc, uint8_t *bgra, int w, int h, size_t pitch, double scale, double x0, double y0);
 #import <ImageIO/ImageIO.h>
