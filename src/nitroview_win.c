@@ -1294,6 +1294,52 @@ static void loader_replace(wchar_t **files, int n, int old_index, int new_index)
     ReleaseSRWLockExclusive(&L.lock);
 }
 
+// File i left the list (deleted): later images move up one place, decoded ones with them. (Main
+// thread only: the viewer's list is this same array.)
+static void loader_remove(int i) {
+    AcquireSRWLockExclusive(&L.lock);
+    for (int c = 0; c < L.ncache;) {
+        if (L.cache[c].index == i) {
+            bury_locked(L.cache[c].d);
+            L.cache[c] = L.cache[--L.ncache];
+            continue;
+        }
+        if (L.cache[c].index > i) L.cache[c].index--;
+        c++;
+    }
+    free(L.files[i]);
+    memmove(L.files + i, L.files + i + 1, (size_t)(L.nfiles - i - 1) * sizeof *L.files);
+    memmove(L.failed + i, L.failed + i + 1, (size_t)(L.nfiles - i - 1));
+    L.nfiles--;
+    L.gen++;   // (a decode in flight would land at the old index)
+    WakeConditionVariable(&L.cv);
+    ReleaseSRWLockExclusive(&L.lock);
+}
+
+// A file came back at i (undo; takes path). Returns -1 if out of memory.
+static int loader_insert(int i, wchar_t *path) {
+    AcquireSRWLockExclusive(&L.lock);
+    wchar_t **f = realloc(L.files, (size_t)(L.nfiles + 1) * sizeof *f);
+    if (f) L.files = f;
+    char *fl = f ? realloc(L.failed, (size_t)L.nfiles + 1) : NULL;
+    if (fl) L.failed = fl;
+    if (!f || !fl) {
+        ReleaseSRWLockExclusive(&L.lock);
+        return -1;
+    }
+    for (int c = 0; c < L.ncache; c++)
+        if (L.cache[c].index >= i) L.cache[c].index++;
+    memmove(L.files + i + 1, L.files + i, (size_t)(L.nfiles - i) * sizeof *L.files);
+    memmove(L.failed + i + 1, L.failed + i, (size_t)(L.nfiles - i));
+    L.files[i] = path;
+    L.failed[i] = 0;
+    L.nfiles++;
+    L.gen++;
+    WakeConditionVariable(&L.cv);
+    ReleaseSRWLockExclusive(&L.lock);
+    return 0;
+}
+
 #ifdef NV_VECTOR
 // The size vector images are rendered for changed (g_vec_tw): prefetched ones too small for it
 // are dropped and rendered again (the current one is sharpened by the detail render).
@@ -1465,6 +1511,8 @@ typedef struct {
     int paused;
     int shown_index;
     double shown_time;
+    struct { wchar_t *path, *to; int index; } *deleted;   // Del: original path, path in .delete\, for undo
+    int ndeleted;
     // zoom / pan: kept when paging, so a series can be compared at the same spot
     int zoomed, fit_screen;
     double scale, cx, cy;         // image pixels -> device pixels; image point at the view centre
@@ -1745,6 +1793,77 @@ static void expand_directory(void) {
 }
 
 static void page(int delta) { expand_directory(); go(V.index + delta, delta >= 0 ? 1 : -1); }
+
+// Del: the current file goes to the (hidden) ".delete" folder next to it: nothing is lost (undo
+// with U / Ctrl+Z, or move it back by hand). The next image follows; the last one is not deleted.
+static void delete_current(void) {
+    expand_directory();
+    void *more = V.nfiles >= 2 ? realloc(V.deleted, (size_t)(V.ndeleted + 1) * sizeof *V.deleted) : NULL;
+    if (!more) {
+        MessageBeep(MB_OK);
+        return;
+    }
+    V.deleted = more;
+    const wchar_t *path = V.files[V.index], *name = base_name(path), *ext = wcsrchr(name, L'.');
+    if (!ext) ext = name + wcslen(name);
+    size_t dl = (size_t)(name - path), n = dl + wcslen(name) + 32;
+    wchar_t *bin = malloc(n * sizeof *bin), *to = malloc(n * sizeof *to);
+    if (!bin || !to) {
+        free(bin);
+        free(to);
+        MessageBeep(MB_OK);
+        return;
+    }
+    _snwprintf(bin, n, L"%.*ls.delete", (int)dl, path);
+    if (CreateDirectoryW(bin, NULL)) SetFileAttributesW(bin, FILE_ATTRIBUTE_HIDDEN);
+    _snwprintf(to, n, L"%ls\\%ls", bin, name);
+    for (int k = 2; GetFileAttributesW(to) != INVALID_FILE_ATTRIBUTES; k++)   // (never over an earlier one)
+        _snwprintf(to, n, L"%ls\\%.*ls (%d)%ls", bin, (int)(ext - name), name, k, ext);
+    free(bin);
+    if (!MoveFileW(path, to)) {
+        fprintf(stderr, "cannot move %s: error %lu\n", utf8(path), GetLastError());
+        free(to);
+        MessageBeep(MB_OK);
+        return;
+    }
+    int i = V.index;
+    V.deleted[V.ndeleted].path = _wcsdup(path);
+    V.deleted[V.ndeleted].to = to;
+    V.deleted[V.ndeleted].index = i;
+    V.ndeleted++;
+    loader_remove(i);   // (frees path)
+    V.nfiles--;
+    V.shown_index = V.shown_index == i ? -1 : V.shown_index > i ? V.shown_index - 1 : V.shown_index;
+    V.started = 0;
+    go(MIN(i, V.nfiles - 1), 1);
+}
+
+// Undo the last Del: the file goes back to its place in the folder and in the list.
+static void undo_delete(void) {
+    if (!V.ndeleted) {
+        MessageBeep(MB_OK);
+        return;
+    }
+    wchar_t *path = V.deleted[V.ndeleted - 1].path, *to = V.deleted[V.ndeleted - 1].to;
+    int i = MIN(V.deleted[V.ndeleted - 1].index, V.nfiles);
+    if (!path || GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES || !MoveFileW(to, path)) {
+        MessageBeep(MB_OK);   // (something is there again, or it was moved away)
+        return;
+    }
+    if (loader_insert(i, path)) {
+        MoveFileW(path, to);
+        MessageBeep(MB_OK);
+        return;
+    }
+    free(to);
+    V.ndeleted--;
+    V.files = L.files;
+    V.nfiles++;
+    if (V.shown_index >= i) V.shown_index++;
+    if (V.index >= i) V.index++;
+    V.started = 0;
+    go(i, 1);
+}
 static void page_first(void) { expand_directory(); go(0, 1); }
 static void page_last(void) { expand_directory(); go(V.nfiles - 1, -1); }
 
@@ -2098,6 +2217,7 @@ static void on_char(wchar_t ch) {   // zoom keys by character: any keyboard layo
         if (cur) set_scale(ch - L'0', cur, 0, 0);
         break;
     case L'w': case L'W': window_to_image(); break;
+    case L'u': case L'U': case 26: undo_delete(); break;   // U, Ctrl+Z: undo the last Del
     case L'e': case L'E':   // DNG: brighter / (Shift) darker, 1/3 EV
         if (cur && cur->mode == MODE_NITRODNG) {
             int ev3 = MAX(-9, MIN(9, (int)g_dng_ev3 + (GetKeyState(VK_SHIFT) < 0 ? -1 : 1)));
@@ -2125,6 +2245,7 @@ static void on_key(WPARAM vk) {
     case VK_DOWN: if (cur) pan(0, step, cur); break;
     case VK_NEXT: case VK_SPACE: page(1); break;
     case VK_PRIOR: case VK_BACK: page(-1); break;
+    case VK_DELETE: delete_current(); break;
     case VK_HOME: page_first(); break;
     case VK_END: page_last(); break;
     case 'F': case VK_RETURN: toggle_fullscreen(); break;
@@ -2648,6 +2769,7 @@ static void usage(void) {
         "  arrows                  move a zoomed image (Shift: bigger steps)\n"
         "  W                       back to the image's own size (small images 100%%, window follows)\n"
         "  E / Shift+E             DNG raw image: brighter / darker (1/3 EV steps, kept while paging)\n"
+        "  Del                     move the file to the .delete folder next to it   U / Ctrl+Z  undo\n"
         "mouse:\n"
         "  drag                    move a zoomed image\n"
         "  wheel                   zoom around the cursor (touchpad: smooth, pinch too)\n"

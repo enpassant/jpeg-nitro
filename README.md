@@ -70,6 +70,8 @@ Also runs on Apple Silicon (M1 MacBook Air, see [below](#apple-silicon-m1)); the
 | ← → ↑ ↓ | move a zoomed image (Shift: half a screen per step) |
 | W | back to the image's own size (small images at 100%), window follows image sizes again |
 | E / Shift + E | DNG raw images: brighter / darker by 1/3 EV (up to ±3 EV; kept while paging, shown in the title) |
+| Del (Mac: also ⌘ + Backspace) | delete: the file is moved to the `.delete` folder next to it (hidden), the next image follows; nothing is lost |
+| U / Ctrl + Z (Mac: ⌘ Z) | undo the last delete: the file goes back to its place |
 | mouse drag | move a zoomed image |
 | scroll wheel | zoom around the point under the cursor (one √2 step per notch; trackpad: smooth, pinch too) |
 | double click | fit → 100% at the clicked point; again → back to fit |

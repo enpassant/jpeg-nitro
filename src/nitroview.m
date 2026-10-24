@@ -946,6 +946,9 @@ typedef struct {
 - (void)focus:(NSInteger)cur direction:(int)dir;
 // New file list; the decoded image of oldIndex (if any) is kept as newIndex.
 - (void)replaceFiles:(NSArray<NSString *> *)files keep:(NSInteger)oldIndex as:(NSInteger)newIndex;
+// File i left the list (deleted) / a file came back at i (undo): the decoded images move with their files.
+- (void)removeFile:(NSInteger)i;
+- (void)insertFile:(NSString *)path at:(NSInteger)i;
 // Multi-page documents: draws another page of image i in the background; it replaces the
 // decoded image and onDecoded reports it (nothing happens if i was paged away or evicted).
 - (void)showPage:(int)page of:(NSInteger)i;
@@ -1017,6 +1020,35 @@ typedef struct {
     _cur = newIndex;
     _gen++;
     [_cond signal];
+    [_cond unlock];
+}
+- (void)shiftFrom:(NSInteger)i by:(NSInteger)delta {   // indices >= i move by delta (locked)
+    NSMutableDictionary *c = [NSMutableDictionary dictionary];
+    for (NSNumber *k in _cache) c[@(k.integerValue >= i ? k.integerValue + delta : k.integerValue)] = _cache[k];
+    _cache = c;
+    NSMutableSet *f = [NSMutableSet set];
+    for (NSNumber *k in _failed) [f addObject:@(k.integerValue >= i ? k.integerValue + delta : k.integerValue)];
+    _failed = f;
+    _gen++;   // (a decode in flight would land at the old index)
+    [_cond signal];
+}
+- (void)removeFile:(NSInteger)i {
+    [_cond lock];
+    if (_cache[@(i)]) [self recycle:_cache[@(i)]];
+    [_cache removeObjectForKey:@(i)];
+    [_failed removeObject:@(i)];
+    NSMutableArray *files = [_files mutableCopy];
+    [files removeObjectAtIndex:(NSUInteger)i];
+    _files = files;
+    [self shiftFrom:i + 1 by:-1];
+    [_cond unlock];
+}
+- (void)insertFile:(NSString *)path at:(NSInteger)i {
+    [_cond lock];
+    [self shiftFrom:i by:1];
+    NSMutableArray *files = [_files mutableCopy];
+    [files insertObject:path atIndex:(NSUInteger)i];
+    _files = files;
     [_cond unlock];
 }
 - (void)showPage:(int)page of:(NSInteger)i {
@@ -1210,6 +1242,7 @@ static NSArray<NSString *> *dropped_paths(id<NSDraggingInfo> info);
     NSInteger _shownIndex;    // last image actually drawn
     double _shownTime;
     unsigned _slideGen;       // invalidates pending slideshow steps
+    NSMutableArray<NSArray *> *_deleted;   // Del: (original path, path in .delete/, index), for undo
     // zoom / pan: kept when paging, so a series can be compared at the same spot
     BOOL _zoomed;             // NO: fit to window
     BOOL _fitScreen;          // fit mode also enlarges small images to the screen (key 0)
@@ -1287,6 +1320,64 @@ static NSArray<NSString *> *dropped_paths(id<NSDraggingInfo> info);
 }
 - (void)pageFirst { [self expandDirectory]; [self go:0 dir:1]; }
 - (void)pageLast { [self expandDirectory]; [self go:(NSInteger)_files.count - 1 dir:-1]; }
+
+// Del: the current file goes to the ".delete" folder next to it (nothing is lost: undo with
+// U / Cmd+Z, or move it back by hand), the next image follows. The last one is not deleted.
+- (void)deleteCurrent {
+    [self expandDirectory];
+    if (_files.count < 2) {
+        NSBeep();
+        return;
+    }
+    NSString *path = _files[_index];
+    NSString *dir = path.stringByDeletingLastPathComponent;
+    NSString *bin = [(dir.length ? dir : @".") stringByAppendingPathComponent:@".delete"];
+    mkdir(bin.fileSystemRepresentation, 0755);
+    NSString *name = path.lastPathComponent, *to = [bin stringByAppendingPathComponent:name];
+    for (int n = 2; access(to.fileSystemRepresentation, F_OK) == 0; n++) {   // (never over an earlier one)
+        NSString *alt = [NSString stringWithFormat:@"%@ (%d)", name.stringByDeletingPathExtension, n];
+        to = [bin stringByAppendingPathComponent:name.pathExtension.length ? [alt stringByAppendingPathExtension:name.pathExtension] : alt];
+    }
+    if (rename(path.fileSystemRepresentation, to.fileSystemRepresentation)) {
+        fprintf(stderr, "cannot move %s to %s: %s\n", path.fileSystemRepresentation, to.fileSystemRepresentation, strerror(errno));
+        NSBeep();
+        return;
+    }
+    if (!_deleted) _deleted = [NSMutableArray array];
+    [_deleted addObject:@[path, to, @(_index)]];
+    NSInteger i = _index;
+    [_loader removeFile:i];
+    NSMutableArray *files = [_files mutableCopy];
+    [files removeObjectAtIndex:(NSUInteger)i];
+    _files = files;
+    _shownIndex = _shownIndex == i ? -1 : _shownIndex > i ? _shownIndex - 1 : _shownIndex;
+    _started = NO;
+    [self go:MIN(i, (NSInteger)files.count - 1) dir:1];
+}
+
+// Undo the last Del: the file goes back to its place in the folder and in the list.
+- (void)undoDelete {
+    NSArray *last = _deleted.lastObject;
+    if (!last) {
+        NSBeep();
+        return;
+    }
+    NSString *path = last[0], *from = last[1];
+    if (access(path.fileSystemRepresentation, F_OK) == 0 || rename(from.fileSystemRepresentation, path.fileSystemRepresentation)) {
+        NSBeep();   // (something is there again, or it was moved away)
+        return;
+    }
+    [_deleted removeLastObject];
+    NSInteger i = MIN([last[2] integerValue], (NSInteger)_files.count);
+    [_loader insertFile:path at:i];
+    NSMutableArray *files = [_files mutableCopy];
+    [files insertObject:path atIndex:(NSUInteger)i];
+    _files = files;
+    if (_shownIndex >= i) _shownIndex++;
+    if (_index >= i) _index++;
+    _started = NO;
+    [self go:i dir:1];
+}
 
 // New files (e.g. opened from the Finder while running).
 - (void)openFiles:(NSArray<NSString *> *)files lazyDir:(BOOL)lazy {
@@ -1751,7 +1842,14 @@ static int debug_zoom(void) {   // NV_DEBUG_ZOOM=1: log wheel / pinch events and
     case 126: if (cur) [self panX:0 y:-step image:cur view:ds]; break;             // Up
     case 125: if (cur) [self panX:0 y:step image:cur view:ds]; break;              // Down
     case 121: case 49: [self page:1]; break;                           // PgDn Space
-    case 116: case 51: [self page:-1]; break;                          // PgUp Backspace
+    case 117: [self deleteCurrent]; break;                                         // Del (fn+delete)
+    case 51:                                                                       // Backspace ("delete")
+        if (e.modifierFlags & NSEventModifierFlagCommand) [self deleteCurrent];    // (Cmd: as in the Finder)
+        else [self page:-1];
+        break;
+    case 32: [self undoDelete]; break;                                             // U
+    case 6: if (e.modifierFlags & NSEventModifierFlagCommand) [self undoDelete]; break;   // Cmd+Z
+    case 116: [self page:-1]; break;                                               // PgUp
     case 115: [self pageFirst]; break;                                             // Home
     case 119: [self pageLast]; break;                                              // End
     case 3: case 36: [self.window toggleFullScreen:nil]; break;                    // F Return
@@ -2560,6 +2658,7 @@ int main(int argc, const char **argv) {
                 "  arrows                  move a zoomed image (Shift: bigger steps)\n"
                 "  W                       back to the image's own size (small images 100%%, window follows)\n"
                 "  E / Shift+E             DNG raw image: brighter / darker (1/3 EV steps, kept while paging)\n"
+                "  Del, Cmd+Backspace      move the file to the .delete folder next to it   U / Cmd+Z  undo\n"
                 "mouse:\n"
                 "  drag                    move a zoomed image\n"
                 "  scroll wheel            zoom around the cursor (trackpad: smooth, pinch too)\n"
