@@ -11,9 +11,10 @@ G_BEGIN_DECLS
 G_DECLARE_FINAL_TYPE(NitroView, nitro_view, NITRO, VIEW, GtkWidget)
 
 NitroView *nitro_view_new(void);
-// texture: the pixels; svg (or NULL): its SVG document, svg_scale texture pixels per SVG unit;
-// orientation: EXIF 1..8
-void nitro_view_set_image(NitroView *self, GdkTexture *texture, NitroSvg *svg, double svg_scale, int orientation);
+// texture: the pixels; vector (or NULL): its vector drawing, the page shown, vector_scale texture
+// pixels per document unit; orientation: EXIF 1..8
+void nitro_view_set_image(NitroView *self, GdkTexture *texture, NitroVector *vector, int page, double vector_scale,
+                          int orientation);
 void nitro_view_clear(NitroView *self);
 void nitro_view_fit(NitroView *self, gboolean fit_screen);
 void nitro_view_set_fullscreen(NitroView *self, gboolean fullscreen);

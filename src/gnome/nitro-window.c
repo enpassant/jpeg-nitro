@@ -67,10 +67,14 @@ static gboolean supported_extension(const char *name) {
     const char *dot = name ? strrchr(name, '.') : NULL;
     if (!dot || !dot[1]) return FALSE;
     dot++;
-    // our decoders (JPEG, PNG, PSD/PSB), SVG (nitrosvg), and GTK fallback loaders (see nitro-image.c)
+    // our decoders, SVG (nitrosvg), CorelDRAW (nitrocdr) and GTK fallback loaders (see nitro-image.c)
     static const char *const exts[] = {"jpg", "jpeg", "jpe", "jfif", "png", "psd", "psb", "heic", "heif",
                                        "dng", "cr2", "nef", "nrw", "arw", "raf",
-                                       "tif", "tiff", "gif", "bmp", "webp", "svg", NULL};
+                                       "tif", "tiff", "gif", "bmp", "webp", "svg",
+#ifdef NV_CDR
+                                       "cdr", "cmx",
+#endif
+                                       NULL};
     for (int i = 0; exts[i]; i++)
         if (g_ascii_strcasecmp(dot, exts[i]) == 0) return TRUE;
     return FALSE;
@@ -182,6 +186,13 @@ static void update_title(NitroWindow *self) {
                                 self->loading ? "loading..." : "CANNOT DECODE (unsupported or damaged)");
     }
 
+    int pages = self->image ? nitro_vector_pages(self->image->vector) : 0;
+    if (pages > 1) {
+        char *with_page = g_strdup_printf("%s  [page %d/%d]", title, self->image->page + 1, pages);
+        g_free(title);
+        title = with_page;
+    }
+
     if (self->image && self->image->dng && self->image->ev3) {
         char *with_ev = g_strdup_printf("%s  %+.1f EV", title, self->image->ev3 / 3.0);
         g_free(title);
@@ -288,7 +299,7 @@ static void show_current(NitroWindow *self) {
         return;
     }
 
-    nitro_view_set_image(self->view, image->texture, image->svg, image->svg_scale, image->orientation);
+    nitro_view_set_image(self->view, image->texture, image->vector, image->page, image->vector_scale, image->orientation);
     if (!self->sized) {   // the first image: the window to its size, then shown
         self->sized = TRUE;
         size_window(self, FALSE);
@@ -398,6 +409,50 @@ static void undo_delete(NitroWindow *self) {
     g_ptr_array_remove_index(self->deleted, self->deleted->len - 1);
     self->started = FALSE;
     go_to(self, i, 1);
+}
+
+// [ / ]: another page of a multi-page drawing (CorelDRAW), drawn on a worker thread; it replaces
+// the image when ready
+typedef struct {
+    NitroVector *vector;
+    int page, index;
+} PageJob;
+
+static void page_job_free(gpointer data) {
+    PageJob *j = data;
+    nitro_vector_unref(j->vector);
+    g_free(j);
+}
+
+static void page_thread(GTask *task, gpointer source, gpointer data, GCancellable *cancellable) {
+    PageJob *j = data;
+    g_task_return_pointer(task, nitro_image_load_page(j->vector, j->page), (GDestroyNotify)nitro_image_free);
+}
+
+static void page_done(GObject *source, GAsyncResult *result, gpointer user_data) {
+    NitroWindow *self = NITRO_WINDOW(source);
+    PageJob *j = g_task_get_task_data(G_TASK(result));
+    NitroImage *image = g_task_propagate_pointer(G_TASK(result), NULL);
+    if (image && self->loader && nitro_loader_replace_image(self->loader, j->index, j->vector, image) &&
+        j->index == self->index) {   // (zoom and position stay, as when paging images)
+        nitro_image_free(self->image);
+        self->image = NULL;
+        show_current(self);
+    }
+}
+
+static void show_page(NitroWindow *self, int delta) {
+    if (!self->image || !self->image->vector) return;
+    int page = self->image->page + delta;
+    if (page < 0 || page >= nitro_vector_pages(self->image->vector)) return;
+    PageJob *j = g_new0(PageJob, 1);
+    j->vector = nitro_vector_ref(self->image->vector);
+    j->page = page;
+    j->index = self->index;
+    GTask *task = g_task_new(self, NULL, page_done, NULL);
+    g_task_set_task_data(task, j, page_job_free);
+    g_task_run_in_thread(task, page_thread);
+    g_object_unref(task);
 }
 
 // DNG: brighter / darker by 1/3 EV (up to 3 EV; kept while paging): the DNGs are developed again,
@@ -537,6 +592,10 @@ static gboolean key_pressed(GtkEventControllerKey *controller, guint keyval, gui
         undo_delete(self); return TRUE;
     case GDK_KEY_e: case GDK_KEY_E:
         dng_exposure(self, shift ? -1 : 1); return TRUE;
+    case GDK_KEY_bracketleft:
+        show_page(self, -1); return TRUE;
+    case GDK_KEY_bracketright:
+        show_page(self, 1); return TRUE;
     default:
         return FALSE;
     }

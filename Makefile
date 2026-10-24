@@ -210,18 +210,22 @@ $(GNOME_RES): $(GNOME_DIR)/nitroview.gresource.xml $(GNOME_DIR)/nitro-window.ui 
 GNOME_SVG := $(if $(filter 1,$(SVG)),$(LIBDIR)/libnitrosvg.a)
 $(LIBDIR)/libnitrosvg.a: src/nitrosvg.cpp src/nitrosvg.h $(SVG_STAMP)
 	$(call svg_lib,$(CPUFLAGS) -fPIC)
+# ... and CorelDRAW: nitrocdr (libcdr + librevenge + lcms2, drawn with the plutovg of nitrosvg)
+GNOME_CDR := $(if $(and $(GNOME_SVG),$(filter 1,$(CDR))),$(LIBDIR)/libnitrocdr.a)
+$(LIBDIR)/libnitrocdr.a: src/nitrocdr.cpp src/nitrocdr.h $(CDR_STAMP)
+	$(call cdr_lib,$(CPUFLAGS) -fPIC)
 
-$(GNOME_BIN): $(GNOME_SRC) $(GNOME_HDR) $(LIB_SHARED) $(GNOME_SVG)
+$(GNOME_BIN): $(GNOME_SRC) $(GNOME_HDR) $(LIB_SHARED) $(GNOME_SVG) $(GNOME_CDR)
 	@pkg-config --exists $(GNOME_PKGS) || { echo "missing GNOME development packages: gtk4 libadwaita-1"; exit 1; }
 	@pkg-config --atleast-version=4.6 gtk4 || { echo "GNOME frontend requires GTK 4.6 or newer"; exit 1; }
 	@pkg-config --atleast-version=1.1 libadwaita-1 || { echo "GNOME frontend requires libadwaita 1.1 or newer"; exit 1; }
 	$(CC) -std=gnu11 -O2 $(CPUFLAGS) $(PORTFLAGS) -Wall -Wextra -Wno-unused-parameter -Isrc -I$(GNOME_DIR) $(GNOME_CFLAGS) \
-	  $(if $(GNOME_SVG),-DNV_SVG) $(GNOME_SRC) $(GNOME_SVG) -L$(LIBDIR) -lnitro -Wl,-rpath,'$(GNOME_RPATH)' $(GNOME_LIBS) \
-	  $(if $(GNOME_SVG),-lstdc++) $(THREADLIBS) -lm -o $@
+	  $(if $(GNOME_SVG),-DNV_SVG) $(if $(GNOME_CDR),-DNV_CDR) $(GNOME_SRC) $(GNOME_CDR) $(GNOME_SVG) -L$(LIBDIR) -lnitro \
+	  -Wl,-rpath,'$(GNOME_RPATH)' $(GNOME_LIBS) $(if $(GNOME_CDR),-lz) $(if $(GNOME_SVG),-lstdc++) $(THREADLIBS) -lm -o $@
 
 # GNOME viewer: command-line open plus a native Open/Quit application shell.
 gnome: $(GNOME_BIN)
-	@echo "built $(GNOME_BIN) (SVG: $(if $(GNOME_SVG),nitrosvg,GTK's loaders))"
+	@echo "built $(GNOME_BIN) (SVG: $(if $(GNOME_SVG),nitrosvg,GTK's loaders), CorelDRAW: $(if $(GNOME_CDR),yes,no))"
 
 # Development desktop registration for GNOME Shell. The generated desktop entry uses
 # the absolute path of this source-tree binary so it also works without installing it.

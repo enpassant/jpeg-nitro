@@ -28,6 +28,10 @@ void nitro_loader_set_files(NitroLoader *loader, GPtrArray *files, int keep_inde
 void nitro_loader_remove_file(NitroLoader *loader, int index);
 void nitro_loader_insert_file(NitroLoader *loader, int index, GFile *file);
 
+// Another page of image index's drawing (takes image): replaces the decoded image if it is
+// still old's (FALSE: it is not there any more, image freed).
+gboolean nitro_loader_replace_image(NitroLoader *loader, int index, NitroVector *old, NitroImage *image);
+
 // The DNG exposure correction changed (nitro_image_set_dng_ev3): DNGs decoded with another one
 // are dropped and decoded again.
 void nitro_loader_dng_changed(NitroLoader *loader);

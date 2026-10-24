@@ -8,9 +8,10 @@ struct _NitroView {
     GtkWidget parent_instance;
 
     GdkTexture *texture;
-    NitroSvg *svg;            // an SVG: its document, for the sharp detail when zoomed in
-    double svg_scale;         // (texture pixels per SVG unit)
-    GdkTexture *detail;       // an SVG zoomed in: the visible part rendered at screen resolution,
+    NitroVector *vector;      // a vector drawing: its document and page, for the sharp detail when
+    int page;                 //   zoomed in (texture pixels per document unit: vector_scale)
+    double vector_scale;
+    GdkTexture *detail;       // a vector drawing zoomed in: the visible part at screen resolution,
     double detail_scale;      //   at this scale (device pixels per texture pixel), its top-left
     int detail_x, detail_y;   //   device pixel (from the texture's origin) and size
     int detail_w, detail_h;
@@ -44,24 +45,25 @@ static gboolean has_image(NitroView *self) {
 }
 
 // ---------------------------------------------------------------------------
-// SVG detail: rendered on a worker thread, drawn over the texture when it is ready
+// vector drawing detail: rendered on a worker thread, drawn over the texture when it is ready
 
 typedef struct {
-    NitroSvg *svg;
-    double svg_scale, scale;
+    NitroVector *vector;
+    int page;
+    double vector_scale, scale;
     int x, y, w, h;   // device pixels
     guint gen;
 } DetailJob;
 
 static void detail_job_free(gpointer data) {
     DetailJob *j = data;
-    nitro_svg_unref(j->svg);
+    nitro_vector_unref(j->vector);
     g_free(j);
 }
 
 static void detail_thread(GTask *task, gpointer source, gpointer data, GCancellable *cancellable) {
     DetailJob *j = data;
-    GdkTexture *t = nitro_svg_render(j->svg, j->svg_scale, j->w, j->h, j->scale, j->x, j->y);
+    GdkTexture *t = nitro_vector_render(j->vector, j->page, j->vector_scale, j->w, j->h, j->scale, j->x, j->y);
     g_task_return_pointer(task, t, t ? g_object_unref : NULL);
 }
 
@@ -84,10 +86,10 @@ static void detail_done(GObject *source, GAsyncResult *result, gpointer user_dat
     gtk_widget_queue_draw(GTK_WIDGET(self));   // (draws it, or asks for the part now visible)
 }
 
-// The SVG zoomed in beyond its texture: draws the sharp detail if it covers the visible part
-// at this scale, else asks for it (the texture, already drawn, stays until then).
-static void svg_detail(NitroView *self, GtkSnapshot *snapshot, double scale, int factor, double x, double y) {
-    if (!self->svg || scale <= 1.0 + 1e-9) return;
+// A vector drawing zoomed in beyond its texture: draws the sharp detail if it covers the visible
+// part at this scale, else asks for it (the texture, already drawn, stays until then).
+static void vector_detail(NitroView *self, GtkSnapshot *snapshot, double scale, int factor, double x, double y) {
+    if (!self->vector || scale <= 1.0 + 1e-9) return;
     double vw = gtk_widget_get_width(GTK_WIDGET(self)) * factor, vh = gtk_widget_get_height(GTK_WIDGET(self)) * factor;
     // the visible part, in device pixels from the texture's origin
     int x0 = MAX(0, (int)floor(-x * factor)), y0 = MAX(0, (int)floor(-y * factor));
@@ -105,8 +107,9 @@ static void svg_detail(NitroView *self, GtkSnapshot *snapshot, double scale, int
     }
     if (self->detail_busy) return;   // (asks again when that one is done)
     DetailJob *j = g_new0(DetailJob, 1);
-    j->svg = nitro_svg_ref(self->svg);
-    j->svg_scale = self->svg_scale;
+    j->vector = nitro_vector_ref(self->vector);
+    j->page = self->page;
+    j->vector_scale = self->vector_scale;
     j->scale = scale;
     j->x = x0;
     j->y = y0;
@@ -231,7 +234,7 @@ static void nitro_view_snapshot(GtkWidget *widget, GtkSnapshot *snapshot) {
     if (self->orientation <= 1) {
         graphene_rect_t bounds = GRAPHENE_RECT_INIT((float)x, (float)y, (float)draw_width, (float)draw_height);
         append_texture(snapshot, self->texture, filter, &bounds, factor);
-        svg_detail(self, snapshot, scale, factor, x, y);   // (an SVG has no orientation)
+        vector_detail(self, snapshot, scale, factor, x, y);   // (a vector drawing has no orientation)
         return;
     }
     // EXIF orientation: rotate / mirror the texture around the centre of its place on screen
@@ -279,7 +282,7 @@ static void nitro_view_size_allocate(GtkWidget *widget, int width, int height, i
 static void nitro_view_dispose(GObject *object) {
     NitroView *self = NITRO_VIEW(object);
     g_clear_object(&self->texture);
-    g_clear_pointer(&self->svg, nitro_svg_unref);
+    g_clear_pointer(&self->vector, nitro_vector_unref);
     drop_detail(self);
     g_clear_handle_id(&self->changed_source, g_source_remove);
     G_OBJECT_CLASS(nitro_view_parent_class)->dispose(object);
@@ -314,13 +317,14 @@ NitroView *nitro_view_new(void) {
     return g_object_new(NITRO_TYPE_VIEW, NULL);
 }
 
-void nitro_view_set_image(NitroView *self, GdkTexture *texture, NitroSvg *svg, double svg_scale, int orientation) {
+void nitro_view_set_image(NitroView *self, GdkTexture *texture, NitroVector *vector, int page, double vector_scale,
+                          int orientation) {
     g_return_if_fail(NITRO_IS_VIEW(self));
     g_return_if_fail(texture == NULL || GDK_IS_TEXTURE(texture));
 
     gboolean keep_position = self->zoomed;
     g_clear_object(&self->texture);
-    g_clear_pointer(&self->svg, nitro_svg_unref);
+    g_clear_pointer(&self->vector, nitro_vector_unref);
     drop_detail(self);
     self->source_width = 0.0;
     self->source_height = 0.0;
@@ -330,9 +334,10 @@ void nitro_view_set_image(NitroView *self, GdkTexture *texture, NitroSvg *svg, d
         self->texture = g_object_ref(texture);
         self->source_width = gdk_texture_get_width(texture);
         self->source_height = gdk_texture_get_height(texture);
-        self->svg = nitro_svg_ref(svg);
-        self->svg_scale = svg_scale;
-        if (svg) self->orientation = 1;
+        self->vector = nitro_vector_ref(vector);
+        self->page = page;
+        self->vector_scale = vector_scale;
+        if (vector) self->orientation = 1;
     }
 
     if (has_image(self)) {
@@ -351,7 +356,7 @@ void nitro_view_set_image(NitroView *self, GdkTexture *texture, NitroSvg *svg, d
 void nitro_view_clear(NitroView *self) {
     g_return_if_fail(NITRO_IS_VIEW(self));
     g_clear_object(&self->texture);
-    g_clear_pointer(&self->svg, nitro_svg_unref);
+    g_clear_pointer(&self->vector, nitro_vector_unref);
     drop_detail(self);
     self->source_width = 0.0;
     self->source_height = 0.0;

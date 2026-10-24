@@ -240,6 +240,20 @@ void nitro_loader_insert_file(NitroLoader *l, int index, GFile *file) {
     g_mutex_unlock(&l->lock);
 }
 
+gboolean nitro_loader_replace_image(NitroLoader *l, int index, NitroVector *old, NitroImage *image) {
+    gboolean done = FALSE;
+    g_mutex_lock(&l->lock);
+    for (int c = 0; c < l->ncache && !done; c++)
+        if (l->cache[c].index == index && l->cache[c].image->vector == old) {
+            g_ptr_array_add(l->grave, l->cache[c].image);
+            l->cache[c].image = image;
+            done = TRUE;
+        }
+    if (!done) g_ptr_array_add(l->grave, image);
+    g_mutex_unlock(&l->lock);
+    return done;
+}
+
 void nitro_loader_dng_changed(NitroLoader *l) {
     int ev3 = nitro_image_get_dng_ev3();
     g_mutex_lock(&l->lock);
@@ -270,7 +284,7 @@ NitroImage *nitro_loader_get(NitroLoader *l, int index) {
             copy = g_new(NitroImage, 1);
             *copy = *l->cache[i].image;
             if (copy->texture) g_object_ref(copy->texture);
-            nitro_svg_ref(copy->svg);
+            nitro_vector_ref(copy->vector);
             break;
         }
     g_mutex_unlock(&l->lock);
