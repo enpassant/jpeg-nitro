@@ -23,7 +23,7 @@ HEIC photos in parallel, one that develops DNG raw images, one for WebP, and two
 | **nitropng** | PNG (8-bit, non-interlaced) | speculative parallel inflate (back-references into not yet known data resolved later, Adler-32 verified) + "wavefront" filter reversal | 38 real PNGs: **~43 ms** avg. | Wuffs ~171 ms, ImageIO ~318 ms |
 | **nitropsd** | Photoshop PSD/PSB (8-bit RGB / gray) | merged image: RLE rows in parallel, ZIP via nitropng's inflate; reads only the merged image of huge layered files | 24 MP RLE: **~5 ms** | ImageIO ~170 ms |
 | **nitroheic** (macOS) | HEIC (8-bit 4:2:0 HEVC, iPhone grids) | own HEIF parsing; the 48 independent HEVC tiles of an iPhone photo decoded in parallel by VideoToolbox into Y/Cb/Cr for the GPU | 12 MP iPhone photo: **~33 ms** | ImageIO ~200 ms |
-| **nitrodng** | DNG raw (Bayer; lossless JPEG or uncompressed) | own raw development: lossless JPEG in parallel (a single strip too: speculative Huffman decoding, as in nitrojpeg), black / white levels, white balance, Malvar–He–Cutler demosaicing, colour matrix, tone curve | 20 MP DNG: **~8 ms**; 25 MP in one lossless JPEG strip: ~22 ms | ImageIO ~170 ms / ~210 ms |
+| **nitrodng** | DNG raw (Bayer; lossless JPEG or uncompressed) | own raw development: lossless JPEG in parallel (a single strip too: speculative Huffman decoding, as in nitrojpeg), black / white levels, white balance, Malvar–He–Cutler demosaicing, colour matrix, tone curve | 20 MP DNG: **~8 ms**; 25 MP in one lossless JPEG strip: ~22 ms | ImageIO 210–510 ms / 490–630 ms |
 | **nitrowebp** | lossy WebP (VP8) | own VP8 decoder (RFC 6386): the coefficient tokens (one serial stream) on one thread, the modes and the reconstruction on others; Y/Cb/Cr for the GPU | 42 MP WebP: **~100 ms**; 137 everyday WebPs: **27 ms** avg. | ImageIO ~360 ms; 54 ms |
 | **nitrosvg** | SVG (without filters) | lunasvg parser + plutovg renderer, with font lookup in the system and user font folders | 38 MB SVG: **~0.53 s** | WebKit ~1.4 s, CoreSVG ~2.4 s |
 | **nitrocdr** | CorelDRAW 5 – X6 (CDR), CMX | our [libcdr fork](https://github.com/gereoffy/libcdr) with many fixes (text styles, line spacing, clipping, bitmap transparency) and a 2× faster librevenge; draws directly with plutovg | 17.7 MB all-vector CDR: **~1.8 s**, ~3× faster | original libcdr `cdr2xhtml` ~5.4 s (only converting to SVG) |
@@ -377,16 +377,16 @@ the Glycin number includes `gly_loader_load()` + `gly_image_next_frame()`.
 
 `nitroview --bench` on 14 DNGs of 6 cameras, decode (the raw data read and developed) in ms/image:
 the i9 on macOS and a 6-core Intel i5-9600K (no hyper-threading) on Windows; the last column is
-Apple ImageIO decoding the same files to full-size BGRA on the i9.
+the viewer before nitrodng, through Apple ImageIO, on the i9.
 
 | camera, raw data | image | file | i9 | i5-9600K | ImageIO (i9) |
 |---|---|---|---|---|---|
-| DJI L2D-20c, uncompressed 16-bit | 20.8 MP | 41 MB | **8** | **31** | 157–177 |
-| DJI FC4382, one lossless JPEG tile | 12.1 MP | 16–19 MB | **21–26** | **42** | 97 |
-| Ricoh GR IV, one lossless JPEG strip | 25.6 MP | 30–32 MB | **22** | **69–77** | 205–225 |
+| DJI L2D-20c, uncompressed 16-bit | 20.8 MP | 41 MB | **8** | **31** | 210–510 |
+| DJI FC4382, one lossless JPEG tile | 12.1 MP | 16–19 MB | **21–26** | **42** | 270–300 |
+| Ricoh GR IV, one lossless JPEG strip | 25.6 MP | 30–32 MB | **22** | **69–77** | 490–630 |
 | Leica M9, 8-bit with a linearization table | 18.1 MP | 17.5 MB | **6–9** | **24–27** | only a 320×216 preview |
-| Oppo Find X6 Pro, uncompressed 16-bit | 12.6 MP | 27.5 MB | **11** | **19.5** | 101 |
-| Canon EOS 350D via Adobe DNG Converter, 140 lossless JPEG tiles | 8 MP | 6 MB | **13–16** | **18** | 94 |
+| Oppo Find X6 Pro, uncompressed 16-bit | 12.6 MP | 27.5 MB | **11** | **19.5** | ~150 |
+| Canon EOS 350D via Adobe DNG Converter, 140 lossless JPEG tiles | 8 MP | 6 MB | **13–16** | **18** | 170–190 |
 
 On the i5 the average went from 119 to 44 ms/image: the development (demosaicing, colour matrix,
 curve) vectorised 2–3×, and a single lossless JPEG strip or tile is decoded in parallel like
