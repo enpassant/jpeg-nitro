@@ -331,6 +331,16 @@ WebP has no hardware decoder either. nitrowebp's pace is set by its one serial s
 coefficient tokens, where a single M1 core does well, and so does ImageIO there: 1.7× on the M1,
 2× on the i9.
 
+DNG (`nitroview --bench` on the 14 DNGs of [DNG raw images](#dng-raw-images-nitrodng); decode, ms/image):
+
+| decoder | M1 | i9 |
+|---|---|---|
+| Apple ImageIO | 401 | 360 |
+| **nitrodng** | **34.4** | **22.5** |
+
+ImageIO shows the three Leica M9 DNGs only as their 320×216 previews, which makes its average
+look better; nitrodng develops all of them at full size, 12× faster on the M1, 16× on the i9.
+
 ### Three machines, macOS and Linux
 
 `bench/nbench` (portable, same code on every system), best of 5 decodes, ms/image; JPEG: the 50
