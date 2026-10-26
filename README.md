@@ -503,7 +503,8 @@ and jumps to the end of a run, which makes the decoding 1.5× faster on one thre
 | 50 × 24 MP photos (jpegtran) | **3.31** (~79 ms) | 9.35 | 14.02 (~336 ms) | 14.32 |
 | 1509 web images (2.7 MP avg.) | **1.66** | 3.50 | 5.33 | 5.61 |
 
-The output is bit-identical to libjpeg-turbo on all of them. 12 web images are truncated (the last
+The output is bit-identical to libjpeg-turbo on all of them (`bench/verify` checks progressive
+files against TurboJPEG's Y/Cb/Cr planes, with all threads and with one). 12 web images are truncated (the last
 scans are missing: libjpeg-turbo smooths those blocks), they and damaged files go to TurboJPEG.
 
 ### nitropng

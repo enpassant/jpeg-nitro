@@ -464,7 +464,8 @@ egy szálon is 1.5× gyorsabb:
 | 50 × 24 MP-es fotó (jpegtran) | **3.31** (~79 ms) | 9.35 | 14.02 (~336 ms) | 14.32 |
 | 1509 webes kép (átlag 2.7 MP) | **1.66** | 3.50 | 5.33 | 5.61 |
 
-A kimenet mindegyiken bitre azonos a libjpeg-turbóéval. 12 webes kép csonka (hiányoznak az utolsó
+A kimenet mindegyiken bitre azonos a libjpeg-turbóéval (a `bench/verify` a progresszív fájlokat
+a TurboJPEG Y/Cb/Cr síkjaival veti össze, minden szállal és eggyel is). 12 webes kép csonka (hiányoznak az utolsó
 menetek: ezeknek a blokkjait a libjpeg-turbo simítja), ezeket és a sérült fájlokat a TurboJPEG
 dekódolja.
 

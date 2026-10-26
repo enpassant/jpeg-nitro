@@ -37,6 +37,49 @@ static void sync_summary(const nj_stats *st, char *out, size_t n) {
              ok ? (double)sum / ok : 0, mx, ok ? (double)sb / ok : 0, mb, never ? " NEVER!" : "");
 }
 
+// SOF2 before the first scan?
+static int is_progressive(const uint8_t *d, size_t n) {
+    for (size_t i = 2; i + 4 <= n && d[i] == 0xFF; i += 2 + ((d[i + 2] << 8) | d[i + 3])) {
+        if (d[i + 1] == 0xC2) return 1;
+        if (d[i + 1] == 0xDA) break;
+    }
+    return 0;
+}
+
+// Progressive: nitrojpeg (all threads and 1 thread) vs TurboJPEG's Y/Cb/Cr planes (the old
+// engine can't decode them), visible part. Returns 1 if they differ.
+static int verify_progressive(const char *nm, const uint8_t *d, size_t n, const nj_info *fi) {
+    size_t pitch[3], tot = 0;
+    uint8_t *pl[3][3];
+    for (int c = 0; c < fi->ncomp; c++) { pitch[c] = (fi->plane_w[c] + 255) & ~255; tot += pitch[c] * (fi->plane_h[c] + 16); }
+    uint8_t *buf[3];
+    for (int k = 0; k < 3; k++) {
+        uint8_t *p = buf[k] = calloc(1, tot);
+        for (int c = 0; c < fi->ncomp; c++) { pl[k][c] = p; p += pitch[c] * (fi->plane_h[c] + 16); }
+    }
+    nj_stats st;
+    int r1 = nj_decode_planes(d, n, fi, pl[0], pitch, 0, &st);
+    int r2 = nj_decode_planes(d, n, fi, pl[1], pitch, 1, NULL);
+    tjhandle h = tj3Init(TJINIT_DECOMPRESS);
+    int strides[3] = {(int)pitch[0], (int)pitch[1], (int)pitch[2]};
+    int r3 = tj3DecompressToYUVPlanes8(h, d, n, pl[2], strides);
+    tj3Destroy(h);
+    int ok = !r1 && !r2 && !r3;
+    for (int c = 0; c < fi->ncomp && ok; c++) {
+        int vw = (fi->width * fi->h[c] + fi->hmax - 1) / fi->hmax, vh = (fi->height * fi->v[c] + fi->vmax - 1) / fi->vmax;
+        for (int y = 0; y < vh && ok; y++)
+            for (int k = 0; k < 2; k++)
+                if (memcmp(pl[k][c] + (size_t)y * pitch[c], pl[2][c] + (size_t)y * pitch[c], (size_t)vw)) ok = 0;
+    }
+    if (r1 && r2)
+        printf("%-24s %5dx%-5d prog   not decoded (truncated or damaged: the viewer falls back to TurboJPEG)\n", nm, fi->width, fi->height);
+    else
+        printf("%-24s %5dx%-5d prog   %3d scans  dec %5.1f ms | planes %s\n", nm, fi->width, fi->height, st.bands, st.decode_ms,
+               ok ? "OK" : "MISMATCH");
+    for (int k = 0; k < 3; k++) free(buf[k]);
+    return (r1 && r2) ? 0 : !ok;
+}
+
 int main(int argc, char **argv) {
     int bad = 0;
     if (getenv("NJ_SEQ")) nj_set_sequential_scan(atoi(getenv("NJ_SEQ")));
@@ -47,6 +90,12 @@ int main(int argc, char **argv) {
         size_t n; uint8_t *d = load(argv[i], &n);
         nj_info fi;
         if (!d || nj_read_info(d, n, &fi) || !fi.supported) { printf("%s: unsupported\n", argv[i]); continue; }
+        if (is_progressive(d, n)) {
+            const char *nm = strrchr(argv[i], '/') ? strrchr(argv[i], '/') + 1 : argv[i];
+            bad += verify_progressive(nm, d, n, &fi);
+            free(d);
+            continue;
+        }
         // planar: parallel vs 1 thread
         size_t pitch[3], tot = 0; uint8_t *pa[3], *pb[3];
         for (int c = 0; c < fi.ncomp; c++) { pitch[c] = (fi.plane_w[c] + 255) & ~255; tot += pitch[c] * fi.plane_h[c]; }
