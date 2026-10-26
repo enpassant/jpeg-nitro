@@ -2029,6 +2029,7 @@ typedef struct {
     int clear_next, cleared;            // rows given out / cleared (all before it)
     uint8_t *cleared_chunk;             // chunks of K rows cleared
     int idct_next, idct_done, fail;
+    int nwait;                          // workers sleeping on cv
     pthread_mutex_t mu;
     pthread_cond_t cv;
 } Prog;
@@ -2455,7 +2456,9 @@ static void prog_clear_rows(Prog *P, int r0, int r1) {
 
 // A worker: takes the next piece of work until everything is done. In this order: a chunk
 // of a scan whose predecessors are far enough (the most lagging scan first), unstuffing a
-// scan, clearing rows, IDCT of rows that all scans have finished.
+// scan, clearing rows, IDCT of rows that all scans have finished. Idle workers sleep; each
+// one that takes or finishes work wakes one more (waking all of them each time made 16
+// threads slower than 4: they all queued for the mutex).
 static void prog_worker(Prog *P) {
     pthread_mutex_lock(&P->mu);
     while (!P->fail && P->idct_done < P->R) {
@@ -2479,6 +2482,7 @@ static void prog_worker(Prog *P) {
         if (best >= 0) {
             PScan *s = &P->s[best];
             s->busy = 1;
+            if (P->nwait) pthread_cond_signal(&P->cv);   // more may be there: pass it on
             pthread_mutex_unlock(&P->mu);
             int err = prog_scan_rows(P, s, r0, r1);
             pthread_mutex_lock(&P->mu);
@@ -2488,6 +2492,7 @@ static void prog_worker(Prog *P) {
         } else if (unstuff >= 0) {
             PScan *s = &P->s[unstuff];
             s->ready = 1;
+            if (P->nwait) pthread_cond_signal(&P->cv);   // more may be there: pass it on
             pthread_mutex_unlock(&P->mu);
             prog_unstuff(s, P->data);
             pthread_mutex_lock(&P->mu);
@@ -2497,6 +2502,7 @@ static void prog_worker(Prog *P) {
             r0 = P->clear_next;
             r1 = r0 + P->K < P->R ? r0 + P->K : P->R;
             P->clear_next = r1;
+            if (P->nwait) pthread_cond_signal(&P->cv);   // more may be there: pass it on
             pthread_mutex_unlock(&P->mu);
             prog_clear_rows(P, r0, r1);
             pthread_mutex_lock(&P->mu);
@@ -2507,15 +2513,18 @@ static void prog_worker(Prog *P) {
             r0 = P->idct_next;
             r1 = all < r0 + P->K ? all : r0 + P->K;
             P->idct_next = r1;
+            if (P->nwait) pthread_cond_signal(&P->cv);   // more may be there: pass it on
             pthread_mutex_unlock(&P->mu);
             prog_idct_rows(P, r0, r1);
             pthread_mutex_lock(&P->mu);
             P->idct_done += r1 - r0;
         } else {
+            P->nwait++;
             pthread_cond_wait(&P->cv, &P->mu);
+            P->nwait--;
             continue;
         }
-        pthread_cond_broadcast(&P->cv);
+        if (P->nwait) pthread_cond_signal(&P->cv);   // new work may have become free
     }
     pthread_cond_broadcast(&P->cv);
     pthread_mutex_unlock(&P->mu);
