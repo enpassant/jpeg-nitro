@@ -1419,78 +1419,77 @@ static void idct_islow_avx2_zz(const int16_t *zz, const uint16_t *q, uint8_t *ou
 #if defined(__ARM_NEON) && !defined(__AVX2__)
 #include <arm_neon.h>
 
-// Same as the AVX2 version with 4-wide vectors: every row is two halves,
-// lo = columns 0-3, hi = columns 4-7.
-
-#define ADD vaddq_s32
-#define SUB vsubq_s32
-#define MULK(a, k) vmulq_n_s32(a, k)
-
-// One 1-D ISLOW pass on 8 vectors (x[k] = frequency k, lanes independent).
-static inline __attribute__((always_inline)) void idct4_neon(int32x4_t *x, int shift) {
-    int32x4_t z2 = x[2], z3 = x[6];
-    int32x4_t z1 = MULK(ADD(z2, z3), FIX_0_541196100);
-    int32x4_t tmp2 = ADD(z1, MULK(z3, -FIX_1_847759065));
-    int32x4_t tmp3 = ADD(z1, MULK(z2, FIX_0_765366865));
-    int32x4_t tmp0 = vshlq_n_s32(ADD(x[0], x[4]), 13);
-    int32x4_t tmp1 = vshlq_n_s32(SUB(x[0], x[4]), 13);
-    int32x4_t tmp10 = ADD(tmp0, tmp3), tmp13 = SUB(tmp0, tmp3), tmp11 = ADD(tmp1, tmp2), tmp12 = SUB(tmp1, tmp2);
-    int32x4_t t0 = x[7], t1 = x[5], t2 = x[3], t3 = x[1];
-    z1 = ADD(t0, t3); z2 = ADD(t1, t2); z3 = ADD(t0, t2);
-    int32x4_t z4 = ADD(t1, t3);
-    int32x4_t z5 = MULK(ADD(z3, z4), FIX_1_175875602);
-    t0 = MULK(t0, FIX_0_298631336); t1 = MULK(t1, FIX_2_053119869);
-    t2 = MULK(t2, FIX_3_072711026); t3 = MULK(t3, FIX_1_501321110);
-    z1 = MULK(z1, -FIX_0_899976223); z2 = MULK(z2, -FIX_2_562915447);
-    z3 = ADD(MULK(z3, -FIX_1_961570560), z5); z4 = ADD(MULK(z4, -FIX_0_390180644), z5);
-    t0 = ADD(t0, ADD(z1, z3)); t1 = ADD(t1, ADD(z2, z4));
-    t2 = ADD(t2, ADD(z2, z3)); t3 = ADD(t3, ADD(z1, z4));
-    int32x4_t rnd = vdupq_n_s32(1 << (shift - 1)), sh = vdupq_n_s32(-shift);
-    tmp10 = ADD(tmp10, rnd); tmp11 = ADD(tmp11, rnd); tmp12 = ADD(tmp12, rnd); tmp13 = ADD(tmp13, rnd);
-    x[0] = vshlq_s32(ADD(tmp10, t3), sh); x[7] = vshlq_s32(SUB(tmp10, t3), sh);
-    x[1] = vshlq_s32(ADD(tmp11, t2), sh); x[6] = vshlq_s32(SUB(tmp11, t2), sh);
-    x[2] = vshlq_s32(ADD(tmp12, t1), sh); x[5] = vshlq_s32(SUB(tmp12, t1), sh);
-    x[3] = vshlq_s32(ADD(tmp13, t0), sh); x[4] = vshlq_s32(SUB(tmp13, t0), sh);
+// Same as the AVX2 version: 16-bit dequantisation (vmulq_s16), 16 x 16 -> 32-bit
+// multiply-accumulates (vmull / vmlal with constants), the same 4 x 4 matrix for the odd part.
+// 32-bit values as two halves: lo = lanes 0-3, hi = lanes 4-7.
+typedef struct { int32x4_t l, h; } I32x8;
+static inline I32x8 add8(I32x8 a, I32x8 b) { return (I32x8){vaddq_s32(a.l, b.l), vaddq_s32(a.h, b.h)}; }
+static inline I32x8 sub8(I32x8 a, I32x8 b) { return (I32x8){vsubq_s32(a.l, b.l), vsubq_s32(a.h, b.h)}; }
+// a * ka + b * kb
+static inline I32x8 madd2(int16x8_t a, int16_t ka, int16x8_t b, int16_t kb) {
+    return (I32x8){vmlal_n_s16(vmull_n_s16(vget_low_s16(a), ka), vget_low_s16(b), kb),
+                   vmlal_high_n_s16(vmull_high_n_s16(a, ka), b, kb)};
+}
+// a * ka + b * kb + c * kc + d * kd
+static inline I32x8 madd4(int16x8_t a, int16_t ka, int16x8_t b, int16_t kb, int16x8_t c, int16_t kc, int16x8_t d, int16_t kd) {
+    I32x8 r = madd2(a, ka, b, kb);
+    r.l = vmlal_n_s16(vmlal_n_s16(r.l, vget_low_s16(c), kc), vget_low_s16(d), kd);
+    r.h = vmlal_high_n_s16(vmlal_high_n_s16(r.h, c, kc), d, kd);
+    return r;
 }
 
-static inline __attribute__((always_inline)) void transpose4_neon(int32x4_t *a, int32x4_t *b, int32x4_t *c, int32x4_t *d) {
-    int32x4_t t0 = vtrn1q_s32(*a, *b), t1 = vtrn2q_s32(*a, *b);
-    int32x4_t t2 = vtrn1q_s32(*c, *d), t3 = vtrn2q_s32(*c, *d);
-    *a = vreinterpretq_s32_s64(vtrn1q_s64(vreinterpretq_s64_s32(t0), vreinterpretq_s64_s32(t2)));
-    *b = vreinterpretq_s32_s64(vtrn1q_s64(vreinterpretq_s64_s32(t1), vreinterpretq_s64_s32(t3)));
-    *c = vreinterpretq_s32_s64(vtrn2q_s64(vreinterpretq_s64_s32(t0), vreinterpretq_s64_s32(t2)));
-    *d = vreinterpretq_s32_s64(vtrn2q_s64(vreinterpretq_s64_s32(t1), vreinterpretq_s64_s32(t3)));
+// One pass on 8 vectors (lanes = the other dimension): pass 1 descales by 11, pass 2 by 18,
+// saturated to 16 bits.
+static inline __attribute__((always_inline)) void islow16_pass_neon(int16x8_t *v, int pass2) {
+    I32x8 t0 = {vshlq_n_s32(vaddl_s16(vget_low_s16(v[0]), vget_low_s16(v[4])), 13), vshlq_n_s32(vaddl_high_s16(v[0], v[4]), 13)};
+    I32x8 t1 = {vshlq_n_s32(vsubl_s16(vget_low_s16(v[0]), vget_low_s16(v[4])), 13), vshlq_n_s32(vsubl_high_s16(v[0], v[4]), 13)};
+    I32x8 t3 = madd2(v[2], FIX_0_541196100 + FIX_0_765366865, v[6], FIX_0_541196100);
+    I32x8 t2 = madd2(v[2], FIX_0_541196100, v[6], FIX_0_541196100 - FIX_1_847759065);
+    I32x8 e10 = add8(t0, t3), e13 = sub8(t0, t3), e11 = add8(t1, t2), e12 = sub8(t1, t2);
+    I32x8 o0 = madd4(v[7], FIX_0_298631336 - FIX_0_899976223 - FIX_1_961570560 + FIX_1_175875602, v[5], FIX_1_175875602,
+                     v[3], FIX_1_175875602 - FIX_1_961570560, v[1], FIX_1_175875602 - FIX_0_899976223);
+    I32x8 o1 = madd4(v[7], FIX_1_175875602, v[5], FIX_2_053119869 - FIX_2_562915447 - FIX_0_390180644 + FIX_1_175875602,
+                     v[3], FIX_1_175875602 - FIX_2_562915447, v[1], FIX_1_175875602 - FIX_0_390180644);
+    I32x8 o2 = madd4(v[7], FIX_1_175875602 - FIX_1_961570560, v[5], FIX_1_175875602 - FIX_2_562915447,
+                     v[3], FIX_3_072711026 - FIX_2_562915447 - FIX_1_961570560 + FIX_1_175875602, v[1], FIX_1_175875602);
+    I32x8 o3 = madd4(v[7], FIX_1_175875602 - FIX_0_899976223, v[5], FIX_1_175875602 - FIX_0_390180644,
+                     v[3], FIX_1_175875602, v[1], FIX_1_501321110 - FIX_0_899976223 - FIX_0_390180644 + FIX_1_175875602);
+    I32x8 w[8] = {add8(e10, o3), add8(e11, o2), add8(e12, o1), add8(e13, o0),
+                  sub8(e13, o0), sub8(e12, o1), sub8(e11, o2), sub8(e10, o3)};
+    for (int y = 0; y < 8; y++)
+        v[y] = pass2 ? vcombine_s16(vqmovn_s32(vrshrq_n_s32(w[y].l, 18)), vqmovn_s32(vrshrq_n_s32(w[y].h, 18)))
+                     : vcombine_s16(vqrshrn_n_s32(w[y].l, 11), vqrshrn_n_s32(w[y].h, 11));
 }
 
-// lo[r] / hi[r]: columns 0-3 / 4-7 of row r. Transposes the 8x8 matrix.
-static inline __attribute__((always_inline)) void transpose8_neon(int32x4_t *lo, int32x4_t *hi) {
-    transpose4_neon(&lo[0], &lo[1], &lo[2], &lo[3]);
-    transpose4_neon(&hi[0], &hi[1], &hi[2], &hi[3]);
-    transpose4_neon(&lo[4], &lo[5], &lo[6], &lo[7]);
-    transpose4_neon(&hi[4], &hi[5], &hi[6], &hi[7]);
-    for (int i = 0; i < 4; i++) { int32x4_t t = hi[i]; hi[i] = lo[i + 4]; lo[i + 4] = t; }
+static inline __attribute__((always_inline)) void transpose8x16_neon(int16x8_t *v) {
+    int16x8_t a[8];
+    for (int i = 0; i < 8; i += 2) { a[i] = vtrn1q_s16(v[i], v[i + 1]); a[i + 1] = vtrn2q_s16(v[i], v[i + 1]); }
+    int32x4_t b[8];
+    for (int i = 0; i < 8; i += 4)
+        for (int k = 0; k < 2; k++) {
+            b[i + 2 * k] = vtrn1q_s32(vreinterpretq_s32_s16(a[i + k]), vreinterpretq_s32_s16(a[i + k + 2]));
+            b[i + 2 * k + 1] = vtrn2q_s32(vreinterpretq_s32_s16(a[i + k]), vreinterpretq_s32_s16(a[i + k + 2]));
+        }
+    // b[0]: columns 0 / 4 of rows 0-3, b[1]: 2 / 6, b[2]: 1 / 5, b[3]: 3 / 7; b[4..7]: rows 4-7
+    static const int col[4] = {0, 2, 1, 3};
+    for (int k = 0; k < 4; k++) {
+        int64x2_t x = vreinterpretq_s64_s32(b[k]), y = vreinterpretq_s64_s32(b[k + 4]);
+        v[col[k]] = vreinterpretq_s16_s64(vtrn1q_s64(x, y));
+        v[col[k] + 4] = vreinterpretq_s16_s64(vtrn2q_s64(x, y));
+    }
 }
 
+// rows: the 8 coefficient rows (natural order, quantised); dc replaces rows[0][0].
 static inline __attribute__((always_inline)) void idct_rows_neon(const int16x8_t *rows, const uint16_t *q, int dc, uint8_t *out, size_t pitch) {
-    int32x4_t lo[8], hi[8];
-    for (int r = 0; r < 8; r++) {
-        int16x8_t c = rows[r];
-        uint16x8_t k = vld1q_u16(q + 8 * r);
-        lo[r] = vmulq_s32(vmovl_s16(vget_low_s16(c)), vreinterpretq_s32_u32(vmovl_u16(vget_low_u16(k))));
-        hi[r] = vmulq_s32(vmovl_s16(vget_high_s16(c)), vreinterpretq_s32_u32(vmovl_u16(vget_high_u16(k))));
-    }
-    lo[0] = vsetq_lane_s32(dc * q[0], lo[0], 0);
-    idct4_neon(lo, 11);          // columns (lanes = columns)
-    idct4_neon(hi, 11);
-    transpose8_neon(lo, hi);
-    idct4_neon(lo, 18);          // rows (lanes = rows)
-    idct4_neon(hi, 18);
-    transpose8_neon(lo, hi);
-    int32x4_t c128 = vdupq_n_s32(128);
-    for (int r = 0; r < 8; r++) {
-        int16x8_t s = vcombine_s16(vqmovn_s32(ADD(lo[r], c128)), vqmovn_s32(ADD(hi[r], c128)));
-        vst1_u8(out + r * pitch, vqmovun_s16(s));
-    }
+    int16x8_t v[8];
+    for (int r = 0; r < 8; r++)
+        v[r] = vmulq_s16(r ? rows[r] : vsetq_lane_s16((int16_t)dc, rows[0], 0), vreinterpretq_s16_u16(vld1q_u16(q + 8 * r)));
+    islow16_pass_neon(v, 0);    // columns (lanes = columns): v[y] = row y
+    transpose8x16_neon(v);
+    islow16_pass_neon(v, 1);    // rows (lanes = rows): v[x] = column x
+    transpose8x16_neon(v);
+    for (int r = 0; r < 8; r++)   // +128, saturated
+        vst1_u8(out + r * pitch, veor_u8(vreinterpret_u8_s8(vqmovn_s16(v[r])), vdup_n_u8(0x80)));
 }
 
 static void idct_islow_neon(const int16_t *in, const uint16_t *q, int dc, uint8_t *out, size_t pitch) {
@@ -1510,9 +1509,6 @@ static void idct_islow_neon_zz(const int16_t *zz, const uint16_t *q, uint8_t *ou
     }
     idct_rows_neon(rows, q, zz[0], out, pitch);
 }
-#undef ADD
-#undef SUB
-#undef MULK
 #endif
 
 static inline void idct_block(const int16_t *in, const uint16_t *q, int dc, uint8_t *out, size_t pitch) {
