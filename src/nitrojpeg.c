@@ -2559,7 +2559,11 @@ static int nj_decode_prog(const Jpeg *j, const uint8_t *data, size_t len, const 
     double t1 = now_ms();
     pthread_mutex_init(&P->mu, NULL);
     pthread_cond_init(&P->cv, NULL);
-    const int W = t_workers > 0 ? t_workers : g_max_workers > 0 ? g_max_workers : ncpu();
+    // At most 4 workers: the longest scan is about a quarter to a third of the work, so more
+    // can't be kept busy; they only cost (i9 and M1: 7% faster than all cores, small web
+    // images 30%; 24 MP the same from 4 to 16)
+    int W = t_workers > 0 ? t_workers : g_max_workers > 0 ? g_max_workers : ncpu();
+    if (W > 4) W = 4;
     Prog *const p = P;
     parallel_for((size_t)W, ^(size_t w) { (void)w; prog_worker(p); });
     pthread_cond_destroy(&P->cv);
