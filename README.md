@@ -356,10 +356,12 @@ decode / with the GPU upload and conversion, ms/image):
 | decoder | M1 | i9 |
 |---|---|---|
 | libjpeg-turbo (TurboJPEG, the viewer's earlier path) | 43.4 / 47.1 | 41.9 / 47.9 |
-| **nitrojpeg** (the scans as a pipeline) | **11.8 / 17.3** | **11.6 / 16.3** |
+| **nitrojpeg** (the scans as a pipeline) | **10.6 / 15.8** | **9.5 / 14.3** |
 
-3.7× faster on both. The 16-bit IDCT (pmaddwd / vmlal) made a measurable difference only on the
-i9 (its 32-bit vector multiplies are slow); on the M1 the 32-bit one gave 11.9 / 17.6.
+4× faster on the M1, 4.4× on the i9. The 16-bit IDCT (pmaddwd / vmlal) made a difference only on
+one thread (its 32-bit vector multiplies are slow on the i9); 4 workers instead of all cores took
+the M1 from 11.3 to 10.6 ms and the i9 from 11.7 to 9.5 ms (more can't be kept busy, see
+[Progressive JPEG](#progressive-jpeg); `-j` sets more).
 
 ### Three machines, macOS and Linux
 
@@ -507,7 +509,9 @@ MCU rows as soon as the scans before it are far enough, and the IDCT follows the
 time is then bounded by the longest single scan instead of the sum of all scans. The refinement
 scans are also decoded differently: libjpeg walks the band one coefficient at a time (a correction
 bit for each nonzero one, counting the zero ones), nitrojpeg lists a block's zero coefficients once
-and jumps to the end of a run, which makes the decoding 1.5× faster on one thread too:
+and jumps to the end of a run, which makes the decoding 1.5× faster on one thread too. 4 workers by default (the longest scan is a
+quarter to a third of the work, more threads can't be kept busy and only slow it down; `-j` sets
+more):
 
 | ms / MP | nitrojpeg | nitrojpeg, 1 thread | libjpeg-turbo (Y/Cb/Cr) | libjpeg-turbo (BGRX) |
 |---|---|---|---|---|

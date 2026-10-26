@@ -76,9 +76,9 @@ int nj_decode_planes(const uint8_t *data, size_t len, const nj_info *info,
                      int nthreads, nj_stats *stats);
 
 
-// Limits the number of worker threads (0 = all logical CPUs). The number of
-// work pieces is the 'nthreads' argument of the decode functions
-// (<= 0: 4 x logical CPUs).
+// Limits the number of worker threads (0 = all logical CPUs; progressive files:
+// 4, more can't be kept busy). The number of work pieces is the 'nthreads'
+// argument of the decode functions (<= 0: 4 x logical CPUs).
 void nj_set_max_workers(int n);
 // Number of parallel tasks for restart-marker files, and bands of the
 // reference engine (0: 2 x pieces).

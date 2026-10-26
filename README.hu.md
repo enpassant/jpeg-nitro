@@ -332,10 +332,12 @@ Progresszív JPEG (`nitroview --bench` 100 darab, 1 MB-nál nagyobb progresszív
 | dekóder | M1 | i9 |
 |---|---|---|
 | libjpeg-turbo (TurboJPEG, a néző korábbi útja) | 43.4 / 47.1 | 41.9 / 47.9 |
-| **nitrojpeg** (a menetek csővezetékben) | **11.8 / 17.3** | **11.6 / 16.3** |
+| **nitrojpeg** (a menetek csővezetékben) | **10.6 / 15.8** | **9.5 / 14.3** |
 
-Mindkét gépen 3.7× gyorsabb. A 16 bites IDCT (pmaddwd / vmlal) csak az i9-en hozott mérhető
-javulást (ott lassúak a 32 bites vektoros szorzások); az M1-en a 32 bites változattal 11.9 / 17.6 volt.
+Az M1-en 4×, az i9-en 4.4× gyorsabb. A 16 bites IDCT (pmaddwd / vmlal) csak egy szálon számított
+(az i9-en lassúak a 32 bites vektoros szorzások); a 4 worker az összes mag helyett az M1-et
+11.3-ról 10.6 ms-ra, az i9-et 11.7-ről 9.5 ms-ra gyorsította (többet nem lehet munkával ellátni,
+lásd: Progresszív JPEG; a `-j` többet is beállíthat).
 ### Három gép, macOS és Linux
 
 `bench/nbench` (hordozható, minden rendszeren ugyanaz a kód), 5 dekódolásból a legjobb, ms/kép;
@@ -468,7 +470,8 @@ amint az előtte lévők elég messze járnak, és az IDCT követi az utolsókat
 leghosszabb menet, nem az összes menet összege. A finomító meneteket is máshogy dekódolja: a
 libjpeg együtthatónként lépked végig a sávon (minden nemnullánál egy javítóbit, a nullákat
 számolja), a nitrojpeg egyszer kigyűjti a blokk nulla együtthatóit, és a futás végére ugrik; ettől
-egy szálon is 1.5× gyorsabb:
+egy szálon is 1.5× gyorsabb. Alapból 4 workerrel dolgozik (a leghosszabb menet a munka negyede-
+harmada, több szálnak nem jut munka, csak lassítanak; a `-j` többet is beállíthat):
 
 | ms / MP | nitrojpeg | nitrojpeg, 1 szál | libjpeg-turbo (Y/Cb/Cr) | libjpeg-turbo (BGRX) |
 |---|---|---|---|---|
