@@ -1284,6 +1284,27 @@ static void idct_islow_scalar(const int16_t *in, const uint16_t *q, int dc, uint
     }
 }
 
+// Zigzag-ordered blocks (progressive decoding): byte j of natural row r is byte
+// g_zzidx[r][j] of the zigzag block; g_zzmask[r][s]: the same as a pshufb mask on
+// zigzag bytes 16s..16s+15 (0x80: from another 16 bytes).
+static uint8_t g_zzidx[8][16];
+#ifdef __AVX2__
+static uint8_t g_zzmask[8][8][16] __attribute__((aligned(16)));
+#endif
+static void zz_tables_init(void) {
+    for (int k = 0; k < 64; k++) {
+        int n = kNatural[k];
+        g_zzidx[n / 8][2 * (n % 8)] = (uint8_t)(2 * k);
+        g_zzidx[n / 8][2 * (n % 8) + 1] = (uint8_t)(2 * k + 1);
+    }
+#ifdef __AVX2__
+    for (int r = 0; r < 8; r++)
+        for (int src = 0; src < 8; src++)
+            for (int j = 0; j < 16; j++)
+                g_zzmask[r][src][j] = g_zzidx[r][j] / 16 == src ? g_zzidx[r][j] % 16 : 0x80;
+#endif
+}
+
 #ifdef __AVX2__
 #include <immintrin.h>
 
@@ -1334,10 +1355,10 @@ static inline __attribute__((always_inline)) void transpose8_avx2(__m256i *x) {
     x[3] = _mm256_permute2x128_si256(u3, u7, 0x20); x[7] = _mm256_permute2x128_si256(u3, u7, 0x31);
 }
 
-static void idct_islow_avx2(const int16_t *in, const uint16_t *q, int dc, uint8_t *out, size_t pitch) {
+static inline __attribute__((always_inline)) void idct_rows_avx2(const __m128i *rows, const uint16_t *q, int dc, uint8_t *out, size_t pitch) {
     __m256i x[8];
     for (int r = 0; r < 8; r++)
-        x[r] = _mm256_mullo_epi32(_mm256_cvtepi16_epi32(_mm_loadu_si128((const __m128i *)(in + 8 * r))),
+        x[r] = _mm256_mullo_epi32(_mm256_cvtepi16_epi32(rows[r]),
                                   _mm256_cvtepu16_epi32(_mm_loadu_si128((const __m128i *)(q + 8 * r))));
     x[0] = _mm256_blend_epi32(x[0], _mm256_set1_epi32(dc * q[0]), 1);
     idct8_avx2(x, 11);          // columns (lanes = columns)
@@ -1360,6 +1381,30 @@ static void idct_islow_avx2(const int16_t *in, const uint16_t *q, int dc, uint8_
     _mm_storel_epi64((__m128i *)(out + 5 * pitch), h1);
     _mm_storeh_pd((double *)(out + 6 * pitch), _mm_castsi128_pd(l1));
     _mm_storeh_pd((double *)(out + 7 * pitch), _mm_castsi128_pd(h1));
+}
+
+static void idct_islow_avx2(const int16_t *in, const uint16_t *q, int dc, uint8_t *out, size_t pitch) {
+    __m128i rows[8];
+    for (int r = 0; r < 8; r++) rows[r] = _mm_loadu_si128((const __m128i *)(in + 8 * r));
+    idct_rows_avx2(rows, q, dc, out, pitch);
+}
+
+// The same on a zigzag-ordered block: the natural rows are put together in registers
+// (each from the 16-byte pieces of the zigzag order it has coefficients in).
+static void idct_islow_avx2_zz(const int16_t *zz, const uint16_t *q, uint8_t *out, size_t pitch) {
+    __m128i S[8], rows[8];
+    for (int i = 0; i < 8; i++) S[i] = _mm_loadu_si128((const __m128i *)(zz + 8 * i));
+#define Z(r, i) _mm_shuffle_epi8(S[i], _mm_load_si128((const __m128i *)g_zzmask[r][i]))
+    rows[0] = _mm_or_si128(_mm_or_si128(Z(0, 0), Z(0, 1)), Z(0, 3));
+    rows[1] = _mm_or_si128(_mm_or_si128(_mm_or_si128(Z(1, 0), Z(1, 1)), _mm_or_si128(Z(1, 2), Z(1, 3))), Z(1, 5));
+    rows[2] = _mm_or_si128(_mm_or_si128(_mm_or_si128(Z(2, 0), Z(2, 1)), _mm_or_si128(Z(2, 2), Z(2, 3))), Z(2, 5));
+    rows[3] = _mm_or_si128(_mm_or_si128(_mm_or_si128(Z(3, 1), Z(3, 2)), _mm_or_si128(Z(3, 3), Z(3, 5))), Z(3, 6));
+    rows[4] = _mm_or_si128(_mm_or_si128(_mm_or_si128(Z(4, 1), Z(4, 2)), _mm_or_si128(Z(4, 4), Z(4, 5))), Z(4, 6));
+    rows[5] = _mm_or_si128(_mm_or_si128(_mm_or_si128(Z(5, 2), Z(5, 4)), _mm_or_si128(Z(5, 5), Z(5, 6))), Z(5, 7));
+    rows[6] = _mm_or_si128(_mm_or_si128(_mm_or_si128(Z(6, 2), Z(6, 4)), _mm_or_si128(Z(6, 5), Z(6, 6))), Z(6, 7));
+    rows[7] = _mm_or_si128(_mm_or_si128(Z(7, 4), Z(7, 6)), Z(7, 7));
+#undef Z
+    idct_rows_avx2(rows, q, zz[0], out, pitch);
 }
 #undef ADD
 #undef SUB
@@ -1421,10 +1466,10 @@ static inline __attribute__((always_inline)) void transpose8_neon(int32x4_t *lo,
     for (int i = 0; i < 4; i++) { int32x4_t t = hi[i]; hi[i] = lo[i + 4]; lo[i + 4] = t; }
 }
 
-static void idct_islow_neon(const int16_t *in, const uint16_t *q, int dc, uint8_t *out, size_t pitch) {
+static inline __attribute__((always_inline)) void idct_rows_neon(const int16x8_t *rows, const uint16_t *q, int dc, uint8_t *out, size_t pitch) {
     int32x4_t lo[8], hi[8];
     for (int r = 0; r < 8; r++) {
-        int16x8_t c = vld1q_s16(in + 8 * r);
+        int16x8_t c = rows[r];
         uint16x8_t k = vld1q_u16(q + 8 * r);
         lo[r] = vmulq_s32(vmovl_s16(vget_low_s16(c)), vreinterpretq_s32_u32(vmovl_u16(vget_low_u16(k))));
         hi[r] = vmulq_s32(vmovl_s16(vget_high_s16(c)), vreinterpretq_s32_u32(vmovl_u16(vget_high_u16(k))));
@@ -1442,6 +1487,24 @@ static void idct_islow_neon(const int16_t *in, const uint16_t *q, int dc, uint8_
         vst1_u8(out + r * pitch, vqmovun_s16(s));
     }
 }
+
+static void idct_islow_neon(const int16_t *in, const uint16_t *q, int dc, uint8_t *out, size_t pitch) {
+    int16x8_t rows[8];
+    for (int r = 0; r < 8; r++) rows[r] = vld1q_s16(in + 8 * r);
+    idct_rows_neon(rows, q, dc, out, pitch);
+}
+
+// The same on a zigzag-ordered block: table lookups put the natural rows together, from
+// the first 64 bytes, then (indices - 64, the others left as they are) the last 64.
+static void idct_islow_neon_zz(const int16_t *zz, const uint16_t *q, uint8_t *out, size_t pitch) {
+    uint8x16x4_t lo = vld1q_u8_x4((const uint8_t *)zz), hi = vld1q_u8_x4((const uint8_t *)zz + 64);
+    int16x8_t rows[8];
+    for (int r = 0; r < 8; r++) {
+        uint8x16_t idx = vld1q_u8(g_zzidx[r]);
+        rows[r] = vreinterpretq_s16_u8(vqtbx4q_u8(vqtbl4q_u8(lo, idx), hi, vsubq_u8(idx, vdupq_n_u8(64))));
+    }
+    idct_rows_neon(rows, q, zz[0], out, pitch);
+}
 #undef ADD
 #undef SUB
 #undef MULK
@@ -1456,6 +1519,18 @@ static inline void idct_block(const int16_t *in, const uint16_t *q, int dc, uint
     (void)g_scalar_idct;   // no SIMD IDCT in this build: always the plain C one
 #endif
     idct_islow_scalar(in, q, dc, out, pitch);
+}
+
+// IDCT of a zigzag-ordered block.
+static inline void idct_block_zz(const int16_t *zz, const uint16_t *q, uint8_t *out, size_t pitch) {
+#ifdef __AVX2__
+    if (!g_scalar_idct) { idct_islow_avx2_zz(zz, q, out, pitch); return; }
+#elif defined(__ARM_NEON)
+    if (!g_scalar_idct) { idct_islow_neon_zz(zz, q, out, pitch); return; }
+#endif
+    int16_t tmp[64];
+    for (int k = 0; k < 64; k++) tmp[kNatural[k]] = zz[k];
+    idct_islow_scalar(tmp, q, tmp[0], out, pitch);
 }
 
 // IDCT all blocks of MCU 'idx'. dcoff: DC correction per component (modulo 2^16).
@@ -2185,6 +2260,7 @@ static inline uint64_t nz_mask(const int16_t *blk) {
 static uint64_t g_bitpos[256];
 static pthread_once_t g_bitpos_once = PTHREAD_ONCE_INIT;
 static void bitpos_init(void) {
+    zz_tables_init();
     for (int x = 0; x < 256; x++)
         for (int b = 0, n = 0; b < 8; b++)
             if (x >> b & 1) g_bitpos[x] |= (uint64_t)b << (8 * n++);
@@ -2355,17 +2431,14 @@ static int prog_scan_rows(Prog *P, PScan *s, int r0, int r1) {
 static void prog_idct_rows(Prog *P, int r0, int r1) {
     const Jpeg *j = P->j;
     const nj_info *fi = &j->info;
-    int16_t tmp[64];
     for (int c = 0; c < fi->ncomp; c++) {
         const uint16_t *q = j->qt[j->cq[c]];
         uint8_t *plane = P->o->planes[c];
         size_t pitch = P->o->pitch[c];
         for (size_t by = (size_t)r0 * fi->v[c]; by < (size_t)r1 * fi->v[c]; by++) {
             const int16_t *blk = P->coef[c] + by * P->bw[c] * 64;
-            for (size_t bx = 0; bx < P->bw[c]; bx++, blk += 64) {
-                for (int k = 0; k < 64; k++) tmp[kNatural[k]] = blk[k];
-                idct_block(tmp, q, tmp[0], plane + by * 8 * pitch + bx * 8, pitch);
-            }
+            for (size_t bx = 0; bx < P->bw[c]; bx++, blk += 64)
+                idct_block_zz(blk, q, plane + by * 8 * pitch + bx * 8, pitch);
         }
     }
 }
