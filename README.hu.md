@@ -19,7 +19,7 @@ csempéit párhuzamosan dekódolja, és kettőt a vektoros rajzokhoz:
 
 | dekóder | formátum | hogyan | idő | szokásos dekóderek |
 |---|---|---|---|---|
-| **nitrojpeg** | baseline JPEG | spekulatív párhuzamos Huffman-dekódolás, AVX2 IDCT; bitre egyezik a libjpeg-turbóval | 24 MP-es fotó: **~11 ms** | libjpeg-turbo ~107 ms (1 szálon) |
+| **nitrojpeg** | baseline és progresszív JPEG | spekulatív párhuzamos Huffman-dekódolás, AVX2 IDCT; progresszív: a menetek csővezetékben, soronként; bitre egyezik a libjpeg-turbóval | 24 MP-es fotó: **~11 ms**; progresszív: **~79 ms** | libjpeg-turbo ~107 ms (1 szálon); progresszív ~336 ms |
 | **nitropng** | PNG (8 bites, nem interlaced) | spekulatív párhuzamos inflate (a még ismeretlen adatra mutató visszahivatkozásokat utólag oldja fel, Adler-32-vel ellenőrizve) + „hullámfront” szűrővisszafejtés | 38 valódi PNG: átlag **~43 ms** | Wuffs ~171 ms, ImageIO ~318 ms |
 | **nitropsd** | Photoshop PSD/PSB (8 bites RGB / szürke) | összesített kép: RLE-sorok párhuzamosan, ZIP a nitropng inflate-jével; nagy, rétegekkel teli fájlból csak az összesített képet olvassa be | 24 MP RLE: **~5 ms** | ImageIO ~170 ms |
 | **nitroheic** (macOS) | HEIC (8 bites 4:2:0 HEVC, iPhone-rácsok) | saját HEIF-feldolgozás; egy iPhone-fotó 48 független HEVC-csempéjét a VideoToolbox párhuzamosan bontja ki Y/Cb/Cr síkokba a GPU-nak | 12 MP-es iPhone-fotó: **~33 ms** | ImageIO ~200 ms |
@@ -185,7 +185,7 @@ ugyanez a néző: ugyanazok a billentyűk, egérfunkciók, nagyítás és ablakm
 diavetítés, egy fájlból a mappája, ráhúzás. A JPEG / PNG / PSD a három dekóderrel és egy compute
 shaderrel megy, a HEIC-fotók a saját HEVC-dekóderünkkel (`src/nitrohevc.c`, a H.265 szabvány alapján
 írva: a Windowsban Store-bővítmény nélkül nincs HEVC-dekóder; a csempék párhuzamosan, egy 12 MP-es kép
-~55 ms; deblocking és SAO még nincs, ez szemmel alig látszik), minden más (progresszív JPEG, TIFF, WebP,
+~55 ms; deblocking és SAO még nincs, ez szemmel alig látszik), minden más (TIFF, WebP,
 GIF, BMP) a Windows saját WIC-
 kodekjeivel; az SVG és a CorelDRAW CDR / CMX ugyanúgy, mint macOS-en (nagyítva éles, [ / ] a rajz
 oldalai között). Egyetlen önálló .exe (csak rendszer-DLL-ek, Windows 10-től), Macen vagy Linuxon
@@ -202,7 +202,7 @@ képernyőt, diavetítést (`-s`), egy fájlból a mappája lapozását, ráhúz
 A JPEG / PNG / PSD a három dekóderrel megy (`libnitro.so`-ként); a JPEG színkonverziója többszálú,
 és pontosan a libjpeg-turbo RGB-kimenetét adja (`bench/rgbverify`), a PNG-sorok másolás nélkül kerülnek
 a GTK-hoz, az EXIF-forgatást a rajzolás végzi. A képek háttérszálon dekódolódnak, ugyanazzal az
-előtöltéssel, mint macOS-en és Windowson (3 előre, 2 hátra). Minden mást (progresszív JPEG, TIFF, GIF,
+előtöltéssel, mint macOS-en és Windowson (3 előre, 2 hátra). Minden mást (TIFF, GIF,
 WebP ...) a GTK saját betöltői nyitnak meg. Lapozáskor az ablak mérete nem változik (Wayland alatt egy
 program nem méretezheti át szabadon a saját ablakát). A `make gnome`-hoz GTK 4.10+ és libadwaita 1.4+
 kell; a `make gnome-register` az aktuális felhasználónak felveszi az asztalra; a `make flatpak` a
@@ -388,8 +388,8 @@ rááll a helyes útra. Az esetek 40%-ában 1 MCU után, a leglassabb 21 MCU (87
 **Pontosság:** a párhuzamos kimenet **bitre azonos** az egyszálú libjpeg-turbo
 kimenetével, mind az 50 képen (`bench/verify`, skalár és AVX2 IDCT-vel is). A GPU-s
 konverzió legfeljebb ±1 eltérést ad (kerekítés, `--selftest`).
-Nem támogatott formátumoknál (progresszív, CMYK, RGB, >16384 px) és sérült fájloknál
-a néző automatikusan a sima TurboJPEG-re vált.
+Nem támogatott formátumoknál (CMYK, RGB, aritmetikai kódolás, >16384 px), sérült és csonka
+progresszív fájloknál a néző automatikusan a sima TurboJPEG-re vált.
 
 ### A fejlődés lépései (ms/kép, 16 szál)
 
@@ -442,6 +442,31 @@ a CPU gyorsan 90 °C fölé melegszik, ezért egy-egy mérés ±10%-ot is téved
 A következtetések kitartanak: a saját motor 1.7× gyorsabb a réginél, a HT 8 → 16 szálon
 ~30%-ot hoz, a darabszám 256–1024 között lényegtelen. (Minden futás külön folyamat, hideg
 pufferkészlettel, ezért ~1 ms-mal lassabb a nézőben mért meleg állapotnál.)
+
+### Progresszív JPEG
+
+A progresszív JPEG sok menetből (scan) áll (általában 9–10): a DC-együtthatók, az AC-együtthatók
+sávjai, majd finomító menetek, amelyek minden együtthatóhoz még egy bitet adnak. Minden menet külön
+Huffman-folyam, a szokásos dekóderek egymás után dekódolják őket. Menetenként mérve (libjpeg-turbo)
+1521 progresszív webes képen és 50, `jpegtran -progressive`-vel átalakított 24 MP-es fotón a Y AC
+finomítás az idő ~60%-a, a kimenet (IDCT, szín) 6–15%. A független menetek párhuzamos dekódolása
+csak 1.3–1.6×-ot hozna, mert a Y-menetek egymásra épülnek. Egy menetnek viszont csak az ugyanazon
+együtthatókat érintő korábbi menetek *ugyanazon blokksoraira* van szüksége, ezért a nitrojpeg a
+meneteket csővezetékben (hullámfrontban) futtatja: minden menet néhány MCU-sorral halad előre,
+amint az előtte lévők elég messze járnak, és az IDCT követi az utolsókat. Így az idő felső határa a
+leghosszabb menet, nem az összes menet összege. A finomító meneteket is máshogy dekódolja: a
+libjpeg együtthatónként lépked végig a sávon (minden nemnullánál egy javítóbit, a nullákat
+számolja), a nitrojpeg egyszer kigyűjti a blokk nulla együtthatóit, és a futás végére ugrik; ettől
+egy szálon is 1.5× gyorsabb:
+
+| ms / MP | nitrojpeg | nitrojpeg, 1 szál | libjpeg-turbo (Y/Cb/Cr) | libjpeg-turbo (BGRX) |
+|---|---|---|---|---|
+| 50 × 24 MP-es fotó (jpegtran) | **3.31** (~79 ms) | 9.35 | 14.02 (~336 ms) | 14.32 |
+| 1509 webes kép (átlag 2.7 MP) | **1.66** | 3.50 | 5.33 | 5.61 |
+
+A kimenet mindegyiken bitre azonos a libjpeg-turbóéval. 12 webes kép csonka (hiányoznak az utolsó
+menetek: ezeknek a blokkjait a libjpeg-turbo simítja), ezeket és a sérült fájlokat a TurboJPEG
+dekódolja.
 
 ### nitropng
 
@@ -574,7 +599,7 @@ make tools           # bench/bench, bench/verify, bench/robust (referenciának k
 JPEG-eket (8 bit, Huffman, 1 vagy 3 komponens, YCbCr/szürke, bármilyen mintavételezés,
 restart markerrel vagy anélkül). Ehhez csak C, pthreads, GCD és AVX2 kell.
 
-- **`TURBOJPEG=1`** (alapértelmezés, ha a `third_party/ljt` létezik): a progresszív, CMYK, RGB,
+- **`TURBOJPEG=1`** (alapértelmezés, ha a `third_party/ljt` létezik): a CMYK, RGB,
   16384 px-nél nagyobb és a sérült fájlokat a TurboJPEG dekódolja. A sérült képekből is
   megmutatja, ami menthető. A `--selftest` is ebben a módban érhető el.
 - **`TURBOJPEG=0`**: ezeket a fájlokat az Apple ImageIO dekódolja (lassabban; ha az sem tudja,
@@ -704,10 +729,6 @@ Mind a mérési zajon belül (±1.5%), csak a 13 bit kicsit lassabb; a kimenet m
 azonos. A JPEG-gel ellentétben itt a méret alig számít: a táblák kicsik (a 11 bites literál-tábla
 8 KB), a gyakori deflate-kódok 11 bitnél rövidebbek, és az idő jó része a visszahivatkozások
 másolására és a sorszűrők visszafejtésére megy el, amelyek nem függnek a tábláktól.
-
-**Progresszív JPEG** (nem támogatott, a libjpeg-turbo / WIC / GTK dekódolja): 82 progresszív fájlban
-(átlagosan 6 MP) a Y AC-finomító menetek a bájtok ~52%-át, az egymásra épülő Y-menetek lánca ~80%-át
-adják, így a menetek / komponensek párhuzamos dekódolása csak ~1.2–1.3×-ot hozna.
 
 ## Licenc
 
