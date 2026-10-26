@@ -157,6 +157,7 @@ typedef struct {
 
 static const char *mode_name(int m) {
     switch (m) {
+    case 3: return "prog";
     case 2: return "split";
     case 1: return "RST";
     case 0: return "single";

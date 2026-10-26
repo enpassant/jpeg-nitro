@@ -92,7 +92,7 @@ static double run_once(Job *j, int nthreads, const char **mode) {
     if (j->type == T_JPEG) {
         nj_stats st;
         rc = nj_decode_planes(j->d, j->len, &j->ji, j->planes, j->pitch, nthreads, &st);
-        if (mode) *mode = st.mode == 1 ? "RST" : st.mode == 2 ? "split" : "single";
+        if (mode) *mode = st.mode == 1 ? "RST" : st.mode == 2 ? "split" : st.mode == 3 ? "prog" : "single";
     } else if (j->type == T_PNG) {
         np_stats st;
         rc = np_decode(j->d, j->len, &j->pi, j->out, nthreads, &st);

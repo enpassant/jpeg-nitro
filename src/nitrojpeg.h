@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 A'rpi - part of jpeg-nitro (https://github.com/gereoffy/jpeg-nitro)
-// nitrojpeg: multi-threaded decoding of a *single* baseline JPEG image into
+// nitrojpeg: multi-threaded decoding of a *single* baseline or progressive JPEG image into
 // planar Y/Cb/Cr, with no external dependencies (C, pthreads, GCD, AVX2).
 //
 // A baseline JPEG is one long Huffman-coded bitstream, so normal decoders
@@ -11,11 +11,14 @@
 //     where each chunk meets the true decoding path, which gives its MCU
 //     index and DC offset. Coefficients are decoded exactly once and the
 //     IDCT runs as soon as a chunk is stitched, while it is still in cache;
-//   * files with restart markers: intervals are decoded in parallel.
+//   * files with restart markers: intervals are decoded in parallel;
+//   * progressive files: the scans run as a pipeline, each a few MCU rows behind
+//     the scans it depends on, the IDCT behind the last ones.
 // The IDCT is libjpeg's ISLOW algorithm, so the output is bit-identical to it.
 //
-// Not handled (returns an error, use another decoder): progressive,
-// arithmetic, 12-bit, lossless, CMYK/RGB, multi-scan, damaged streams.
+// Not handled (returns an error, use another decoder): arithmetic, 12-bit,
+// lossless, CMYK/RGB, multi-scan baseline, damaged streams, truncated
+// progressive files (libjpeg-turbo smooths their blocks).
 // Built with -DNJ_REFERENCE it also contains the old libjpeg-turbo based
 // engine and BGRX output, for comparison and testing.
 #pragma once
@@ -43,7 +46,7 @@ typedef struct {
     double sync_ms;   // speculative Huffman decode + stitching
     double decode_ms; // parallel band decode
     int bands;
-    int mode;         // 0 single, 1 restart markers, 2 speculative split
+    int mode;         // 0 single, 1 restart markers, 2 speculative split, 3 progressive
     // speculative split only: for pieces 1..nsync, how far each thread had
     // to decode before it met the true decoding path (piece 0 starts right).
     // sync_mcus[i] = -1: never synchronised (the true path ran through it).

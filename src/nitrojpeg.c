@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 A'rpi - part of jpeg-nitro (https://github.com/gereoffy/jpeg-nitro)
-// nitrojpeg: multi-threaded single-image baseline JPEG decoding.
+// nitrojpeg: multi-threaded single-image baseline and progressive JPEG decoding.
 // See nitrojpeg.h for the idea. Self-contained; the parts that need
 // libjpeg-turbo (reference engine, BGRX output) are under NJ_REFERENCE.
 //
@@ -195,6 +195,9 @@ typedef struct {
     uint8_t cq[3];                // quantisation table per frame component
     uint8_t cdc[3], cac[3];       // table selectors per frame component
     size_t scan_start;            // first entropy-coded byte
+    int progressive;              // SOF2: decoded by nj_decode_prog
+    size_t sos_pos;               // the first SOS marker
+    uint8_t comp_id[3];
     // header template for band JPEGs: SOI DQT* DHT* [DRI] SOF SOS
     uint8_t hdr[4096];
     size_t hdr_len;
@@ -250,7 +253,7 @@ static int parse(const uint8_t *d, size_t len, Jpeg *j) {
 
     uint8_t sof[64]; size_t sof_len = 0;
     uint8_t comp_id[3] = {0};
-    int have_sof = 0, baseline = 0, adobe = -1, jfif = 0;
+    int have_sof = 0, baseline = 0, progressive = 0, adobe = -1, jfif = 0;
     size_t pos = 2;
     for (;;) {
         while (pos < len && d[pos] != 0xFF) pos++;    // tolerate garbage
@@ -268,17 +271,18 @@ static int parse(const uint8_t *d, size_t len, Jpeg *j) {
         case 0xC9: case 0xCA: case 0xCB: case 0xCD: case 0xCE: case 0xCF:
             if (sl < 6) return -1;
             baseline = (m == 0xC0 || m == 0xC1) && seg[0] == 8;
+            progressive = m == 0xC2 && seg[0] == 8;
             fi->height = (int)be16(seg + 1);
             fi->width = (int)be16(seg + 3);
             fi->ncomp = seg[5];
-            if (fi->ncomp != 1 && fi->ncomp != 3) { fi->ncomp = fi->ncomp > 3 ? 3 : fi->ncomp; baseline = 0; }
+            if (fi->ncomp != 1 && fi->ncomp != 3) { fi->ncomp = fi->ncomp > 3 ? 3 : fi->ncomp; baseline = progressive = 0; }
             if (sl < 6 + 3 * (size_t)seg[5]) return -1;
             for (int c = 0; c < fi->ncomp; c++) {
                 comp_id[c] = seg[6 + 3 * c];
                 j->cq[c] = seg[8 + 3 * c] & 3;
                 fi->h[c] = seg[7 + 3 * c] >> 4;
                 fi->v[c] = seg[7 + 3 * c] & 15;
-                if (fi->h[c] < 1 || fi->h[c] > 4 || fi->v[c] < 1 || fi->v[c] > 4) baseline = 0;
+                if (fi->h[c] < 1 || fi->h[c] > 4 || fi->v[c] < 1 || fi->v[c] > 4) baseline = progressive = 0;
             }
             if (L + 2 > sizeof sof) return -1;
             memcpy(sof, d + pos - 2, L + 2);
@@ -331,10 +335,14 @@ static int parse(const uint8_t *d, size_t len, Jpeg *j) {
             int ns = seg[0];
             if (sl < 1 + 2 * (size_t)ns + 3) return -1;
             j->scan_start = pos + L;
-            // Is it one interleaved baseline scan with all components?
+            j->sos_pos = pos - 2;
+            memcpy(j->comp_id, comp_id, 3);
+            // Is it one interleaved baseline scan with all components? (progressive: the
+            // scans are checked by nj_decode_prog, which fails on anything it can't do)
             int ok = baseline && ns == fi->ncomp;
             int ss = seg[1 + 2 * ns], se = seg[2 + 2 * ns], a = seg[3 + 2 * ns];
             if (ss != 0 || se != 63 || a != 0) ok = 0;
+            if (progressive) ok = j->progressive = 1;
             // colour space: only YCbCr (or gray) goes to the planar path
             if (fi->ncomp == 3) {
                 if (adobe == 0) ok = 0;
@@ -376,7 +384,7 @@ static int parse(const uint8_t *d, size_t len, Jpeg *j) {
                 }
             }
             j->nblocks = nb;
-            for (int c = 0; ok && c < fi->ncomp; c++)
+            for (int c = 0; ok && !progressive && c < fi->ncomp; c++)
                 if (!j->dc[j->cdc[c]].present || !j->ac[j->cac[c]].present || !j->qpresent[j->cq[c]]) ok = 0;
             // band header template: ... [DRI] SOF SOS
             if (fi->restart_interval) {
@@ -865,7 +873,7 @@ static int nj_decode(const uint8_t *data, size_t len, const Output *o, int nthre
     if (!st) st = &dummy;
     memset(st, 0, sizeof *st);
     Jpeg *j = malloc(sizeof *j);
-    if (parse(data, len, j) || !j->info.supported || j->hdr_overflow) { free(j); return -1; }
+    if (parse(data, len, j) || !j->info.supported || j->progressive || j->hdr_overflow) { free(j); return -1; }
     const nj_info *fi = &j->info;
     if (nthreads <= 0) nthreads = 4 * ncpu();   // many more pieces than cores: dynamic load balance (see README)
     const int R = fi->mcu_rows, mpr = fi->mcus_per_row;
@@ -1722,9 +1730,16 @@ static void stitch_advance(const Jpeg *j, const Output *o, const uint8_t *clean,
     pthread_mutex_unlock(&S->mu);
 }
 
+static int nj_decode_prog(const Jpeg *j, const uint8_t *data, size_t len, const Output *o, nj_stats *st);
+
 static int nj_decode_own(const uint8_t *data, size_t len, const Output *o, int nthreads, nj_stats *st) {
     Jpeg *j = malloc(sizeof *j);
     if (parse(data, len, j) || !j->info.supported) { free(j); return -1; }
+    if (j->progressive) {
+        int r = nj_decode_prog(j, data, len, o, st);
+        free(j);
+        return r;
+    }
     const nj_info *fi = &j->info;
     if (nthreads <= 0) nthreads = 4 * ncpu();
     const int R = fi->mcu_rows, mpr = fi->mcus_per_row;
@@ -1889,6 +1904,593 @@ out:
     free(sc);
     pool_give(clean, clean_cap);
     free(j);
+    return rc;
+}
+
+// ===========================================================================
+// Progressive JPEG (SOF2). The image comes in many scans, each its own Huffman-coded
+// segment: DC first / refinement scans, and AC bands of one component, first and
+// refinement. A scan is sequential, but its MCU row only needs the same rows of the
+// earlier scans that touch the same coefficients (same component, overlapping band).
+// So the scans run as a pipeline (a wavefront): every scan advances by a few MCU rows
+// as soon as the scans it follows are far enough ahead, and the IDCT follows the last
+// ones. The time is bounded by the longest scan instead of the sum of all scans.
+// The coefficients of the whole image stay in memory (zigzag order, like the scans).
+
+#define PMAX_SCANS 64
+
+typedef struct {
+    int ncomp, comp[3], Ss, Se, Ah, Al, ri;
+    const HuffTable *dct[3], *act;
+    size_t raw0, raw1;                  // entropy-coded bytes in the file
+    uint64_t deps;                      // earlier scans it has to follow
+    uint8_t *clean;                     // unstuffed, RST markers dropped
+    size_t clean_len, clean_cap;
+    size_t *rst, nrst;                  // clean offsets where restart intervals 1.. start
+    // decoding state between the chunks
+    uint64_t pos;
+    unsigned eobrun;
+    int32_t dc[3];
+    size_t mcu;                         // MCUs (one-component scan: blocks) done
+    int done, busy;                     // MCU rows finished; a thread works on it
+    int ready;                          // 0: not unstuffed yet, 1: being unstuffed, 2: ready
+} PScan;
+
+typedef struct {
+    const Jpeg *j;
+    const Output *o;
+    const uint8_t *data;
+    size_t len;
+    int nscan, ntabs;
+    PScan s[PMAX_SCANS];
+    HuffTable *tabs[4 * PMAX_SCANS];    // tables defined between the scans
+    int16_t *coef[3];                   // coefficient blocks per component, MCU-padded:
+    size_t bw[3], bh[3];                //   bw x bh blocks of 64
+    size_t cbw[3], cbh[3];              // blocks a one-component scan covers
+    void *cbuf;
+    size_t cbuf_cap;
+    int R, K;                           // MCU rows, rows per chunk
+    int clear_next, cleared;            // rows given out / cleared (all before it)
+    uint8_t *cleared_chunk;             // chunks of K rows cleared
+    int idct_next, idct_done, fail;
+    pthread_mutex_t mu;
+    pthread_cond_t cv;
+} Prog;
+
+// All scans and the tables in between. Fails on anything unusual (the caller falls back).
+static int prog_layout(Prog *P) {
+    const Jpeg *j = P->j;
+    const nj_info *fi = &j->info;
+    const uint8_t *d = P->data;
+    size_t len = P->len, pos = j->sos_pos;
+    const HuffTable *dc[4], *ac[4];
+    for (int i = 0; i < 4; i++) { dc[i] = j->dc[i].present ? &j->dc[i] : NULL; ac[i] = j->ac[i].present ? &j->ac[i] : NULL; }
+    int ri = fi->restart_interval;
+    int8_t bits[3][64];                 // libjpeg's coef_bits: the Al reached so far, -1 none
+    memset(bits, -1, sizeof bits);
+    for (;;) {
+        while (pos < len && d[pos] == 0xFF) pos++;
+        if (pos + 2 >= len) break;      // no EOI
+        unsigned m = d[pos++];
+        if (m == 0xD9) break;
+        if (m >= 0xD0 && m <= 0xD7) continue;
+        unsigned L = be16(d + pos);
+        if (L < 2 || pos + L > len) return -1;
+        const uint8_t *seg = d + pos + 2;
+        size_t sl = L - 2;
+        if (m == 0xC4) {                // DHT
+            size_t q = 0;
+            while (q + 17 <= sl) {
+                int tc = seg[q] >> 4, th = seg[q] & 15, n = 0;
+                uint8_t b[17] = {0};
+                for (int l = 1; l <= 16; l++) { b[l] = seg[q + l]; n += b[l]; }
+                if (th > 3 || tc > 1 || q + 17 + n > sl) return -1;
+                if (P->ntabs == (int)(sizeof P->tabs / sizeof *P->tabs)) return -1;
+                HuffTable *t = malloc(sizeof *t);
+                P->tabs[P->ntabs++] = t;
+                if (!t || build_huff(t, b, seg + q + 17, n)) return -1;
+                if (tc) ac[th] = t; else dc[th] = t;
+                q += 17 + n;
+            }
+        } else if (m == 0xDD) {         // DRI
+            if (sl < 2) return -1;
+            ri = (int)be16(seg);
+        } else if (m == 0xDA) {         // SOS
+            if (P->nscan == PMAX_SCANS || sl < 1) return -1;
+            PScan *s = &P->s[P->nscan];
+            int ns = seg[0];
+            if (ns < 1 || ns > fi->ncomp || sl < 1 + 2 * (size_t)ns + 3) return -1;
+            s->ncomp = ns;
+            s->Ss = seg[1 + 2 * ns]; s->Se = seg[2 + 2 * ns];
+            s->Ah = seg[3 + 2 * ns] >> 4; s->Al = seg[3 + 2 * ns] & 15;
+            s->ri = ri;
+            if (s->Ss == 0 ? s->Se != 0 : (s->Se < s->Ss || s->Se > 63 || ns != 1)) return -1;
+            if (s->Al > 13 || (s->Ah && s->Al != s->Ah - 1)) return -1;
+            int nb = 0;
+            for (int i = 0; i < ns; i++) {
+                int c;
+                for (c = 0; c < fi->ncomp && j->comp_id[c] != seg[1 + 2 * i]; c++) {}
+                if (c == fi->ncomp) return -1;
+                for (int k = 0; k < i; k++) if (s->comp[k] == c) return -1;
+                s->comp[i] = c;
+                s->dct[i] = dc[seg[2 + 2 * i] >> 4 & 3];
+                if (s->Ss == 0 && !s->Ah && (!s->dct[i] || seg[2 + 2 * i] >> 4 > 3)) return -1;
+                if (s->Ss) { s->act = ac[seg[2 + 2 * i] & 3]; if (!s->act || (seg[2 + 2 * i] & 15) > 3) return -1; }
+                nb += ns > 1 ? fi->h[c] * fi->v[c] : 1;
+                for (int k = s->Ss; k <= s->Se; k++) bits[c][k] = (int8_t)s->Al;
+                if (!j->qpresent[j->cq[c]]) return -1;
+            }
+            if (nb > MAX_BLOCKS) return -1;
+            // earlier scans of the same coefficients; an AC refinement reads the whole block
+            // (the nonzero mask): it follows / is followed by any scan of its component
+            for (int t = 0; t < P->nscan; t++) {
+                const PScan *e = &P->s[t];
+                int share = 0;
+                for (int a = 0; a < e->ncomp; a++) for (int b = 0; b < ns; b++) share |= e->comp[a] == s->comp[b];
+                int refine = (s->Ss && s->Ah) || (e->Ss && e->Ah);
+                if (share && (refine || (e->Ss <= s->Se && s->Ss <= e->Se))) s->deps |= 1ULL << t;
+            }
+            // the entropy-coded data: up to the first marker other than RST
+            size_t p = pos + L, end = len;
+            while (p + 1 < len) {
+                const uint8_t *f = memchr(d + p, 0xFF, len - 1 - p);
+                if (!f) break;
+                size_t i = (size_t)(f - d);
+                uint8_t nb2 = d[i + 1];
+                if (nb2 == 0 || (nb2 >= 0xD0 && nb2 <= 0xD7)) p = i + 2;
+                else if (nb2 == 0xFF) p = i + 1;
+                else { end = i; break; }
+            }
+            s->raw0 = pos + L;
+            s->raw1 = end;
+            P->nscan++;
+            pos = end;
+            continue;
+        } else if (m == 0xDB || (m >= 0xC0 && m <= 0xCF)) {
+            return -1;                  // new quantisation tables or frame: not here
+        }
+        pos += L;
+    }
+    if (!P->nscan) return -1;
+    // libjpeg-turbo smooths the blocks (an approximation of the missing AC bits) when the
+    // DC is known but some of the first 9 AC coefficients never got all their bits: leave
+    // that to it, to stay identical
+    int dc_known = 1, ac_missing = 0;
+    for (int c = 0; c < fi->ncomp; c++) {
+        if (bits[c][0] < 0) dc_known = 0;
+        for (int k = 1; k < 10; k++) if (bits[c][k] != 0) ac_missing = 1;
+    }
+    return dc_known && ac_missing ? -1 : 0;
+}
+
+// Unstuffs a scan's data (0xFF 0x00 -> 0xFF, fill bytes and RST markers dropped).
+static void prog_unstuff(PScan *s, const uint8_t *d) {
+    size_t n = s->raw1 - s->raw0, i = s->raw0, cap = 0;
+    s->clean = pool_take(n + PAD_BYTES, &s->clean_cap);
+    uint8_t *out = s->clean;
+    while (i < s->raw1) {
+        const uint8_t *f = memchr(d + i, 0xFF, s->raw1 - i);
+        size_t k = f ? (size_t)(f - d) - i : s->raw1 - i;
+        memcpy(out, d + i, k);
+        out += k;
+        i += k;
+        if (!f) break;
+        while (i < s->raw1 && d[i] == 0xFF) i++;
+        if (i >= s->raw1) break;
+        uint8_t nb = d[i++];
+        if (nb == 0) {
+            *out++ = 0xFF;
+        } else {                        // RST (the scan ends at any other marker)
+            if (s->nrst == cap) { cap = cap ? 2 * cap : 64; s->rst = realloc(s->rst, cap * sizeof *s->rst); }
+            s->rst[s->nrst++] = (size_t)(out - s->clean);
+        }
+    }
+    s->clean_len = (size_t)(out - s->clean);
+    memset(out, 0, PAD_BYTES);
+}
+
+static inline unsigned br_bits(BR *br, int n) {   // n <= 16 bits, n may be 0
+    if (br->cnt < 16) br_refill(br);
+    unsigned v = n ? (unsigned)(br->buf >> (64 - n)) : 0;
+    br_skip(br, n);
+    return v;
+}
+static inline unsigned br_bit(BR *br) {
+    if (__builtin_expect(br->cnt == 0, 0)) br_refill(br);
+    unsigned v = (unsigned)(br->buf >> 63);
+    br_skip(br, 1);
+    return v;
+}
+static inline int prog_huff(const HuffTable *t, BR *br, int *err) {
+    br_refill(br);
+    uint64_t w = br->buf;
+    unsigned e = t->look[w >> (64 - LOOK)];
+    int l, sym;
+    if (__builtin_expect(e != 0, 1)) { l = e >> 8; sym = e & 0xFF; }
+    else if ((l = huff_slow_chk(t, w, &sym)) < 0) { *err = 1; l = 16; }
+    br_skip(br, l);
+    return sym;
+}
+static inline int16_t shl16(int v, int n) { return (int16_t)(uint16_t)((unsigned)v << n); }
+
+// One block of a one-component AC scan (zigzag coefficients), as libjpeg's jdphuff.c.
+static inline int prog_ac_first(PScan *s, BR *br, int16_t *blk) {
+    if (s->eobrun) { s->eobrun--; return 0; }
+    const HuffTable *t = s->act;
+    const int Se = s->Se, Al = s->Al;
+    for (int k = s->Ss; k <= Se; k++) {
+        br_refill(br);
+        uint64_t w = br->buf;
+        int32_t f = t->acfast[w >> (64 - LOOK)];
+        int kinc = (f >> 8) & 0xFF;
+        if (__builtin_expect(f != 0 && kinc != 0, 1)) {   // code + value in one lookup
+            br_skip(br, f & 0xFF);
+            if (kinc == 0x40) { k += 15; continue; }
+            k += kinc - 1;
+            if (k > Se) return 1;
+            blk[k] = shl16(f >> 16, Al);
+            continue;
+        }
+        unsigned e = t->look[w >> (64 - LOOK)];
+        int l, sym;
+        if (e) { l = e >> 8; sym = e & 0xFF; }
+        else if ((l = huff_slow_chk(t, w, &sym)) < 0) return 1;
+        int r = sym >> 4, n = sym & 15;
+        if (n) {
+            k += r;
+            if (k > Se) return 1;
+            blk[k] = shl16(extend((unsigned)((w << l) >> (64 - n)), n), Al);
+            br_skip(br, l + n);
+        } else if (r == 15) {
+            br_skip(br, l);
+            k += 15;
+        } else {                        // EOBn: this block and 2^r + bits - 1 more end here
+            s->eobrun = (1u << r) - 1 + (r ? (unsigned)((w << l) >> (64 - r)) : 0);
+            br_skip(br, l + r);
+            break;
+        }
+    }
+    return 0;
+}
+
+// Bit k set: zigzag coefficient k of the block is nonzero.
+static inline uint64_t nz_mask(const int16_t *blk) {
+#ifdef __AVX2__
+    const __m256i z = _mm256_setzero_si256();
+    __m256i ab = _mm256_packs_epi16(_mm256_cmpeq_epi16(_mm256_loadu_si256((const __m256i *)blk), z),
+                                    _mm256_cmpeq_epi16(_mm256_loadu_si256((const __m256i *)(blk + 16)), z));
+    __m256i cd = _mm256_packs_epi16(_mm256_cmpeq_epi16(_mm256_loadu_si256((const __m256i *)(blk + 32)), z),
+                                    _mm256_cmpeq_epi16(_mm256_loadu_si256((const __m256i *)(blk + 48)), z));
+    uint32_t lo = (uint32_t)_mm256_movemask_epi8(_mm256_permute4x64_epi64(ab, 0xD8));
+    uint32_t hi = (uint32_t)_mm256_movemask_epi8(_mm256_permute4x64_epi64(cd, 0xD8));
+    return ~((uint64_t)hi << 32 | lo);
+#elif defined(__ARM_NEON)
+    static const uint8_t wts[16] = {1, 2, 4, 8, 16, 32, 64, 128, 1, 2, 4, 8, 16, 32, 64, 128};
+    const uint8x16_t w = vld1q_u8(wts);
+    uint8x16_t t[4];
+    for (int i = 0; i < 4; i++) {
+        int16x8_t a = vld1q_s16(blk + 16 * i), b = vld1q_s16(blk + 16 * i + 8);
+        t[i] = vandq_u8(vcombine_u8(vmovn_u16(vtstq_s16(a, a)), vmovn_u16(vtstq_s16(b, b))), w);
+    }
+    uint8x16_t r = vpaddq_u8(vpaddq_u8(t[0], t[1]), vpaddq_u8(t[2], t[3]));
+    return vgetq_lane_u64(vreinterpretq_u64_u8(vpaddq_u8(r, r)), 0);
+#else
+    uint64_t m = 0;
+    for (int k = 0; k < 64; k++) m |= (uint64_t)(blk[k] != 0) << k;
+    return m;
+#endif
+}
+
+// Set bit positions of every byte value (8 bytes each, the unused ones 0).
+static uint64_t g_bitpos[256];
+static pthread_once_t g_bitpos_once = PTHREAD_ONCE_INIT;
+static void bitpos_init(void) {
+    for (int x = 0; x < 256; x++)
+        for (int b = 0, n = 0; b < 8; b++)
+            if (x >> b & 1) g_bitpos[x] |= (uint64_t)b << (8 * n++);
+}
+
+// The positions of the set bits of x, in order, to out[0..]; returns their number.
+// Writes up to 8 bytes past the end.
+static inline int bit_list(uint64_t x, uint8_t *out) {
+    int n = 0;
+    for (int b = 0; b < 8; b++, x >>= 8) {
+        uint64_t p = g_bitpos[x & 0xFF] + 0x0808080808080808ULL * b;
+        memcpy(out + n, &p, 8);
+        n += __builtin_popcount((unsigned)(x & 0xFF));
+    }
+    return n;
+}
+
+// Correction bits for the cnt nonzero coefficients in 'm' (in order): a 1 adds p1 to the
+// magnitude (if that bit is not set yet).
+static inline void prog_correct(BR *br, int16_t *blk, uint64_t m, int cnt, int p1) {
+    if (__builtin_expect(cnt <= (int)br->cnt, 1)) {   // the usual: the bits are in the buffer
+        uint64_t b = br->buf;
+        br_skip(br, cnt);
+        for (; m; m &= m - 1, b <<= 1) {
+            int k = __builtin_ctzll(m), c = blk[k], add = (int)(b >> 63) & !(c & p1);
+            blk[k] = (int16_t)(c + ((c >> 31 | 1) * p1 & -add));
+        }
+        return;
+    }
+    while (m) {
+        br_refill(br);
+        int n = __builtin_popcountll(m);
+        if (n > 48) n = 48;
+        uint64_t b = br->buf;
+        br_skip(br, n);
+        for (int i = 0; i < n; i++, b <<= 1) {
+            int k = __builtin_ctzll(m);
+            m &= m - 1;
+            int c = blk[k], add = (int)(b >> 63) & !(c & p1);
+            blk[k] = (int16_t)(c + ((c >> 31 | 1) * p1 & -add));
+        }
+    }
+}
+
+// One block of an AC refinement scan. libjpeg walks the band one coefficient at a time,
+// reading a correction bit for every nonzero one it passes and counting the zero ones for
+// the run. Here the zero coefficients of the block are listed first: a run of r ends at
+// the (r+1)-th next zero, and the nonzero ones before it get the correction bits.
+static inline int prog_ac_refine(PScan *s, BR *br, int16_t *blk) {
+    const int Se = s->Se, p1 = 1 << s->Al;
+    const uint64_t band = (~0ULL >> (63 - Se)) & (~0ULL << s->Ss);
+    const uint64_t nz = nz_mask(blk) & band;
+    int k = s->Ss;
+    if (!s->eobrun) {
+        uint8_t zpos[64 + 8 + 16];
+        int nzero = bit_list(~nz & band, zpos), zi = 0;
+        memset(zpos + nzero, Se + 1, 16);   // a run past the band's last zero ends the band
+        const HuffTable *t = s->act;
+        while (k <= Se) {
+            br_refill(br);
+            uint64_t w = br->buf;
+            unsigned e = t->look[w >> (64 - LOOK)];
+            int l, sym;
+            if (__builtin_expect(e != 0, 1)) { l = e >> 8; sym = e & 0xFF; }
+            else if ((l = huff_slow_chk(t, w, &sym)) < 0) return 1;
+            int r = sym >> 4, n = sym & 15;
+            if (!n && r != 15) {            // EOBn: this block and 2^r + bits - 1 more
+                s->eobrun = (1u << r) + (r ? (unsigned)((w << l) >> (64 - r)) : 0);
+                br_skip(br, l + r);
+                break;
+            }
+            if (n > 1) return 1;
+            int v = n ? ((w << l) >> 63 ? p1 : -p1) : 0;
+            br_skip(br, l + n);
+            // the (r+1)-th zero: the nonzero ones before it are all positions minus r zeros
+            // (past the last zero: minus the zeros that were left)
+            int z = zpos[zi + r], left = nzero - zi;
+            prog_correct(br, blk, nz & (~0ULL << k) & (z > Se ? ~0ULL : (1ULL << z) - 1), z - k - (r < left ? r : left), p1);
+            if (v) {
+                if (z > Se) return 1;
+                blk[z] = (int16_t)v;
+            }
+            zi += r + 1;
+            k = z + 1;
+        }
+    }
+    if (s->eobrun) {                    // in an EOB run: only the corrections
+        if (k <= Se) {
+            uint64_t m = nz & (~0ULL << k);
+            prog_correct(br, blk, m, __builtin_popcountll(m), p1);
+        }
+        s->eobrun--;
+    }
+    return 0;
+}
+
+// Restart before MCU s->mcu if one is due. Returns nonzero on damaged data.
+static inline int prog_restart(PScan *s, BR *br) {
+    if (!s->ri || !s->mcu || s->mcu % (size_t)s->ri) return 0;
+    size_t k = s->mcu / (size_t)s->ri;
+    if (k > s->nrst || br_pos(br, s->clean) > (uint64_t)s->rst[k - 1] * 8) return 1;
+    br_init(br, s->clean, (uint64_t)s->rst[k - 1] * 8);
+    s->eobrun = 0;
+    s->dc[0] = s->dc[1] = s->dc[2] = 0;
+    return 0;
+}
+
+// Decodes MCU rows [r0, r1) of a scan.
+static int prog_scan_rows(Prog *P, PScan *s, int r0, int r1) {
+    const nj_info *fi = &P->j->info;
+    BR br;
+    br_init(&br, s->clean, s->pos);
+    const uint8_t *lim = s->clean + s->clean_len + PAD_BYTES / 2;   // far past the data: damaged
+    const int Al = s->Al;
+    int err = 0;
+    if (s->ncomp > 1) {                 // interleaved: DC only
+        for (int my = r0; my < r1 && !err; my++)
+            for (int mx = 0; mx < fi->mcus_per_row && !err; mx++) {
+                err |= prog_restart(s, &br);
+                for (int i = 0; i < s->ncomp; i++) {
+                    int c = s->comp[i], h = fi->h[c], v = fi->v[c];
+                    for (int by = 0; by < v; by++)
+                        for (int bx = 0; bx < h; bx++) {
+                            int16_t *blk = P->coef[c] + (((size_t)my * v + by) * P->bw[c] + (size_t)mx * h + bx) * 64;
+                            if (!s->Ah) {
+                                int n = prog_huff(s->dct[i], &br, &err) & 15;
+                                s->dc[i] += n ? extend(br_bits(&br, n), n) : 0;
+                                blk[0] = shl16(s->dc[i], Al);
+                            } else if (br_bit(&br)) {
+                                blk[0] |= (int16_t)(1 << Al);
+                            }
+                        }
+                }
+                s->mcu++;
+                if (br.p > lim) err = 1;
+            }
+    } else {
+        const int c = s->comp[0], v = fi->v[c];
+        const size_t y1 = (size_t)r1 * v < P->cbh[c] ? (size_t)r1 * v : P->cbh[c];
+        const int kind = s->Ss == 0 ? (s->Ah ? 1 : 0) : (s->Ah ? 3 : 2);
+        for (size_t by = (size_t)r0 * v; by < y1 && !err; by++) {
+            int16_t *row = P->coef[c] + by * P->bw[c] * 64;
+            for (size_t bx = 0; bx < P->cbw[c]; bx++) {
+                err |= prog_restart(s, &br);
+                int16_t *blk = row + bx * 64;
+                switch (kind) {
+                case 0: {
+                    int n = prog_huff(s->dct[0], &br, &err) & 15;
+                    s->dc[0] += n ? extend(br_bits(&br, n), n) : 0;
+                    blk[0] = shl16(s->dc[0], Al);
+                    break;
+                }
+                case 1: if (br_bit(&br)) blk[0] |= (int16_t)(1 << Al); break;
+                case 2: err |= prog_ac_first(s, &br, blk); break;
+                default: err |= prog_ac_refine(s, &br, blk); break;
+                }
+                s->mcu++;
+                if (br.p > lim) { err = 1; break; }
+            }
+        }
+    }
+    s->pos = br_pos(&br, s->clean);
+    if (r1 == P->R && s->pos > (uint64_t)s->clean_len * 8) err = 1;   // ran out of data
+    return err;
+}
+
+// IDCT of MCU rows [r0, r1).
+static void prog_idct_rows(Prog *P, int r0, int r1) {
+    const Jpeg *j = P->j;
+    const nj_info *fi = &j->info;
+    int16_t tmp[64];
+    for (int c = 0; c < fi->ncomp; c++) {
+        const uint16_t *q = j->qt[j->cq[c]];
+        uint8_t *plane = P->o->planes[c];
+        size_t pitch = P->o->pitch[c];
+        for (size_t by = (size_t)r0 * fi->v[c]; by < (size_t)r1 * fi->v[c]; by++) {
+            const int16_t *blk = P->coef[c] + by * P->bw[c] * 64;
+            for (size_t bx = 0; bx < P->bw[c]; bx++, blk += 64) {
+                for (int k = 0; k < 64; k++) tmp[kNatural[k]] = blk[k];
+                idct_block(tmp, q, tmp[0], plane + by * 8 * pitch + bx * 8, pitch);
+            }
+        }
+    }
+}
+
+// Clears the coefficients of MCU rows [r0, r1).
+static void prog_clear_rows(Prog *P, int r0, int r1) {
+    const nj_info *fi = &P->j->info;
+    for (int c = 0; c < fi->ncomp; c++) {
+        size_t row = P->bw[c] * 64 * fi->v[c];
+        memset(P->coef[c] + (size_t)r0 * row, 0, (size_t)(r1 - r0) * row * sizeof(int16_t));
+    }
+}
+
+// A worker: takes the next piece of work until everything is done. In this order: a chunk
+// of a scan whose predecessors are far enough (the most lagging scan first), unstuffing a
+// scan, clearing rows, IDCT of rows that all scans have finished.
+static void prog_worker(Prog *P) {
+    pthread_mutex_lock(&P->mu);
+    while (!P->fail && P->idct_done < P->R) {
+        int all = P->R, best = -1, unstuff = -1, r0 = 0, r1 = 0;
+        for (int i = 0; i < P->nscan; i++) {
+            PScan *s = &P->s[i];
+            if (s->done < all) all = s->done;
+            if (s->ready == 0 && unstuff < 0) unstuff = i;
+            if (s->busy || s->ready != 2 || s->done == P->R) continue;
+            int avail = P->cleared;
+            for (uint64_t m = s->deps; m; m &= m - 1) {
+                int d = P->s[__builtin_ctzll(m)].done;
+                if (d < avail) avail = d;
+            }
+            if (avail > s->done && (best < 0 || s->done <= P->s[best].done)) {
+                best = i;
+                r0 = s->done;
+                r1 = avail < r0 + P->K ? avail : r0 + P->K;
+            }
+        }
+        if (best >= 0) {
+            PScan *s = &P->s[best];
+            s->busy = 1;
+            pthread_mutex_unlock(&P->mu);
+            int err = prog_scan_rows(P, s, r0, r1);
+            pthread_mutex_lock(&P->mu);
+            s->busy = 0;
+            s->done = r1;
+            if (err) P->fail = 1;
+        } else if (unstuff >= 0) {
+            PScan *s = &P->s[unstuff];
+            s->ready = 1;
+            pthread_mutex_unlock(&P->mu);
+            prog_unstuff(s, P->data);
+            pthread_mutex_lock(&P->mu);
+            s->ready = 2;
+        } else if (P->clear_next < P->R) {
+            int c = P->clear_next / P->K;
+            r0 = P->clear_next;
+            r1 = r0 + P->K < P->R ? r0 + P->K : P->R;
+            P->clear_next = r1;
+            pthread_mutex_unlock(&P->mu);
+            prog_clear_rows(P, r0, r1);
+            pthread_mutex_lock(&P->mu);
+            P->cleared_chunk[c] = 1;
+            while (P->cleared < P->R && P->cleared_chunk[P->cleared / P->K]) P->cleared += P->K;
+            if (P->cleared > P->R) P->cleared = P->R;
+        } else if (P->idct_next < all) {
+            r0 = P->idct_next;
+            r1 = all < r0 + P->K ? all : r0 + P->K;
+            P->idct_next = r1;
+            pthread_mutex_unlock(&P->mu);
+            prog_idct_rows(P, r0, r1);
+            pthread_mutex_lock(&P->mu);
+            P->idct_done += r1 - r0;
+        } else {
+            pthread_cond_wait(&P->cv, &P->mu);
+            continue;
+        }
+        pthread_cond_broadcast(&P->cv);
+    }
+    pthread_cond_broadcast(&P->cv);
+    pthread_mutex_unlock(&P->mu);
+}
+
+static int nj_decode_prog(const Jpeg *j, const uint8_t *data, size_t len, const Output *o, nj_stats *st) {
+    const nj_info *fi = &j->info;
+    double t0 = now_ms();
+    Prog *P = calloc(1, sizeof *P);
+    if (!P) return -1;
+    P->j = j; P->o = o; P->data = data; P->len = len;
+    P->R = fi->mcu_rows;
+    pthread_once(&g_bitpos_once, bitpos_init);
+    int rc = -1;
+    if (prog_layout(P)) goto out;
+    size_t total = 0;
+    for (int c = 0; c < fi->ncomp; c++) {
+        P->bw[c] = (size_t)fi->mcus_per_row * fi->h[c];
+        P->bh[c] = (size_t)P->R * fi->v[c];
+        size_t cw = ((size_t)fi->width * fi->h[c] + fi->hmax - 1) / fi->hmax;
+        size_t chh = ((size_t)fi->height * fi->v[c] + fi->vmax - 1) / fi->vmax;
+        P->cbw[c] = (cw + 7) / 8;
+        P->cbh[c] = (chh + 7) / 8;
+        total += P->bw[c] * P->bh[c] * 64;
+    }
+    P->cbuf = pool_take(total * sizeof(int16_t), &P->cbuf_cap);
+    P->K = (P->R + 47) / 48;
+    P->cleared_chunk = calloc((size_t)(P->R + P->K - 1) / P->K, 1);
+    if (!P->cbuf || !P->cleared_chunk) goto out;
+    for (int c = 0; c < fi->ncomp; c++) P->coef[c] = c ? P->coef[c - 1] + P->bw[c - 1] * P->bh[c - 1] * 64 : (int16_t *)P->cbuf;
+    st->scan_ms = now_ms() - t0;
+    double t1 = now_ms();
+    pthread_mutex_init(&P->mu, NULL);
+    pthread_cond_init(&P->cv, NULL);
+    const int W = t_workers > 0 ? t_workers : g_max_workers > 0 ? g_max_workers : ncpu();
+    Prog *const p = P;
+    parallel_for((size_t)W, ^(size_t w) { (void)w; prog_worker(p); });
+    pthread_cond_destroy(&P->cv);
+    pthread_mutex_destroy(&P->mu);
+    st->decode_ms = now_ms() - t1;
+    st->bands = P->nscan;
+    st->mode = 3;
+    rc = P->fail ? -1 : 0;
+out:
+    for (int i = 0; i < P->nscan; i++) { pool_give(P->s[i].clean, P->s[i].clean_cap); free(P->s[i].rst); }
+    for (int i = 0; i < P->ntabs; i++) free(P->tabs[i]);
+    pool_give(P->cbuf, P->cbuf_cap);
+    free(P->cleared_chunk);
+    free(P);
     return rc;
 }
 

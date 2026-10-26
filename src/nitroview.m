@@ -277,6 +277,7 @@ static _Atomic int g_dng_ev3;   // DNG exposure correction in 1/3 EV (keys E / S
 
 static const char *mode_name(int m) {
     switch (m) {
+    case 3: return "prog";
     case 2: return "split";
     case 1: return "RST";
     case 0: return "single";
