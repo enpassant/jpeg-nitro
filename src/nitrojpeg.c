@@ -1310,77 +1310,83 @@ static void zz_tables_init(void) {
 
 #define ADD _mm256_add_epi32
 #define SUB _mm256_sub_epi32
-#define MULK(a, k) _mm256_mullo_epi32(a, _mm256_set1_epi32(k))
 
-// One 1-D ISLOW pass on 8 vectors (x[k] = frequency k, lanes independent).
-static inline __attribute__((always_inline)) void idct8_avx2(__m256i *x, int shift) {
-    __m256i z2 = x[2], z3 = x[6];
-    __m256i z1 = MULK(ADD(z2, z3), FIX_0_541196100);
-    __m256i tmp2 = ADD(z1, MULK(z3, -FIX_1_847759065));
-    __m256i tmp3 = ADD(z1, MULK(z2, FIX_0_765366865));
-    __m256i tmp0 = _mm256_slli_epi32(ADD(x[0], x[4]), 13);
-    __m256i tmp1 = _mm256_slli_epi32(SUB(x[0], x[4]), 13);
-    __m256i tmp10 = ADD(tmp0, tmp3), tmp13 = SUB(tmp0, tmp3), tmp11 = ADD(tmp1, tmp2), tmp12 = SUB(tmp1, tmp2);
-    __m256i t0 = x[7], t1 = x[5], t2 = x[3], t3 = x[1];
-    z1 = ADD(t0, t3); z2 = ADD(t1, t2); z3 = ADD(t0, t2);
-    __m256i z4 = ADD(t1, t3);
-    __m256i z5 = MULK(ADD(z3, z4), FIX_1_175875602);
-    t0 = MULK(t0, FIX_0_298631336); t1 = MULK(t1, FIX_2_053119869);
-    t2 = MULK(t2, FIX_3_072711026); t3 = MULK(t3, FIX_1_501321110);
-    z1 = MULK(z1, -FIX_0_899976223); z2 = MULK(z2, -FIX_2_562915447);
-    z3 = ADD(MULK(z3, -FIX_1_961570560), z5); z4 = ADD(MULK(z4, -FIX_0_390180644), z5);
-    t0 = ADD(t0, ADD(z1, z3)); t1 = ADD(t1, ADD(z2, z4));
-    t2 = ADD(t2, ADD(z2, z3)); t3 = ADD(t3, ADD(z1, z4));
-    __m256i rnd = _mm256_set1_epi32(1 << (shift - 1));
-    __m128i sh = _mm_cvtsi32_si128(shift);
-    tmp10 = ADD(tmp10, rnd); tmp11 = ADD(tmp11, rnd); tmp12 = ADD(tmp12, rnd); tmp13 = ADD(tmp13, rnd);
-    x[0] = _mm256_sra_epi32(ADD(tmp10, t3), sh); x[7] = _mm256_sra_epi32(SUB(tmp10, t3), sh);
-    x[1] = _mm256_sra_epi32(ADD(tmp11, t2), sh); x[6] = _mm256_sra_epi32(SUB(tmp11, t2), sh);
-    x[2] = _mm256_sra_epi32(ADD(tmp12, t1), sh); x[5] = _mm256_sra_epi32(SUB(tmp12, t1), sh);
-    x[3] = _mm256_sra_epi32(ADD(tmp13, t0), sh); x[4] = _mm256_sra_epi32(SUB(tmp13, t0), sh);
+// ISLOW in 16 bits (as libjpeg-turbo's SIMD code): dequantisation by pmullw, the products by
+// pmaddwd (two 16 x 16-bit products summed into 32 bits). The odd part of ISLOW folded into
+// one 4 x 4 integer matrix: v7, v5, v3, v1 -> tmp0..tmp3 (the same sums, only reordered:
+// e.g. tmp0 = v7 (F_0_298 - F_0_899 - F_1_961 + F_1_175) + v5 F_1_175 + ...), every entry
+// fits in 16 bits. One pass on 8 vectors (lanes = the other dimension), descaled by 'shift'
+// and saturated to 16 bits.
+static inline __m256i pair16(__m128i a, __m128i b) {   // 32-bit lanes (a, b) of columns 0..7
+    return _mm256_inserti128_si256(_mm256_castsi128_si256(_mm_unpacklo_epi16(a, b)), _mm_unpackhi_epi16(a, b), 1);
+}
+#define KP(a, b) _mm256_set1_epi32((int)((uint32_t)(uint16_t)(a) | (uint32_t)(uint16_t)(b) << 16))
+#define MADD _mm256_madd_epi16
+static inline __attribute__((always_inline)) void islow16_pass(__m128i *v, int shift) {
+    __m256i p04 = pair16(v[0], v[4]), p26 = pair16(v[2], v[6]), p75 = pair16(v[7], v[5]), p31 = pair16(v[3], v[1]);
+    __m256i t0 = MADD(p04, KP(8192, 8192)), t1 = MADD(p04, KP(8192, -8192));   // << CONST_BITS
+    __m256i t3 = MADD(p26, KP(FIX_0_541196100 + FIX_0_765366865, FIX_0_541196100));
+    __m256i t2 = MADD(p26, KP(FIX_0_541196100, FIX_0_541196100 - FIX_1_847759065));
+    __m256i e10 = ADD(t0, t3), e13 = SUB(t0, t3), e11 = ADD(t1, t2), e12 = SUB(t1, t2);
+    __m256i o0 = ADD(MADD(p75, KP(FIX_0_298631336 - FIX_0_899976223 - FIX_1_961570560 + FIX_1_175875602, FIX_1_175875602)),
+                     MADD(p31, KP(FIX_1_175875602 - FIX_1_961570560, FIX_1_175875602 - FIX_0_899976223)));
+    __m256i o1 = ADD(MADD(p75, KP(FIX_1_175875602, FIX_2_053119869 - FIX_2_562915447 - FIX_0_390180644 + FIX_1_175875602)),
+                     MADD(p31, KP(FIX_1_175875602 - FIX_2_562915447, FIX_1_175875602 - FIX_0_390180644)));
+    __m256i o2 = ADD(MADD(p75, KP(FIX_1_175875602 - FIX_1_961570560, FIX_1_175875602 - FIX_2_562915447)),
+                     MADD(p31, KP(FIX_3_072711026 - FIX_2_562915447 - FIX_1_961570560 + FIX_1_175875602, FIX_1_175875602)));
+    __m256i o3 = ADD(MADD(p75, KP(FIX_1_175875602 - FIX_0_899976223, FIX_1_175875602 - FIX_0_390180644)),
+                     MADD(p31, KP(FIX_1_175875602, FIX_1_501321110 - FIX_0_899976223 - FIX_0_390180644 + FIX_1_175875602)));
+    const __m256i rnd = _mm256_set1_epi32(1 << (shift - 1));
+    __m256i w[8] = {ADD(e10, o3), ADD(e11, o2), ADD(e12, o1), ADD(e13, o0), SUB(e13, o0), SUB(e12, o1), SUB(e11, o2), SUB(e10, o3)};
+    for (int y = 0; y < 8; y++) {
+        __m256i d = _mm256_srai_epi32(ADD(w[y], rnd), shift);
+        v[y] = _mm_packs_epi32(_mm256_castsi256_si128(d), _mm256_extracti128_si256(d, 1));
+    }
+}
+#undef MADD
+#undef KP
+
+static inline __attribute__((always_inline)) void transpose8x16(__m128i *v) {
+    __m128i a0 = _mm_unpacklo_epi16(v[0], v[1]), a1 = _mm_unpackhi_epi16(v[0], v[1]);
+    __m128i a2 = _mm_unpacklo_epi16(v[2], v[3]), a3 = _mm_unpackhi_epi16(v[2], v[3]);
+    __m128i a4 = _mm_unpacklo_epi16(v[4], v[5]), a5 = _mm_unpackhi_epi16(v[4], v[5]);
+    __m128i a6 = _mm_unpacklo_epi16(v[6], v[7]), a7 = _mm_unpackhi_epi16(v[6], v[7]);
+    __m128i b0 = _mm_unpacklo_epi32(a0, a2), b1 = _mm_unpackhi_epi32(a0, a2);
+    __m128i b2 = _mm_unpacklo_epi32(a1, a3), b3 = _mm_unpackhi_epi32(a1, a3);
+    __m128i b4 = _mm_unpacklo_epi32(a4, a6), b5 = _mm_unpackhi_epi32(a4, a6);
+    __m128i b6 = _mm_unpacklo_epi32(a5, a7), b7 = _mm_unpackhi_epi32(a5, a7);
+    v[0] = _mm_unpacklo_epi64(b0, b4); v[1] = _mm_unpackhi_epi64(b0, b4);
+    v[2] = _mm_unpacklo_epi64(b1, b5); v[3] = _mm_unpackhi_epi64(b1, b5);
+    v[4] = _mm_unpacklo_epi64(b2, b6); v[5] = _mm_unpackhi_epi64(b2, b6);
+    v[6] = _mm_unpacklo_epi64(b3, b7); v[7] = _mm_unpackhi_epi64(b3, b7);
 }
 
-static inline __attribute__((always_inline)) void transpose8_avx2(__m256i *x) {
-    __m256i t0 = _mm256_unpacklo_epi32(x[0], x[1]), t1 = _mm256_unpackhi_epi32(x[0], x[1]);
-    __m256i t2 = _mm256_unpacklo_epi32(x[2], x[3]), t3 = _mm256_unpackhi_epi32(x[2], x[3]);
-    __m256i t4 = _mm256_unpacklo_epi32(x[4], x[5]), t5 = _mm256_unpackhi_epi32(x[4], x[5]);
-    __m256i t6 = _mm256_unpacklo_epi32(x[6], x[7]), t7 = _mm256_unpackhi_epi32(x[6], x[7]);
-    __m256i u0 = _mm256_unpacklo_epi64(t0, t2), u1 = _mm256_unpackhi_epi64(t0, t2);
-    __m256i u2 = _mm256_unpacklo_epi64(t1, t3), u3 = _mm256_unpackhi_epi64(t1, t3);
-    __m256i u4 = _mm256_unpacklo_epi64(t4, t6), u5 = _mm256_unpackhi_epi64(t4, t6);
-    __m256i u6 = _mm256_unpacklo_epi64(t5, t7), u7 = _mm256_unpackhi_epi64(t5, t7);
-    x[0] = _mm256_permute2x128_si256(u0, u4, 0x20); x[4] = _mm256_permute2x128_si256(u0, u4, 0x31);
-    x[1] = _mm256_permute2x128_si256(u1, u5, 0x20); x[5] = _mm256_permute2x128_si256(u1, u5, 0x31);
-    x[2] = _mm256_permute2x128_si256(u2, u6, 0x20); x[6] = _mm256_permute2x128_si256(u2, u6, 0x31);
-    x[3] = _mm256_permute2x128_si256(u3, u7, 0x20); x[7] = _mm256_permute2x128_si256(u3, u7, 0x31);
-}
-
+// rows: the 8 coefficient rows (natural order, quantised); dc replaces rows[0][0].
 static inline __attribute__((always_inline)) void idct_rows_avx2(const __m128i *rows, const uint16_t *q, int dc, uint8_t *out, size_t pitch) {
-    __m256i x[8];
-    for (int r = 0; r < 8; r++)
-        x[r] = _mm256_mullo_epi32(_mm256_cvtepi16_epi32(rows[r]),
-                                  _mm256_cvtepu16_epi32(_mm_loadu_si128((const __m128i *)(q + 8 * r))));
-    x[0] = _mm256_blend_epi32(x[0], _mm256_set1_epi32(dc * q[0]), 1);
-    idct8_avx2(x, 11);          // columns (lanes = columns)
-    transpose8_avx2(x);
-    idct8_avx2(x, 18);          // rows (lanes = rows)
-    transpose8_avx2(x);
-    __m256i c128 = _mm256_set1_epi32(128);
-    __m256i p[4];
-    for (int i = 0; i < 4; i++)
-        p[i] = _mm256_permute4x64_epi64(_mm256_packs_epi32(ADD(x[2 * i], c128), ADD(x[2 * i + 1], c128)), 0xD8);
-    __m256i b0 = _mm256_packus_epi16(p[0], p[1]);   // lane0: rows 0,2  lane1: rows 1,3
-    __m256i b1 = _mm256_packus_epi16(p[2], p[3]);   // lane0: rows 4,6  lane1: rows 5,7
-    __m128i l0 = _mm256_castsi256_si128(b0), h0 = _mm256_extracti128_si256(b0, 1);
-    __m128i l1 = _mm256_castsi256_si128(b1), h1 = _mm256_extracti128_si256(b1, 1);
-    _mm_storel_epi64((__m128i *)(out), l0);
-    _mm_storel_epi64((__m128i *)(out + pitch), h0);
-    _mm_storeh_pd((double *)(out + 2 * pitch), _mm_castsi128_pd(l0));
-    _mm_storeh_pd((double *)(out + 3 * pitch), _mm_castsi128_pd(h0));
-    _mm_storel_epi64((__m128i *)(out + 4 * pitch), l1);
-    _mm_storel_epi64((__m128i *)(out + 5 * pitch), h1);
-    _mm_storeh_pd((double *)(out + 6 * pitch), _mm_castsi128_pd(l1));
-    _mm_storeh_pd((double *)(out + 7 * pitch), _mm_castsi128_pd(h1));
+    __m128i v[8];
+    for (int r = 0; r < 8; r++) v[r] = _mm_mullo_epi16(r ? rows[r] : _mm_insert_epi16(rows[0], dc, 0), _mm_loadu_si128((const __m128i *)(q + 8 * r)));
+    islow16_pass(v, 11);        // columns (lanes = columns): v[y] = row y
+    transpose8x16(v);
+    islow16_pass(v, 18);        // rows (lanes = rows): v[x] = column x
+    // to bytes (+128, saturated), then an 8 x 8 byte transpose: column pairs -> rows
+    const __m128i bias = _mm_set1_epi8((char)0x80);
+    __m128i c[4];
+    for (int i = 0; i < 4; i++) {
+        __m128i b = _mm_xor_si128(_mm_packs_epi16(v[2 * i], v[2 * i + 1]), bias);   // columns 2i, 2i+1
+        c[i] = _mm_unpacklo_epi8(b, _mm_srli_si128(b, 8));                          // per row: (2i, 2i+1)
+    }
+    __m128i u0 = _mm_unpacklo_epi16(c[0], c[1]), u1 = _mm_unpackhi_epi16(c[0], c[1]);   // columns 0-3
+    __m128i u2 = _mm_unpacklo_epi16(c[2], c[3]), u3 = _mm_unpackhi_epi16(c[2], c[3]);   // columns 4-7
+    __m128i r01 = _mm_unpacklo_epi32(u0, u2), r23 = _mm_unpackhi_epi32(u0, u2);
+    __m128i r45 = _mm_unpacklo_epi32(u1, u3), r67 = _mm_unpackhi_epi32(u1, u3);
+    _mm_storel_epi64((__m128i *)out, r01);
+    _mm_storeh_pd((double *)(out + pitch), _mm_castsi128_pd(r01));
+    _mm_storel_epi64((__m128i *)(out + 2 * pitch), r23);
+    _mm_storeh_pd((double *)(out + 3 * pitch), _mm_castsi128_pd(r23));
+    _mm_storel_epi64((__m128i *)(out + 4 * pitch), r45);
+    _mm_storeh_pd((double *)(out + 5 * pitch), _mm_castsi128_pd(r45));
+    _mm_storel_epi64((__m128i *)(out + 6 * pitch), r67);
+    _mm_storeh_pd((double *)(out + 7 * pitch), _mm_castsi128_pd(r67));
 }
 
 static void idct_islow_avx2(const int16_t *in, const uint16_t *q, int dc, uint8_t *out, size_t pitch) {
@@ -1408,7 +1414,6 @@ static void idct_islow_avx2_zz(const int16_t *zz, const uint16_t *q, uint8_t *ou
 }
 #undef ADD
 #undef SUB
-#undef MULK
 #endif
 
 #if defined(__ARM_NEON) && !defined(__AVX2__)
