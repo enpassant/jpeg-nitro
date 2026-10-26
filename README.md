@@ -19,7 +19,7 @@ HEIC photos in parallel, one that develops DNG raw images, one for WebP, and two
 
 | decoder | format | how | time | usual decoders |
 |---|---|---|---|---|
-| **nitrojpeg** | baseline JPEG | speculative parallel Huffman decoding, AVX2 IDCT; bit-exact with libjpeg-turbo | 24 MP photo: **~11 ms** | libjpeg-turbo ~107 ms (1 thread) |
+| **nitrojpeg** | baseline and progressive JPEG | speculative parallel Huffman decoding, AVX2 IDCT; progressive: the scans as a pipeline, row by row; bit-exact with libjpeg-turbo | 24 MP photo: **~11 ms**; progressive: **~79 ms** | libjpeg-turbo ~107 ms (1 thread); progressive ~336 ms |
 | **nitropng** | PNG (8-bit, non-interlaced) | speculative parallel inflate (back-references into not yet known data resolved later, Adler-32 verified) + "wavefront" filter reversal | 38 real PNGs: **~43 ms** avg. | Wuffs ~171 ms, ImageIO ~318 ms |
 | **nitropsd** | Photoshop PSD/PSB (8-bit RGB / gray) | merged image: RLE rows in parallel, ZIP via nitropng's inflate; reads only the merged image of huge layered files | 24 MP RLE: **~5 ms** | ImageIO ~170 ms |
 | **nitroheic** (macOS) | HEIC (8-bit 4:2:0 HEVC, iPhone grids) | own HEIF parsing; the 48 independent HEVC tiles of an iPhone photo decoded in parallel by VideoToolbox into Y/Cb/Cr for the GPU | 12 MP iPhone photo: **~33 ms** | ImageIO ~200 ms |
@@ -103,7 +103,7 @@ its folder, drag & drop. JPEG / PNG / PSD go through the three decoders and a co
 HEIC photos through our own HEVC decoder (`src/nitrohevc.c`, written from the H.265 specification:
 Windows has no HEVC decoder without a Store extension; its tiles in parallel, ~55 ms for 12 MP; no
 deblocking / SAO yet, which is hard to see), DNG raw images through nitrodng, lossy WebP through nitrowebp, everything else
-(progressive JPEG, TIFF, lossless or transparent WebP, GIF, BMP)
+(TIFF, lossless or transparent WebP, GIF, BMP)
 through Windows' own WIC codecs;
 SVG and CorelDRAW CDR / CMX as on macOS (sharp when zoomed in, [ / ] for the pages of a drawing).
 One self-contained .exe (only system DLLs, Windows 10 or later), built on the Mac or on Linux with
@@ -121,7 +121,7 @@ decoders (as `libnitro.so`), SVG and CorelDRAW CDR / CMX through nitrosvg / nitr
 zoomed in, [ / ] for the pages, when `scripts/get-deps.sh` has fetched them); the JPEG colour conversion is multi-threaded and gives exactly
 libjpeg-turbo's RGB (`bench/rgbverify`), PNG rows go to GTK without a copy, and the EXIF
 orientation is applied when drawing. Images are decoded on a background thread with the same
-prefetch as on macOS / Windows (3 ahead, 2 behind). Everything else (progressive JPEG, TIFF, GIF,
+prefetch as on macOS / Windows (3 ahead, 2 behind). Everything else (TIFF, GIF,
 lossless WebP ...) is opened by GTK's own loaders. The window opens at the size of the first image,
 W sets it to the image again, 0 maximizes it; it keeps its size while paging (under Wayland an
 application cannot move its window, so it does not grow it freely). `make gnome` needs GTK 4.6+ and
@@ -431,8 +431,9 @@ Measured synchronisation (`bench/verify`, 512 chunks, first 256 sync points per 
 
 **Accuracy:** the parallel output is **bit-identical** to single-threaded libjpeg-turbo on all
 50 test images (`bench/verify`, with both the scalar and the AVX2 IDCT). The GPU colour
-conversion differs by at most ±1 (rounding, `--selftest`). Unsupported files (progressive,
-CMYK, RGB, >16384 px) and damaged files fall back to TurboJPEG in the viewer.
+conversion differs by at most ±1 (rounding, `--selftest`). Unsupported files (CMYK, RGB,
+arithmetic coding, >16384 px), damaged files and truncated progressive ones fall back to TurboJPEG
+in the viewer.
 
 ### How it got there (ms/image, 16 threads)
 
@@ -480,6 +481,30 @@ Re-measured this way (5 repetitions, 3 s pause, ms/image, `bench/results/ab_resu
 | own engine / old engine (libjpeg-turbo bands) | **11.8** (11.8–11.9) / 19.8 (19.5–20.8) |
 | 4 / 8 / 12 / 16 threads | 27.0 / 15.4 / 12.3 / **11.8** |
 | 256 / 512 / 1024 chunks | 11.9 / **11.7** / 12.2 (overlapping ranges: within noise) |
+
+### Progressive JPEG
+
+A progressive JPEG comes in many scans (usually 9–10): the DC coefficients, bands of the AC
+coefficients, then refinement scans that add one more bit to every coefficient. Each scan is its
+own Huffman stream, decoded one after the other by the usual decoders. Measured scan by scan
+(libjpeg-turbo) on 1521 progressive web images and 50 24 MP photos converted with
+`jpegtran -progressive`, the Y AC refinements take ~60% of the time and the output (IDCT, colour)
+6–15%. Decoding the independent scans in parallel would give only 1.3–1.6×: the Y scans depend on
+each other. But a scan only needs *the same block rows* of the earlier scans of the same
+coefficients, so nitrojpeg runs the scans as a pipeline (a wavefront): every scan advances by a few
+MCU rows as soon as the scans before it are far enough, and the IDCT follows the last ones. The
+time is then bounded by the longest single scan instead of the sum of all scans. The refinement
+scans are also decoded differently: libjpeg walks the band one coefficient at a time (a correction
+bit for each nonzero one, counting the zero ones), nitrojpeg lists a block's zero coefficients once
+and jumps to the end of a run, which makes the decoding 1.5× faster on one thread too:
+
+| ms / MP | nitrojpeg | nitrojpeg, 1 thread | libjpeg-turbo (Y/Cb/Cr) | libjpeg-turbo (BGRX) |
+|---|---|---|---|---|
+| 50 × 24 MP photos (jpegtran) | **3.31** (~79 ms) | 9.35 | 14.02 (~336 ms) | 14.32 |
+| 1509 web images (2.7 MP avg.) | **1.66** | 3.50 | 5.33 | 5.61 |
+
+The output is bit-identical to libjpeg-turbo on all of them. 12 web images are truncated (the last
+scans are missing: libjpeg-turbo smooths those blocks), they and damaged files go to TurboJPEG.
 
 ### nitropng
 
@@ -646,7 +671,7 @@ make tools           # bench/bench, verify, robust, freqprobe, sustain (needs ge
 
 **libjpeg-turbo is optional.** nitrojpeg decodes baseline JPEGs on its own.
 
-- **`TURBOJPEG=1`** (default when `third_party/ljt` exists): progressive, CMYK, RGB, >16384 px
+- **`TURBOJPEG=1`** (default when `third_party/ljt` exists): CMYK, RGB, >16384 px
   and damaged files are decoded by TurboJPEG, which also shows what is recoverable from
   damaged images. `--selftest` is only available in this mode.
 - **`TURBOJPEG=0`**: those files are decoded by Apple ImageIO instead (slower; damaged files
@@ -770,11 +795,6 @@ All within the noise (±1.5%), only 13 bits is slightly slower; the output is by
 size. Unlike JPEG, the size hardly matters: the tables are small (the 11-bit literal table is 8 KB),
 the common deflate codes are shorter than 11 bits, and much of the time goes into copying
 back-references and reversing the row filters, which don't depend on the tables.
-
-**Progressive JPEG** (not supported, decoded by libjpeg-turbo / WIC / GTK): in 82 progressive
-files (6 MP on average) the Y AC refinement scans are ~52% of the bytes and the chain of Y scans
-that depend on each other ~80%, so decoding scans / components in parallel would gain only
-~1.2–1.3×.
 
 ## License
 
