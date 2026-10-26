@@ -325,6 +325,17 @@ Az M1 médiamotorja egyszerre 4 csempét szolgál ki, az i9 melletti Radeon RX 5
 (több szálon lassabb), a szoftveres dekóder pedig a magokkal skálázódik: ezért a nitroheic Apple
 Siliconon a hardvert, Intelen magonként egy szoftveres dekódert használ.
 
+
+Progresszív JPEG (`nitroview --bench` 100 darab, 1 MB-nál nagyobb progresszív webes JPEG-en, átlag
+5.8 MP; dekódolás / a GPU-ra töltéssel és konverzióval együtt, ms/kép):
+
+| dekóder | M1 | i9 |
+|---|---|---|
+| libjpeg-turbo (TurboJPEG, a néző korábbi útja) | 43.4 / 47.1 | 41.9 / 47.9 |
+| **nitrojpeg** (a menetek csővezetékben) | **11.8 / 17.3** | **11.6 / 16.3** |
+
+Mindkét gépen 3.7× gyorsabb. A 16 bites IDCT (pmaddwd / vmlal) csak az i9-en hozott mérhető
+javulást (ott lassúak a 32 bites vektoros szorzások); az M1-en a 32 bites változattal 11.9 / 17.6 volt.
 ### Három gép, macOS és Linux
 
 `bench/nbench` (hordozható, minden rendszeren ugyanaz a kód), 5 dekódolásból a legjobb, ms/kép;
