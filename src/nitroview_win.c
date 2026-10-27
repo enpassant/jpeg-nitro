@@ -1058,7 +1058,7 @@ static Decoded *decode_file(const wchar_t *path) {
     } else
 #endif
     if (len >= 8 && !memcmp(data, "\x89PNG\r\n\x1a\n", 8)) {
-        np_info pi;   // nitropng: 8-bit gray / gray+alpha / RGB / RGBA, non-interlaced
+        np_info pi;   // nitropng: 8-bit gray / gray+alpha / RGB / RGBA, non-interlaced: the rows to the GPU
         if (!np_read_info(data, len, &pi) && pi.supported && pi.width <= MAX_TEX && pi.height <= MAX_TEX) {
             buf = buf_get(pi.raw_size, &cap);
             np_stats ps;
@@ -1075,6 +1075,25 @@ static Decoded *decode_file(const wchar_t *path) {
                 buf_put(buf, cap);
                 buf = NULL;
             }
+        } else if (!np_read_info(data, len, &pi) && pi.convertible && pi.width <= MAX_TEX && pi.height <= MAX_TEX) {
+            // palette, 1 / 2 / 4 / 16-bit, a transparency key: the rows decoded, then made BGRX (in parallel)
+            size_t rcap, pitch = (size_t)pi.width * 4;
+            uint8_t *raw = buf_get(pi.raw_size, &rcap);
+            buf = raw ? buf_get(pitch * pi.height, &cap) : NULL;
+            np_stats ps;
+            if (buf && !np_decode(data, len, &pi, raw, g_nthreads, &ps) && !np_to_bgrx(data, len, &pi, raw, buf, pitch, g_nthreads)) {
+                d->kind = KIND_BGRA;
+                d->width = pi.width;
+                d->height = pi.height;
+                d->pitch[0] = pitch;
+                d->size = pitch * pi.height;
+                d->bands = ps.chunks;
+                d->mode = MODE_NITROPNG;
+            } else if (buf) {
+                buf_put(buf, cap);
+                buf = NULL;
+            }
+            buf_put(raw, rcap);
         }
     } else if (len >= 4 && !memcmp(data, "8BPS", 4)) {
         ps_info pi;   // nitropsd: merged image of 8-bit RGB / grayscale PSD and PSB

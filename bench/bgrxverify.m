@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 A'rpi - part of jpeg-nitro (https://github.com/gereoffy/jpeg-nitro)
-// tiffverify: nitrotiff against Apple ImageIO (macOS) - the pixels and the time.
+// bgrxverify: the decoders that write 8-bit BGRX - nitrotiff, and nitropng for the PNGs it doesn't
+// leave to the GPU (palette, 1 / 2 / 4 / 16-bit, transparency key) - against Apple ImageIO (macOS):
+// the pixels and the time.
 //
-//   bench/tiffverify [-j threads] file.tif|directory ...
+//   bench/bgrxverify [-j threads] [-a] file.tif|file.png|directory ...    (-a: also 8-bit PNGs)
 //
-// nitrotiff: the best of 3 decodes into the same buffer; ImageIO: one, decoded at once.
+// Ours: the best of 3 decodes into the same buffer; ImageIO: one, decoded at once.
 // ImageIO's image is drawn over black into a bitmap of its own colour space (no colour conversion:
 // RGB, gray, the base space of a palette); a CMYK image is converted with its profile there, so
 // its differences are only reported. 16-bit samples: ImageIO rounds to 8 bits its own way.
@@ -16,6 +18,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include "../src/nitrotiff.h"
+#include "../src/nitropng.h"
 #include "../src/nitro_os.h"
 
 static uint8_t *read_file(const char *path, size_t *len) {
@@ -31,7 +34,7 @@ static uint8_t *read_file(const char *path, size_t *len) {
     return d;
 }
 
-static int g_threads = 0, g_bad, g_ok, g_unsup;
+static int g_threads = 0, g_all, g_bad, g_ok, g_unsup;
 static double g_tn, g_ti;
 
 static void one(const char *path) {
@@ -40,21 +43,28 @@ static void one(const char *path) {
     if (!data) return;
     const char *name = strrchr(path, '/') ? strrchr(path, '/') + 1 : path;
     nt_info in;
-    if (nt_read_info(data, len, &in)) {
-        printf("%-34.34s not handled (comp %d, photometric %d, %d x %d bit)\n", name, in.compression, in.photometric, in.spp, in.bps);
+    np_info pn;
+    int png = len >= 8 && !memcmp(data, "\x89PNG", 4), w, h, k1, k2, k3;
+    if (png ? np_read_info(data, len, &pn) || !pn.convertible || (pn.supported && !g_all) : nt_read_info(data, len, &in)) {
+        if (png) printf("%-34.34s %s (colour type %d, %d bit%s)\n", name, pn.supported ? "rows to the GPU" : "not handled", pn.color_type,
+                        pn.bit_depth, pn.interlace ? ", interlaced" : "");
+        else printf("%-34.34s not handled (comp %d, photometric %d, %d x %d bit)\n", name, in.compression, in.photometric, in.spp, in.bps);
         g_unsup++;
         free(data);
         return;
     }
-    int w = in.width, h = in.height;
-    uint8_t *ours = malloc((size_t)w * h * 4);
+    if (png) { w = pn.width; h = pn.height; k1 = pn.color_type; k2 = pn.channels; k3 = pn.bit_depth; }
+    else { w = in.width; h = in.height; k1 = in.compression; k2 = in.spp; k3 = in.bps; }
+    uint8_t *ours = malloc((size_t)w * h * 4), *raw = png ? malloc(pn.raw_size) : NULL;
     double tn = 1e9, t0;
     int rc = 0;
     for (int k = 0; k < 3 && !rc; k++) {   // best of 3 (the first one also faults the output's pages in)
         t0 = nitro_now_ms();
-        rc = nt_decode(data, len, &in, ours, (size_t)w * 4, g_threads);
+        if (png) rc = np_decode(data, len, &pn, raw, g_threads, NULL) || np_to_bgrx(data, len, &pn, raw, ours, (size_t)w * 4, g_threads);
+        else rc = nt_decode(data, len, &in, ours, (size_t)w * 4, g_threads);
         if (nitro_now_ms() - t0 < tn) tn = nitro_now_ms() - t0;
     }
+    free(raw);
     // ImageIO, decoded at once
     t0 = nitro_now_ms();
     CFDataRef cfd = CFDataCreateWithBytesNoCopy(NULL, data, (CFIndex)len, kCFAllocatorNull);
@@ -64,10 +74,10 @@ static void one(const char *path) {
     double ti = nitro_now_ms() - t0;
     const char *how = "";
     if (rc) {
-        printf("%-34.34s %5dx%-5d FAILED (nitrotiff)\n", name, w, h);
+        printf("%-34.34s %5dx%-5d FAILED (%s)\n", name, w, h, png ? "nitropng" : "nitrotiff");
         g_bad++;
     } else if (!img || (int)CGImageGetWidth(img) != w || (int)CGImageGetHeight(img) != h) {
-        printf("%-34.34s %5dx%-5d nitrotiff %6.1f ms, no ImageIO reference\n", name, w, h, tn);
+        printf("%-34.34s %5dx%-5d ours %6.1f ms, no ImageIO reference\n", name, w, h, tn);
     } else {
         CGColorSpaceRef cs = CGImageGetColorSpace(img);
         CGColorSpaceModel m = CGColorSpaceGetModel(cs);
@@ -98,8 +108,8 @@ static void one(const char *path) {
             }
         int ok = maxd <= 1 || cmyk;
         how = cmyk ? "  (CMYK: ImageIO with the profile)" : "";
-        printf("%-34.34s %5dx%-5d c%-5d p%d %2dx%-2d nitrotiff %6.1f ms  ImageIO %6.1f ms  max %3d mean %.3f <=1 %7.3f%% %s%s\n", name, w, h,
-               in.compression, in.photometric, in.spp, in.bps, tn, ti, maxd, sum / cnt, 100.0 * n1 / cnt, ok ? "OK" : "DIFFERENT", how);
+        printf("%-34.34s %5dx%-5d %s%-5d %dx%-2d %s %6.1f ms  ImageIO %6.1f ms  max %3d mean %.3f <=1 %7.3f%% %s%s\n", name, w, h,
+               png ? "t" : "c", k1, k2, k3, png ? "nitropng " : "nitrotiff", tn, ti, maxd, sum / cnt, 100.0 * n1 / cnt, ok ? "OK" : "DIFFERENT", how);
         if (ok) g_ok++;
         else g_bad++;
         g_tn += tn;
@@ -123,11 +133,10 @@ static void walk(const char *p) {
     int n = scandir(p, &ents, NULL, alphasort);
     for (int i = 0; i < n; i++) {
         const char *e = ents[i]->d_name, *dot = strrchr(e, '.');
-        if (e[0] != '.' && dot && (!strcasecmp(dot, ".tif") || !strcasecmp(dot, ".tiff"))) {
-            char q[4096];
-            snprintf(q, sizeof q, "%s/%s", p, e);
-            one(q);
-        }
+        char q[4096];
+        snprintf(q, sizeof q, "%s/%s", p, e);
+        if (e[0] != '.' && ents[i]->d_type == DT_DIR) walk(q);   // (subfolders too)
+        else if (e[0] != '.' && dot && (!strcasecmp(dot, ".tif") || !strcasecmp(dot, ".tiff") || !strcasecmp(dot, ".png"))) one(q);
         free(ents[i]);
     }
     free(ents);
@@ -137,9 +146,10 @@ int main(int argc, char **argv) {
     @autoreleasepool {
         for (int i = 1; i < argc; i++) {
             if (!strcmp(argv[i], "-j") && i + 1 < argc) g_threads = atoi(argv[++i]);
+            else if (!strcmp(argv[i], "-a")) g_all = 1;
             else walk(argv[i]);
         }
-        printf("\n%d OK, %d bad, %d not handled; nitrotiff %.1f ms, ImageIO %.1f ms (the compared files)\n", g_ok, g_bad, g_unsup,
+        printf("\n%d OK, %d bad, %d not handled; ours %.1f ms, ImageIO %.1f ms (the compared files)\n", g_ok, g_bad, g_unsup,
                g_tn, g_ti);
     }
     return g_bad != 0;

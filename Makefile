@@ -489,8 +489,8 @@ bench/robust: bench/robust.c src/nitrojpeg.c src/nitrojpeg.h | ljt
 bench/pngbench: bench/pngbench.m build/nitropng.o | deps
 	$(CC) -O3 $(CPUFLAGS) -w -fobjc-arc $^ -framework Foundation -framework ImageIO -framework CoreGraphics -o $@
 
-# nitrotiff against ImageIO: pixels and time (macOS)
-bench/tiffverify: bench/tiffverify.m build/nitrotiff.o build/nitropng.o
+# nitrotiff / nitropng's BGRX output against ImageIO: pixels and time (macOS)
+bench/bgrxverify: bench/bgrxverify.m build/nitrotiff.o build/nitropng.o
 	$(CC) -O3 $(CPUFLAGS) -w -fobjc-arc $^ -framework Foundation -framework ImageIO -framework CoreGraphics -o $@
 
 bench/pngverify: bench/pngverify.c build/nitropng.o
@@ -520,7 +520,7 @@ bench/freqprobe: bench/freqprobe.c
 bench/sustain: bench/sustain.c build/nitrojpeg.o
 	$(CC) -O2 $^ -o $@
 
-tools: bench/bench bench/verify bench/robust bench/freqprobe bench/sustain bench/pngbench bench/pngsplit bench/pngverify bench/pngrobust bench/psdverify bench/psdrobust bench/tiffverify \
+tools: bench/bench bench/verify bench/robust bench/freqprobe bench/sustain bench/pngbench bench/pngsplit bench/pngverify bench/pngrobust bench/psdverify bench/psdrobust bench/bgrxverify \
        bench/nbench bench/rgbverify
 
 # Linux (or any clang + pthreads system): the tools without macOS APIs; verify and robust
@@ -533,7 +533,7 @@ linux: linux-lib $(LINUX_TOOLS)
 clean:
 	rm -rf build nitroview nitroview-gnome nitroview-sdl nitroview-linux-x64.tar.gz nitroview-gnome.flatpak nitroview.app nitroview.exe nitroview.zip nitroview.dmg \
 	  bench/bench bench/verify bench/robust bench/freqprobe bench/sustain bench/pngbench bench/pngsplit \
-	  bench/pngverify bench/pngrobust bench/psdverify bench/psdrobust bench/nbench bench/rgbverify bench/tiffverify bench/*.exe
+	  bench/pngverify bench/pngrobust bench/psdverify bench/psdrobust bench/nbench bench/rgbverify bench/bgrxverify bench/*.exe
 
 # Windows (cross, llvm-mingw): self-contained .exe files, only system DLLs (UCRT: Windows 10 /
 # Server 2016 and later). WINARCH=x86-64-v2 for CPUs without AVX2.

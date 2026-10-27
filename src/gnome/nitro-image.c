@@ -300,9 +300,28 @@ done:
 
 static gboolean decode_png(const guint8 *data, gsize len, DecodedPixels *out, GError **error) {
     np_info info;
-    if (np_read_info(data, len, &info) != 0 || !info.supported) {
-        g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED, "Unsupported PNG");
+    if (np_read_info(data, len, &info) != 0 || !info.convertible) {
+        g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED, "Unsupported PNG (interlaced)");
         return FALSE;
+    }
+    if (!info.supported) {   // palette, 1 / 2 / 4 / 16-bit, a transparency key: BGRX (in parallel)
+        gsize stride, size;
+        if (!checked_size(info.width, info.height, 4, &stride, &size, error)) return FALSE;
+        guint8 *raw = g_malloc(info.raw_size), *bgrx = g_malloc(size);
+        if (np_decode(data, len, &info, raw, decode_threads, NULL) || np_to_bgrx(data, len, &info, raw, bgrx, stride, decode_threads)) {
+            g_free(raw);
+            g_free(bgrx);
+            g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA, "PNG decode failed");
+            return FALSE;
+        }
+        g_free(raw);
+        out->bytes = g_bytes_new_take(bgrx, size);
+        out->format = GDK_MEMORY_B8G8R8A8;   // (X: 255)
+        out->stride = stride;
+        out->width = info.width;
+        out->height = info.height;
+        out->orientation = png_orientation(data, len);
+        return TRUE;
     }
 
     guint8 *raw = g_malloc(info.raw_size);

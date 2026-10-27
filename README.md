@@ -21,7 +21,7 @@ HEIC photos in parallel, one that develops DNG raw images, one for WebP, one for
 | decoder | format | how | time | usual decoders |
 |---|---|---|---|---|
 | **nitrojpeg** | baseline and progressive JPEG | speculative parallel Huffman decoding, AVX2 IDCT; progressive: the scans as a pipeline, row by row; bit-exact with libjpeg-turbo | 24 MP photo: **~11 ms**; progressive: **~79 ms** | libjpeg-turbo ~107 ms (1 thread); progressive ~336 ms |
-| **nitropng** | PNG (8-bit, non-interlaced) | speculative parallel inflate (back-references into not yet known data resolved later, Adler-32 verified) + "wavefront" filter reversal | 38 real PNGs: **~43 ms** avg. | Wuffs ~171 ms, ImageIO ~318 ms |
+| **nitropng** | PNG (non-interlaced; palette, 1–16-bit, transparency key too) | speculative parallel inflate (back-references into not yet known data resolved later, Adler-32 verified) + "wavefront" filter reversal | 38 real PNGs: **~43 ms** avg. | Wuffs ~171 ms, ImageIO ~318 ms |
 | **nitropsd** | Photoshop PSD/PSB (8-bit RGB / gray) | merged image: RLE rows in parallel, ZIP via nitropng's inflate; reads only the merged image of huge layered files | 24 MP RLE: **~5 ms** | ImageIO ~170 ms |
 | **nitroheic** (macOS) | HEIC (8-bit 4:2:0 HEVC, iPhone grids) | own HEIF parsing; the 48 independent HEVC tiles of an iPhone photo decoded in parallel by VideoToolbox into Y/Cb/Cr for the GPU | 12 MP iPhone photo: **~33 ms** | ImageIO ~200 ms |
 | **nitrodng** | DNG raw (Bayer; lossless JPEG or uncompressed) | own raw development: lossless JPEG in parallel (a single strip too: speculative Huffman decoding, as in nitrojpeg), black / white levels, white balance, Malvar–He–Cutler demosaicing, colour matrix, tone curve | 20 MP DNG: **~8 ms**; 25 MP in one lossless JPEG strip: ~22 ms | ImageIO 210–510 ms / 490–630 ms |
@@ -139,8 +139,8 @@ cannot finish a GNOME 50 build).
 is the Windows viewer's structure on SDL3 + OpenGL 3.3 instead of Win32 + Direct3D: the same keys and
 mouse (+ O: open files, Shift+O: a folder), window behaviour, prefetch, Del / U, E / Shift+E, SVG / CorelDRAW with sharp
 zoom, `--bench` and `--selftest`, and the same GPU path (planes as textures, YCbCr→RGB in a shader,
-mipmaps, trilinear drawing; pixel-exact 200–800%). Whatever our decoders don't take (16-bit, palette
-or interlaced PNG, GIF, BMP, damaged or CMYK JPEG) goes to stb_image. SDL3 is linked in statically;
+mipmaps, trilinear drawing; pixel-exact 200–800%). Whatever our decoders don't take (interlaced
+PNG, GIF, BMP, damaged or CMYK JPEG) goes to stb_image. SDL3 is linked in statically;
 OpenGL and Wayland / X11 are loaded at run time, so it needs no GTK. `scripts/get-deps.sh` builds
 SDL3 (the window systems' development packages it needs are listed there). It builds on macOS too,
 only for testing (there OpenGL is slow; the Metal viewer stays the real one). `make sdl-dist` makes
@@ -189,11 +189,14 @@ soft edges). A 4th channel with a positive layer count is a saved selection, not
 Files saved without "Maximize Compatibility" contain only a white placeholder instead of the merged
 image; the layers are not composited, so they show white (as in ImageIO). On 55 real PSDs
 (Photoshop work, maps, architecture) the result matches ImageIO except for these two points. PNG is decoded by **nitropng**, our own parallel PNG decoder
-(8-bit gray / RGB / RGBA, non-interlaced: most PNGs), otherwise by
+(non-interlaced: 8-bit gray / RGB / RGBA go to the GPU as they are; palette, 1 / 2 / 4 / 16-bit and
+transparency-key PNGs are converted to BGRX in parallel), interlaced ones by
 [Wuffs](https://github.com/google/wuffs) when it is available (`scripts/get-deps.sh`) or by
 Apple ImageIO like the other formats. Transparent images are shown over black. On 38 real PNGs
 (screenshots, scans, AI images, upscaled textures, Photoshop exports) nitropng averages
-**~43 ms/image** vs ~171 ms for Wuffs and ~318 ms for ImageIO; see [nitropng](#nitropng).
+**~43 ms/image** vs ~171 ms for Wuffs and ~318 ms for ImageIO; see [nitropng](#nitropng). On 25
+palette / 1–16-bit / transparency-key PNGs the viewer's decode went from 53 (Wuffs) to 18 ms/image,
+pixel-identical with ImageIO (`bench/bgrxverify`; a 26 MP 16-bit RGB from ~940 to ~195 ms).
 
 **SVG** (macOS and Windows, when `scripts/get-deps.sh` has fetched [lunasvg](https://github.com/sammycage/lunasvg)):
 rendered by lunasvg over white, first in full with the long side 1024–4096 pixels (small icons are
@@ -445,7 +448,7 @@ uncompressed image (scanners write those: 16-bit RGB, 70 MB in one strip) is con
 the file. JPEG-compressed and YCbCr TIFFs go to the system's decoder. On macOS an RGB TIFF's ICC
 profile is used, as ImageIO did.
 
-`bench/tiffverify` (macOS) compares it with ImageIO: 63 scans, faxes, icons and documents plus 33
+`bench/bgrxverify` (macOS) compares it with ImageIO: 63 scans, faxes, icons and documents plus 33
 variants made with ImageMagick and libtiff (every compression, tiles, planar, 16-bit, alpha, fill
 order) are pixel-identical (palettes ±1: the 16-bit colour map's rounding; CMYK differs: ImageIO
 converts with the profile). The output is the same on Linux and with any thread count; damaged
@@ -673,7 +676,9 @@ Photoshop TIFF has it at the end of the file), for a window size before the file
 
 **nitropng** (`src/nitropng.c/.h`) works the same way: `np_read_info()`, then `np_decode()`
 into `info.raw_size` bytes — the unfiltered rows, each still preceded by its filter byte
-(row y at `out + y * (stride + 1) + 1`). `np_zlib_decompress()` is the parallel inflate on its
+(row y at `out + y * (stride + 1) + 1`); 8-bit gray / RGB / RGBA (`info.supported`) are ready for a
+GPU like that, the others (`info.convertible`: palette, 1 / 2 / 4 / 16-bit, a transparency key)
+become B G R X with `np_to_bgrx()`. `np_zlib_decompress()` is the parallel inflate on its
 own, for any zlib stream of known size. **nitropsd** (`src/nitropsd.c/.h`, needs nitropng):
 `ps_read_info()`, then `ps_decode()` writes the planes (R, G, B or gray, then transparency if
 `info.alpha`) one after the other.
@@ -777,9 +782,9 @@ symlink). The measurements above were made on 50 private photos that are not in 
   else nitrohevc); `src/nitrohevc.c/.h`: our HEVC intra decoder
 - `src/nitrodng.c/.h`: DNG raw development (lossless JPEG, demosaicing, colour)
 - `src/nitrowebp.c/.h`: lossy WebP (VP8) decoder
-- `src/nitrotiff.c/.h`: TIFF decoder (strips / tiles in parallel); `bench/tiffverify.m`: it against ImageIO
+- `src/nitrotiff.c/.h`: TIFF decoder (strips / tiles in parallel); `bench/bgrxverify.m`: its and nitropng's BGRX output against ImageIO
 - `src/nitro_os.h`: what the decoders need from the OS (parallel loop, clock, CPU count)
-- `src/png_wuffs.c/.h`: optional Wuffs PNG decoding for the viewer (PNG types nitropng skips)
+- `src/png_wuffs.c/.h`: optional Wuffs PNG decoding for the viewer (interlaced PNGs, which nitropng skips)
 - `bench/pngbench.m`, `bench/pngsplit.c`: PNG decoder comparison and time split,
   `bench/pngverify.c`: nitropng byte-exactness vs zlib, `bench/pngrobust.c`: damaged PNGs (ASan),
   `bench/mkpsd.py`: test PSD writer (every compression), `bench/psdverify.c`: all compressions

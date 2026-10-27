@@ -21,7 +21,7 @@ csempéit párhuzamosan dekódolja, és kettőt a vektoros rajzokhoz:
 | dekóder | formátum | hogyan | idő | szokásos dekóderek |
 |---|---|---|---|---|
 | **nitrojpeg** | baseline és progresszív JPEG | spekulatív párhuzamos Huffman-dekódolás, AVX2 IDCT; progresszív: a menetek csővezetékben, soronként; bitre egyezik a libjpeg-turbóval | 24 MP-es fotó: **~11 ms**; progresszív: **~79 ms** | libjpeg-turbo ~107 ms (1 szálon); progresszív ~336 ms |
-| **nitropng** | PNG (8 bites, nem interlaced) | spekulatív párhuzamos inflate (a még ismeretlen adatra mutató visszahivatkozásokat utólag oldja fel, Adler-32-vel ellenőrizve) + „hullámfront” szűrővisszafejtés | 38 valódi PNG: átlag **~43 ms** | Wuffs ~171 ms, ImageIO ~318 ms |
+| **nitropng** | PNG (nem interlaced; palettás, 1–16 bites, átlátszósági kulccsal is) | spekulatív párhuzamos inflate (a még ismeretlen adatra mutató visszahivatkozásokat utólag oldja fel, Adler-32-vel ellenőrizve) + „hullámfront” szűrővisszafejtés | 38 valódi PNG: átlag **~43 ms** | Wuffs ~171 ms, ImageIO ~318 ms |
 | **nitropsd** | Photoshop PSD/PSB (8 bites RGB / szürke) | összesített kép: RLE-sorok párhuzamosan, ZIP a nitropng inflate-jével; nagy, rétegekkel teli fájlból csak az összesített képet olvassa be | 24 MP RLE: **~5 ms** | ImageIO ~170 ms |
 | **nitroheic** (macOS) | HEIC (8 bites 4:2:0 HEVC, iPhone-rácsok) | saját HEIF-feldolgozás; egy iPhone-fotó 48 független HEVC-csempéjét a VideoToolbox párhuzamosan bontja ki Y/Cb/Cr síkokba a GPU-nak | 12 MP-es iPhone-fotó: **~33 ms** | ImageIO ~200 ms |
 | **nitrotiff** | TIFF (tömörítetlen, PackBits, LZW, Deflate, CCITT G3 / G4; 1–16 bites szürke, palettás, RGB, CMYK, alfa; csíkok / csempék, chunky / planar) | a csíkok és csempék párhuzamosan (a Deflate a nitropng párhuzamos inflate-jével is); tömörítetlen: közvetlenül a fájlból alakítja át, párhuzamosan | 13 MP-es 16 bites szken (73 MB): **~2 ms**; 17 MP LZW: **~6 ms** | ImageIO ~31 ms; ~46 ms |
@@ -105,11 +105,14 @@ fekete háttéren max(0, szín + alfa − 255)-ként mutatja. Az ImageIO ezt a f
 helykitöltő van; a rétegeket a néző nem fésüli össze, így ezek fehéren jelennek meg (mint az
 ImageIO-ban). 55 valódi PSD-n (Photoshop-munkák, térképek, építészet) az eredmény e két ponttól
 eltekintve egyezik az ImageIO-val. A PNG-t a **nitropng**, a saját párhuzamos PNG-dekóderünk
-dekódolja (8 bites szürke / RGB / RGBA, nem interlaced: a legtöbb PNG), egyébként a
-[Wuffs](https://github.com/google/wuffs), ha elérhető (`scripts/get-deps.sh`), vagy az Apple ImageIO.
-Az átlátszó képek fekete háttéren jelennek meg. 38 valódi PNG-n (képernyőképek, szkennelések,
-AI-képek, felskálázott textúrák, Photoshop-exportok) a nitropng átlag **~43 ms/kép**, a Wuffs
-~171, az ImageIO ~318 ms (lásd lent: „nitropng”).
+dekódolja (nem interlaced: a 8 bites szürke / RGB / RGBA úgy, ahogy van, a GPU-ra megy; a palettás,
+az 1 / 2 / 4 / 16 bites és az átlátszósági kulcsos PNG-ket párhuzamosan BGRX-re alakítja), az
+interlaced képeket a [Wuffs](https://github.com/google/wuffs), ha elérhető (`scripts/get-deps.sh`),
+vagy az Apple ImageIO. Az átlátszó képek fekete háttéren jelennek meg. 38 valódi PNG-n
+(képernyőképek, szkennelések, AI-képek, felskálázott textúrák, Photoshop-exportok) a nitropng átlag
+**~43 ms/kép**, a Wuffs ~171, az ImageIO ~318 ms (lásd lent: „nitropng”). 25 palettás / 1–16 bites /
+átlátszósági kulcsos PNG-n a néző dekódolása 53 ms-ról (Wuffs) 18 ms/képre gyorsult, pixelre azonosan
+az ImageIO-val (`bench/bgrxverify`; egy 26 MP-es 16 bites RGB ~940-ről ~195 ms-ra).
 
 **SVG** (macOS-en és Windowson, ha a `scripts/get-deps.sh` letöltötte a [lunasvg](https://github.com/sammycage/lunasvg)-t):
 a lunasvg rajzolja fehér háttérre, először egészben, a hosszabbik oldalt 1024–4096 pixelre
@@ -216,7 +219,7 @@ a windowsos néző felépítése Win32 + Direct3D helyett SDL3 + OpenGL 3.3-mal:
 egérműveletek (+ O: fájlok, Shift+O: mappa megnyitása), ablakkezelés, előtöltés, Del / U, E / Shift+E, SVG / CorelDRAW
 éles nagyítással, `--bench` és `--selftest`, és ugyanaz a GPU-út (a síkok textúraként, YCbCr→RGB
 shaderben, mipmapek, trilineáris rajzolás; pixelpontos 200–800%). Amit a saját dekóderek nem
-vállalnak (16 bites, palettás vagy interlace-elt PNG, GIF, BMP, sérült vagy CMYK JPEG), azt az
+vállalnak (interlace-elt PNG, GIF, BMP, sérült vagy CMYK JPEG), azt az
 stb_image bontja ki. Az SDL3 statikusan van belefordítva, az OpenGL-t és a Waylandet / X11-et futáskor
 tölti be, GTK nem kell hozzá. Az SDL3-at a `scripts/get-deps.sh` fordítja (az ehhez szükséges
 fejlesztői csomagok ott vannak felsorolva). macOS-en is lefordul, de csak teszteléshez (ott az OpenGL
@@ -403,7 +406,7 @@ sorokat párhuzamosan alakítja BGRX-re; a tömörítetlen képet (a szkennerek 
 70 MB egyetlen csíkban) közvetlenül a fájlból alakítja át. A JPEG-tömörítésű és YCbCr TIFF-ek a
 rendszer dekóderéhez kerülnek. macOS-en az RGB TIFF ICC-profilját használja, ahogy az ImageIO is.
 
-A `bench/tiffverify` (macOS) az ImageIO-val veti össze: 63 szken, fax, ikon és dokumentum, valamint
+A `bench/bgrxverify` (macOS) az ImageIO-val veti össze: 63 szken, fax, ikon és dokumentum, valamint
 33 ImageMagick-kel és libtiff-fel készült változat (minden tömörítés, csempék, planar, 16 bit, alfa,
 bitsorrend) pixelre azonos (palettás képeknél ±1: a 16 bites színtábla kerekítése; a CMYK eltér, mert
 az ImageIO profillal alakít). Linuxon és bármennyi szálon is ugyanaz a kimenet; sérült fájlokon
@@ -704,9 +707,9 @@ A `-march=native` miatt a bináris a fordító gép CPU-jára optimalizált.
   `bench/sustain.c`: tartós terhelés, `bench/ab.sh`: zajtűrő A/B összehasonlítás
 - `src/nitropng.c/.h`: önálló párhuzamos PNG-dekóder
 - `src/nitropsd.c/.h`: párhuzamos PSD/PSB-dekóder (összefésült kép)
-- `src/nitrotiff.c/.h`: TIFF-dekóder (csíkok / csempék párhuzamosan); `bench/tiffverify.m`: az ImageIO-val összevetve
+- `src/nitrotiff.c/.h`: TIFF-dekóder (csíkok / csempék párhuzamosan); `bench/bgrxverify.m`: az ő és a nitropng BGRX-kimenete az ImageIO-val összevetve
 - `src/nitro_os.h`: amit a dekóderek a rendszerből használnak (párhuzamos ciklus, óra, magok száma)
-- `src/png_wuffs.c/.h`: opcionális Wuffs-os PNG-dekódolás a nézőhöz (a nitropng által kihagyott PNG-fajtákhoz)
+- `src/png_wuffs.c/.h`: opcionális Wuffs-os PNG-dekódolás a nézőhöz (az interlaced PNG-khez, ezeket a nitropng kihagyja)
 - `bench/pngbench.m`, `bench/pngsplit.c`: PNG-dekóderek összehasonlítása, időmegoszlás,
   `bench/pngverify.c`: a nitropng bájtpontossága a zlib-hez képest, `bench/pngrobust.c`: sérült PNG-k (ASan),
   `bench/mkpsd.py`: teszt-PSD-író (minden tömörítéssel), `bench/psdverify.c`: minden tömörítés a

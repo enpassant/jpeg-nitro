@@ -13,9 +13,10 @@
 //   * filters: rows are reversed as a "wavefront": row r trails row r-1.
 //
 // Output: the unfiltered rows exactly as in the file, each still preceded by
-// its filter-type byte: row y starts at out + y * (stride + 1) + 1.
-// Handles 8-bit gray / gray+alpha / RGB / RGBA, non-interlaced; anything else
-// (palette, 16-bit, interlaced) reports supported = 0.
+// its filter-type byte: row y starts at out + y * (stride + 1) + 1. For 8-bit
+// gray / gray+alpha / RGB / RGBA (supported = 1) that is ready for a GPU; palette,
+// 1 / 2 / 4 / 16-bit images and transparency keys (convertible = 1) become 8-bit
+// BGRX through np_to_bgrx. Interlaced (Adam7) images are not handled.
 #pragma once
 #include <stddef.h>
 #include <stdint.h>
@@ -27,11 +28,14 @@ extern "C" {
 typedef struct {
     int width, height;
     int bit_depth, color_type, interlace;
-    int channels;          // 1 gray, 2 gray+alpha, 3 RGB, 4 RGBA
+    int channels;          // 1 gray / palette, 2 gray+alpha, 3 RGB, 4 RGBA
+    int bpp;               // bytes per pixel for the filters (at least 1)
     size_t stride;         // bytes per row, without the filter byte
     size_t raw_size;       // height * (stride + 1): size of the decoded buffer
     int has_icc;           // iCCP chunk present (colour management is up to the caller)
-    int supported;         // 1: np_decode can handle it
+    int supported;         // 1: 8-bit gray / gray+alpha / RGB / RGBA, non-interlaced: the rows as they are
+    int convertible;       // 1: np_decode + np_to_bgrx can handle it (also palette, 1 / 2 / 4 / 16-bit, tRNS)
+    uint32_t plte_pos, plte_n, trns_pos, trns_n;   // PLTE / tRNS chunk data in the file (0: none)
 } np_info;
 
 typedef struct {
@@ -46,6 +50,12 @@ int np_read_info(const uint8_t *data, size_t len, np_info *info);
 // Decodes into out (info->raw_size bytes, see above). nthreads <= 0: all CPUs,
 // 1: single-threaded. Returns 0 on success (checksum verified), -1 otherwise.
 int np_decode(const uint8_t *data, size_t len, const np_info *info, uint8_t *out, int nthreads, np_stats *stats);
+
+// The decoded rows (np_decode's out) as 8-bit B G R X, transparency applied over black, 16-bit
+// samples rounded (width x height, pitch bytes per row; in parallel unless nthreads == 1).
+// data: the file (palette, transparency key). Returns 0 on success.
+int np_to_bgrx(const uint8_t *data, size_t len, const np_info *info, const uint8_t *raw, uint8_t *bgrx, size_t pitch,
+               int nthreads);
 
 // Decompresses a complete zlib stream of known output size (parallel unless
 // nthreads == 1), verifying its Adler-32. Returns 0 on success.

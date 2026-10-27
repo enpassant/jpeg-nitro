@@ -35,14 +35,22 @@ int np_read_info(const uint8_t *d, size_t len, np_info *fi) {
     int bits = fi->channels * fi->bit_depth;
     fi->stride = ((size_t)fi->width * bits + 7) / 8;
     fi->raw_size = (size_t)fi->height * (fi->stride + 1);
+    fi->bpp = bits >= 8 ? bits / 8 : 1;
     for (size_t i = 8; i + 12 <= len;) {
         uint32_t n = be32(d + i);
+        if (n > len - i - 12) break;
         if (!memcmp(d + i + 4, "iCCP", 4)) fi->has_icc = 1;
-        if (!memcmp(d + i + 4, "IDAT", 4) || !memcmp(d + i + 4, "IEND", 4) || n > len) break;
+        if (!memcmp(d + i + 4, "PLTE", 4)) { fi->plte_pos = (uint32_t)(i + 8); fi->plte_n = n / 3; }
+        if (!memcmp(d + i + 4, "tRNS", 4)) { fi->trns_pos = (uint32_t)(i + 8); fi->trns_n = n; }
+        if (!memcmp(d + i + 4, "IDAT", 4) || !memcmp(d + i + 4, "IEND", 4)) break;
         i += 12 + (size_t)n;
     }
-    fi->supported = fi->bit_depth == 8 && fi->color_type != 3 && fi->channels > 0 && fi->interlace == 0 &&
-                    fi->width < (1 << 24) && fi->height < (1 << 24);
+    int bd = fi->bit_depth, ct = fi->color_type, sane = fi->channels > 0 && fi->interlace == 0 &&
+                                                       fi->width < (1 << 24) && fi->height < (1 << 24);
+    fi->supported = sane && bd == 8 && ct != 3 && !(fi->trns_pos && (ct == 0 || ct == 2));   // (a transparency key: converted)
+    fi->convertible = sane && (ct == 0 ? bd == 1 || bd == 2 || bd == 4 || bd == 8 || bd == 16
+                               : ct == 3 ? (bd == 1 || bd == 2 || bd == 4 || bd == 8) && fi->plte_n > 0
+                                         : bd == 8 || bd == 16);
     return 0;
 }
 
@@ -281,7 +289,7 @@ static int decode_symbols8(BR *r, const Tables *t, uint8_t *out, size_t *ppos, s
         br_skip(r, E_LEN(e));
         unsigned kind = E_KIND(e);
         if (kind == K_LIT) {
-            if (pos >= cap) return -1;
+            if (pos >= cap || br_over(r)) return -1;   // (garbage past the end: literals only)
             out[pos++] = (uint8_t)E_VAL(e);
             continue;
         }
@@ -474,7 +482,7 @@ static int unfilter_row(uint8_t *row, const uint8_t *prev, size_t stride, int bp
 }
 
 static int unfilter_seq(uint8_t *out, const np_info *fi) {
-    int bpp = fi->channels;
+    int bpp = fi->bpp;
     size_t rs = fi->stride + 1;
     for (int y = 0; y < fi->height; y++)
         if (unfilter_row(out + (size_t)y * rs + 1, y ? out + (size_t)(y - 1) * rs + 1 : NULL, fi->stride, bpp)) return -1;
@@ -503,7 +511,7 @@ static inline void cpu_relax(void) {
 // (inherently serial) left-to-right dependency chain.
 static inline __attribute__((always_inline)) void unfilter_seg_bpp(uint8_t *row, const uint8_t *prev, size_t a,
                                                                    size_t b, const int bpp, int t) {
-    int L[4] = {0, 0, 0, 0}, UL[4] = {0, 0, 0, 0};
+    int L[8] = {0}, UL[8] = {0};
     size_t x = a;
     // UL only for Paeth: None / Sub rows don't wait for the row above, so must not read it
     if (a) for (int k = 0; k < bpp; k++) { L[k] = row[a - bpp + k]; if (prev && t == 4) UL[k] = prev[a - bpp + k]; }
@@ -543,12 +551,14 @@ static void unfilter_seg(uint8_t *row, const uint8_t *prev, size_t a, size_t b, 
     case 1: unfilter_seg_bpp(row, prev, a, b, 1, t); break;
     case 2: unfilter_seg_bpp(row, prev, a, b, 2, t); break;
     case 3: unfilter_seg_bpp(row, prev, a, b, 3, t); break;
-    default: unfilter_seg_bpp(row, prev, a, b, 4, t); break;
+    case 4: unfilter_seg_bpp(row, prev, a, b, 4, t); break;
+    case 6: unfilter_seg_bpp(row, prev, a, b, 6, t); break;   // (16-bit RGB)
+    default: unfilter_seg_bpp(row, prev, a, b, 8, t); break;  // (16-bit RGBA)
     }
 }
 
 static int unfilter_parallel(uint8_t *out, const np_info *fi, int nthreads) {
-    const int H = fi->height, bpp = fi->channels;
+    const int H = fi->height, bpp = fi->bpp;
     const size_t stride = fi->stride, rs = stride + 1;
     for (int y = 0; y < H; y++)
         if (out[(size_t)y * rs] > 4) return -1;
@@ -620,7 +630,11 @@ static int decode_symbols16(BR *r, const Tables *t, uint16_t **pout, size_t *ppo
         if (E_KIND(e) == K_SUB) e = t->lt[E_VAL(e) + ((r->buf >> LBITS) & ((1 << (15 - LBITS)) - 1))];
         br_skip(r, E_LEN(e));
         unsigned kind = E_KIND(e);
-        if (kind == K_LIT) { out[pos++] = (uint16_t)E_VAL(e); continue; }
+        if (kind == K_LIT) {
+            if (br_over(r)) return -1;   // (garbage past the end: literals only)
+            out[pos++] = (uint16_t)E_VAL(e);
+            continue;
+        }
         if (kind != K_LEN) {
             if (kind == K_EOB) break;
             return -1;
@@ -1010,7 +1024,7 @@ int np_decode(const uint8_t *data, size_t len, const np_info *fi, uint8_t *out, 
     np_stats dummy;
     if (!st) st = &dummy;
     memset(st, 0, sizeof *st);
-    if (!fi->supported) return -1;
+    if (!fi->convertible) return -1;
     init_fixed();
     double t0 = now_ms();
     size_t zlen;
@@ -1053,4 +1067,95 @@ done:
     free(t);
     free(z);
     return rc;
+}
+
+// ---------------------------------------------------------------------------
+// any decoded PNG -> 8-bit B G R X (palette, 1 / 2 / 4 / 16-bit, transparency over black)
+
+static inline int to8(int v16) { return (v16 * 255 + 32767) / 65535; }
+static inline int mul(int c, int a) { return (c * a + 127) / 255; }
+
+static void row_bgrx(const np_info *fi, const uint8_t *r, const uint8_t (*pal)[4], int key, const int *rgbkey, uint8_t *o) {
+    int w = fi->width, bd = fi->bit_depth;
+    switch (fi->color_type) {
+    case 3: case 0: {   // palette / gray: 1 / 2 / 4 / 8 / 16 bits per sample
+        int mask = (1 << (bd > 8 ? 8 : bd)) - 1, scale = 255 / mask;
+        for (int x = 0; x < w; x++, o += 4) {
+            int v;
+            if (bd == 16) v = r[2 * x] << 8 | r[2 * x + 1];
+            else if (bd == 8) v = r[x];
+            else v = r[x * bd >> 3] >> (8 - bd - (x * bd & 7)) & mask;
+            if (fi->color_type == 3) {
+                o[0] = mul(pal[v][2], pal[v][3]);
+                o[1] = mul(pal[v][1], pal[v][3]);
+                o[2] = mul(pal[v][0], pal[v][3]);
+            } else {
+                int g = v == key ? 0 : bd == 16 ? to8(v) : v * scale;
+                o[0] = o[1] = o[2] = (uint8_t)g;
+            }
+            o[3] = 255;
+        }
+        break;
+    }
+    case 4:   // gray + alpha
+        for (int x = 0; x < w; x++, o += 4) {
+            int g = bd == 16 ? to8(r[4 * x] << 8 | r[4 * x + 1]) : r[2 * x];
+            int a = bd == 16 ? to8(r[4 * x + 2] << 8 | r[4 * x + 3]) : r[2 * x + 1];
+            o[0] = o[1] = o[2] = (uint8_t)mul(g, a);
+            o[3] = 255;
+        }
+        break;
+    case 2: case 6: {   // RGB (+ alpha)
+        int n = fi->color_type == 6 ? 4 : 3;
+        for (int x = 0; x < w; x++, o += 4) {
+            int c[4];
+            if (bd == 16)
+                for (int k = 0; k < n; k++) c[k] = r[2 * (n * x + k)] << 8 | r[2 * (n * x + k) + 1];
+            else
+                for (int k = 0; k < n; k++) c[k] = r[n * x + k];
+            int a = n == 4 ? (bd == 16 ? to8(c[3]) : c[3]) : (c[0] == rgbkey[0] && c[1] == rgbkey[1] && c[2] == rgbkey[2] ? 0 : 255);
+            if (bd == 16) for (int k = 0; k < 3; k++) c[k] = to8(c[k]);
+            o[0] = (uint8_t)mul(c[2], a);
+            o[1] = (uint8_t)mul(c[1], a);
+            o[2] = (uint8_t)mul(c[0], a);
+            o[3] = 255;
+        }
+        break;
+    }
+    }
+}
+
+int np_to_bgrx(const uint8_t *data, size_t len, const np_info *fi, const uint8_t *raw, uint8_t *bgrx, size_t pitch,
+               int nthreads) {
+    if (!fi->convertible) return -1;
+    uint8_t pal[256][4];   // palette with its alpha (tRNS); missing entries black
+    memset(pal, 0, sizeof pal);
+    for (uint32_t i = 0; i < fi->plte_n && i < 256 && fi->plte_pos + 3 * i + 3 <= len; i++) {
+        memcpy(pal[i], data + fi->plte_pos + 3 * i, 3);
+        pal[i][3] = 255;
+    }
+    int key = -1, rgbkey[3] = {-1, -1, -1};   // transparency key of gray / RGB images
+    if (fi->trns_pos && fi->trns_pos + fi->trns_n <= len) {
+        const uint8_t *t = data + fi->trns_pos;
+        if (fi->color_type == 3)
+            for (uint32_t i = 0; i < fi->trns_n && i < 256; i++) pal[i][3] = t[i];
+        else if (fi->color_type == 0 && fi->trns_n >= 2)
+            key = t[0] << 8 | t[1];
+        else if (fi->color_type == 2 && fi->trns_n >= 6)
+            for (int k = 0; k < 3; k++) rgbkey[k] = t[2 * k] << 8 | t[2 * k + 1];
+    }
+    const uint8_t(*P)[4] = (const uint8_t(*)[4])pal;
+    const int *K = rgbkey;
+    const int band = 16, H = fi->height;
+    const size_t rs = fi->stride + 1;
+    size_t nb = (size_t)(H + band - 1) / band;
+    nitro_body body = ^(size_t b) {
+        for (int y = (int)b * band; y < H && y < (int)b * band + band; y++)
+            row_bgrx(fi, raw + (size_t)y * rs + 1, P, key, K, bgrx + pitch * y);
+    };
+    if (nthreads == 1)
+        for (size_t b = 0; b < nb; b++) body(b);
+    else
+        nitro_parallel(nb, body);
+    return 0;
 }

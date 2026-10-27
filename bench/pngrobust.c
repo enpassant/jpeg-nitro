@@ -17,12 +17,19 @@ static int cases, ok_cases, fails;
 static void run(const char *name, const char *what, const uint8_t *d, size_t n) {
     np_info fi;
     cases++;
-    if (np_read_info(d, n, &fi) || !fi.supported || fi.raw_size > ((size_t)1 << 31)) return;
+    if (np_read_info(d, n, &fi) || !fi.convertible || fi.raw_size > ((size_t)1 << 31)) return;
     uint8_t *a = malloc(fi.raw_size), *b = malloc(fi.raw_size);
     int r1 = np_decode(d, n, &fi, a, 1, NULL);
     int r2 = np_decode(d, n, &fi, b, 0, NULL);
     if (!r1 || !r2) ok_cases++;
     if (!r1 && !r2 && memcmp(a, b, fi.raw_size)) { printf("  MISMATCH single vs parallel: %s [%s]\n", name, what); fails++; }
+    if (!r1 && !fi.supported) {   // palette / 16-bit ...: BGRX too (the palette and tRNS come from the damaged file)
+        size_t px = (size_t)fi.width * fi.height * 4;
+        uint8_t *o1 = malloc(px), *o2 = malloc(px);
+        if (np_to_bgrx(d, n, &fi, a, o1, (size_t)fi.width * 4, 1) || np_to_bgrx(d, n, &fi, a, o2, (size_t)fi.width * 4, 0) ||
+            memcmp(o1, o2, px)) { printf("  BGRX MISMATCH: %s [%s]\n", name, what); fails++; }
+        free(o1); free(o2);
+    }
     if (getenv("VERBOSE")) printf("  %-28s %-24s -> %s / %s\n", name, what, r1 ? "fail" : "ok", r2 ? "fail" : "ok");
     free(a); free(b);
 }
@@ -58,7 +65,7 @@ int main(int argc, char **argv) {
             d[p] ^= (uint8_t)(1 << (rnd() % 8));
             snprintf(what, sizeof what, "bit flip @%zu", p); run(name, what, d, n);
         }
-        for (int k = 0; k < 3; k++) {
+        for (int k = 0; k < 3 && n > 100 + 65536; k++) {   // (big enough files)
             memcpy(d, o, n);
             size_t p = 100 + rnd() % (n - 100 - 65536), m = k == 2 ? 4096 : 65536;
             memset(d + p, k ? 0xFF : 0x00, m);

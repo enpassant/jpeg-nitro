@@ -1137,7 +1137,7 @@ static Decoded *decode_file(const char *path) {
     } else
 #endif
     if (len >= 8 && !memcmp(data, "\x89PNG\r\n\x1a\n", 8)) {
-        np_info pi;   // nitropng: 8-bit gray / gray+alpha / RGB / RGBA, non-interlaced
+        np_info pi;   // nitropng: 8-bit gray / gray+alpha / RGB / RGBA, non-interlaced: the rows to the GPU
         if (!np_read_info(data, len, &pi) && pi.supported && pi.width <= g_max_tex && pi.height <= g_max_tex) {
             buf = buf_get(pi.raw_size, &cap);
             np_stats ps;
@@ -1154,6 +1154,25 @@ static Decoded *decode_file(const char *path) {
                 buf_put(buf, cap);
                 buf = NULL;
             }
+        } else if (!np_read_info(data, len, &pi) && pi.convertible && pi.width <= g_max_tex && pi.height <= g_max_tex) {
+            // palette, 1 / 2 / 4 / 16-bit, a transparency key: the rows decoded, then made BGRX (in parallel)
+            size_t rcap, pitch = (size_t)pi.width * 4;
+            uint8_t *raw = buf_get(pi.raw_size, &rcap);
+            buf = raw ? buf_get(pitch * pi.height, &cap) : NULL;
+            np_stats ps;
+            if (buf && !np_decode(data, len, &pi, raw, g_nthreads, &ps) && !np_to_bgrx(data, len, &pi, raw, buf, pitch, g_nthreads)) {
+                d->kind = KIND_BGRA;
+                d->width = pi.width;
+                d->height = pi.height;
+                d->pitch[0] = pitch;
+                d->size = pitch * pi.height;
+                d->bands = ps.chunks;
+                d->mode = MODE_NITROPNG;
+            } else if (buf) {
+                buf_put(buf, cap);
+                buf = NULL;
+            }
+            buf_put(raw, rcap);
         }
     } else if (len >= 4 && !memcmp(data, "8BPS", 4)) {
         ps_info pi;   // nitropsd: merged image of 8-bit RGB / grayscale PSD and PSB
@@ -2687,6 +2706,7 @@ static int run_selftest(FileList *fl) {
         uint8_t *file = read_file(fl->v[i], &len);
         int rw = 0, rh = 0, rn = 0;
         uint8_t *ref = file && len < INT32_MAX ? stbi_load_from_memory(file, (int)len, &rw, &rh, &rn, 4) : NULL;
+        int png16 = file && len > 24 && !memcmp(file, "\x89PNG", 4) && file[24] == 16;   // (stb_image truncates to 8 bits, we round)
         free(file);
         if (!ref || rw != d->width || rh != d->height) {
             printf("%-30.30s %-8s no stb_image reference (%s)\n", name, mode_name(mode), ref ? "other size" : "stb_image can't decode it");
@@ -2710,7 +2730,7 @@ static int run_selftest(FileList *fl) {
             // (a PSD's extra channel that isn't transparency: stb_image takes it for alpha and removes the
             // white matte where it isn't 255, so those pixels differ)
             int unmatted = kind == KIND_PLANAR && !alpha && rn == 4;
-            int ok = kind == KIND_YUV || unmatted ? mean <= 1.0 && p3 >= 99.0 : maxd <= 1;
+            int ok = kind == KIND_YUV || unmatted || png16 ? mean <= 1.0 && p3 >= 99.0 : maxd <= 1;
             printf("%-30.30s %-8s max diff %3d  mean %.3f  <=1: %8.4f%%  <=3: %8.4f%%  %s\n", name, mode_name(mode), maxd,
                    mean, 100.0 * le1 / cnt, p3, ok ? "OK" : "DIFFERENT");
             if (!ok) bad++;

@@ -696,7 +696,7 @@ static Decoded *decode_file(NSString *path, BufferPool *pool, size_t align) {
     }
     d.colorSpace = image_colorspace(data);   // tags the display layer (ICC profile or sRGB)
     if (is_png(bytes, len)) {
-        // nitropng (parallel): 8-bit gray / gray+alpha / RGB / RGBA, non-interlaced
+        // nitropng (parallel): 8-bit gray / gray+alpha / RGB / RGBA, non-interlaced: the rows to the GPU
         np_info pi;
         if (!np_read_info(bytes, len, &pi) && pi.supported && pi.width <= MAX_TEX && pi.height <= MAX_TEX) {
             id<MTLBuffer> buf = [pool get:pi.raw_size];
@@ -717,6 +717,23 @@ static Decoded *decode_file(NSString *path, BufferPool *pool, size_t align) {
                 d.decode_ms = now_ms() - t1;
                 return d;
             }
+            if (buf) [pool put:buf];
+        } else if (!np_read_info(bytes, len, &pi) && pi.convertible && pi.width <= MAX_TEX && pi.height <= MAX_TEX) {
+            // palette, 1 / 2 / 4 / 16-bit, a transparency key: the rows decoded, then made BGRX (in parallel)
+            uint8_t *raw = malloc(pi.raw_size);
+            id<MTLBuffer> buf = raw ? bgra_buffer(d, pi.width, pi.height, pool, align) : nil;
+            np_stats ps;
+            if (buf && !np_decode(bytes, len, &pi, raw, g_nthreads, &ps) &&
+                !np_to_bgrx(bytes, len, &pi, raw, buf.contents, d.pitch[0], g_nthreads)) {
+                free(raw);
+                CGImageSourceRef src = CGImageSourceCreateWithData((__bridge CFDataRef)data, NULL);
+                d.orientation = src ? imageio_orientation(src) : 1;   // eXIf chunk
+                if (src) CFRelease(src);
+                d.bands = ps.chunks;
+                bgra_done(d, buf, MODE_NITROPNG, t1);
+                return d;
+            }
+            free(raw);
             if (buf) [pool put:buf];
         }
 #ifdef NV_WUFFS
