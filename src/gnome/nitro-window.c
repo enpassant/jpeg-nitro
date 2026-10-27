@@ -887,13 +887,6 @@ NitroWindow *nitro_window_new(AdwApplication *application) {
     return g_object_new(NITRO_TYPE_WINDOW, "application", application, NULL);
 }
 
-void nitro_window_open(NitroWindow *self, GFile *file) {
-    g_return_if_fail(NITRO_IS_WINDOW(self));
-    g_return_if_fail(G_IS_FILE(file));
-    GFile *files[] = {file};
-    nitro_window_open_files(self, files, 1);
-}
-
 void nitro_window_open_files(NitroWindow *self, GFile **files, gint n_files) {
     g_return_if_fail(NITRO_IS_WINDOW(self));
     if (!files || n_files <= 0) return;
