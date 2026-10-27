@@ -1610,9 +1610,19 @@ static RECT work_area(void) {
     GetMonitorInfoW(MonitorFromWindow(V.hwnd, MONITOR_DEFAULTTOPRIMARY), &mi);
     return mi.rcWork;
 }
-static SIZE frame_extra(void) {
+static SIZE frame_extra(void) {   // (per-monitor DPI: the frame at the window's own DPI)
+    typedef BOOL(WINAPI * AdjForDpi)(LPRECT, DWORD, BOOL, DWORD, UINT);
+    typedef UINT(WINAPI * DpiFor)(HWND);
+    static AdjForDpi adj;
+    static DpiFor dpi;
+    if (!adj) {
+        HMODULE u = GetModuleHandleW(L"user32.dll");
+        adj = (AdjForDpi)(void *)GetProcAddress(u, "AdjustWindowRectExForDpi");
+        dpi = (DpiFor)(void *)GetProcAddress(u, "GetDpiForWindow");
+    }
     RECT r = {0, 0, 100, 100};
-    AdjustWindowRectEx(&r, (DWORD)GetWindowLongW(V.hwnd, GWL_STYLE), FALSE, 0);
+    DWORD style = (DWORD)GetWindowLongW(V.hwnd, GWL_STYLE);
+    if (!adj || !dpi || !adj(&r, style, FALSE, 0, dpi(V.hwnd))) AdjustWindowRectEx(&r, style, FALSE, 0);
     SIZE s = {r.right - r.left - 100, r.bottom - r.top - 100};
     return s;
 }
@@ -2958,11 +2968,11 @@ int wmain(int argc, wchar_t **argv) {
     // started from Explorer (a console of its own): no console window
     DWORD pids[2];
     if (!bench && !selftest && GetConsoleProcessList(pids, 2) == 1) FreeConsole();
-    SetProcessDPIAware();
-    {   // per-monitor DPI (Windows 10): 100% = one image pixel per screen pixel on every monitor
+    {   // per-monitor DPI (Windows 10 1703+): 100% = one image pixel per screen pixel on every monitor.
+        // First: the awareness can be set only once (after SetProcessDPIAware this one fails).
         typedef BOOL(WINAPI * SetCtx)(HANDLE);
         SetCtx f = (SetCtx)(void *)GetProcAddress(GetModuleHandleW(L"user32.dll"), "SetProcessDpiAwarenessContext");
-        if (f) f((HANDLE)-4);   // DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
+        if (!f || !f((HANDLE)-4)) SetProcessDPIAware();   // (-4: DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)
     }
     const char *cv = getenv("NV_CONVERT");
     g_convert_draw = cv && !strcmp(cv, "draw");
