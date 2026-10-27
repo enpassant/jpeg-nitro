@@ -190,7 +190,8 @@ a futó néző átveszi az új fájl(oka)t.
 
 **Windows:** a `nitroview.exe` ([src/nitroview_win.c](src/nitroview_win.c), Win32 + Direct3D 11)
 ugyanez a néző: ugyanazok a billentyűk, egérfunkciók, nagyítás és ablakméretezés, teljes képernyő,
-diavetítés, egy fájlból a mappája, ráhúzás. A JPEG / PNG / PSD a három dekóderrel és egy compute
+diavetítés, egy fájlból a mappája, ráhúzás, O / Shift+O: fájlok / mappa megnyitása (fájl nélkül indítva
+is ez az ablak jön fel). A JPEG / PNG / PSD a három dekóderrel és egy compute
 shaderrel megy, a HEIC-fotók a saját HEVC-dekóderünkkel (`src/nitrohevc.c`, a H.265 szabvány alapján
 írva: a Windowsban Store-bővítmény nélkül nincs HEVC-dekóder; a csempék párhuzamosan, egy 12 MP-es kép
 ~55 ms; deblocking és SAO még nincs, ez szemmel alig látszik), a TIFF a nitrotiff-fel, az AVIF a

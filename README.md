@@ -103,7 +103,8 @@ icon or its window, or chosen with nitroview → Open… (⌘O); a running viewe
 
 **Windows:** `nitroview.exe` ([src/nitroview_win.c](src/nitroview_win.c), Win32 + Direct3D 11) is
 the same viewer: the same keys, mouse, zoom and window behaviour, full screen, slideshow, one file →
-its folder, drag & drop. JPEG / PNG / PSD go through the three decoders and a compute shader,
+its folder, drag & drop, O / Shift+O: open files / a folder (the dialog also comes up when started
+without files). JPEG / PNG / PSD go through the three decoders and a compute shader,
 HEIC photos through our own HEVC decoder (`src/nitrohevc.c`, written from the H.265 specification:
 Windows has no HEVC decoder without a Store extension; its tiles in parallel, ~55 ms for 12 MP; no
 deblocking / SAO yet, which is hard to see), DNG raw images through nitrodng, lossy WebP through nitrowebp, TIFF through

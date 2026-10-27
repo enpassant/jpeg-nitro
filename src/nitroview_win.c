@@ -27,6 +27,7 @@
 #include <dxgi1_2.h>
 #include <shellapi.h>
 #include <shlobj.h>
+#include <shobjidl.h>
 #include <shlwapi.h>
 #include <wincodec.h>
 #include <mmsystem.h>
@@ -71,6 +72,7 @@
 #define WM_APP_DETAIL (WM_APP + 2)   // a vector image's sharp detail is rendered
 #define WM_APP_PAGE (WM_APP + 3)     // another page of a multi-page document is drawn
 #define WM_APP_DNG (WM_APP + 4)      // a DNG is developed again (another exposure correction)
+#define WM_APP_OPEN (WM_APP + 5)     // started without files: the open dialog
 #define TIMER_SLIDE 1
 #define TIMER_DETAIL 2
 
@@ -1659,6 +1661,10 @@ static void clamp_center(const Decoded *d, double s) {
 
 static void update_title(void) {
     wchar_t t[1024];
+    if (V.nfiles <= 0) {
+        SetWindowTextW(V.hwnd, L"nitroview - drop images here, or O to open files, Shift+O a folder");
+        return;
+    }
     const wchar_t *name = base_name(V.files[V.index]);
     Decoded *d = loader_get(V.index);
     if (d)
@@ -1816,6 +1822,7 @@ static void toggle_actual_size(const Decoded *d, double ax, double ay) {
 }
 
 static void go(int i, int dir) {
+    if (V.nfiles <= 0) return;   // (no files yet: started without any)
     i = MAX(0, MIN(i, V.nfiles - 1));   // stop at the first/last image, no rollover
     if (i == V.index && V.started) return;
     V.started = 1;
@@ -2299,6 +2306,8 @@ static void on_char(wchar_t ch) {   // zoom keys by character: any keyboard layo
     }
 }
 
+static void open_dialog(int folder);
+
 static void on_key(WPARAM vk) {
     Decoded *cur = loader_get(V.index);
     double step = (GetKeyState(VK_SHIFT) & 0x8000) ? 0.5 : 0.125;
@@ -2318,6 +2327,7 @@ static void on_key(WPARAM vk) {
         else DestroyWindow(V.hwnd);
         break;
     case 'Q': DestroyWindow(V.hwnd); break;
+    case 'O': open_dialog(GetKeyState(VK_SHIFT) < 0); break;
     case 'P':   // pause slideshow
         if (V.slide_ms > 0) {
             V.paused = !V.paused;
@@ -2384,6 +2394,45 @@ static void on_drop(HDROP drop) {
     free(args);
 }
 
+// O: open images, Shift+O: a folder (Windows' own dialog); also when started without files.
+static void open_dialog(int folder) {
+    static wchar_t pattern[1024];
+    if (!pattern[0])
+        for (int i = 0; g_exts[i]; i++)
+            _snwprintf(pattern + wcslen(pattern), 1024 - wcslen(pattern), L"%ls*.%ls", i ? L";" : L"", g_exts[i]);
+    IFileOpenDialog *dlg;
+    if (FAILED(CoCreateInstance(&CLSID_FileOpenDialog, NULL, CLSCTX_INPROC_SERVER, &IID_IFileOpenDialog, (void **)&dlg))) return;
+    FILEOPENDIALOGOPTIONS o = 0;
+    IFileOpenDialog_GetOptions(dlg, &o);
+    IFileOpenDialog_SetOptions(dlg, o | FOS_FORCEFILESYSTEM | (folder ? FOS_PICKFOLDERS : FOS_ALLOWMULTISELECT));
+    if (!folder) {
+        COMDLG_FILTERSPEC f[2] = {{L"Images", pattern}, {L"All files", L"*.*"}};
+        IFileOpenDialog_SetFileTypes(dlg, 2, f);
+    }
+    IShellItemArray *items;
+    if (SUCCEEDED(IFileOpenDialog_Show(dlg, V.hwnd)) && SUCCEEDED(IFileOpenDialog_GetResults(dlg, &items))) {
+        DWORD n = 0;
+        IShellItemArray_GetCount(items, &n);
+        wchar_t **args = calloc(n ? n : 1, sizeof *args);
+        int k = 0;
+        for (DWORD i = 0; args && i < n; i++) {
+            IShellItem *it;
+            wchar_t *path;
+            if (FAILED(IShellItemArray_GetItemAt(items, i, &it))) continue;
+            if (SUCCEEDED(IShellItem_GetDisplayName(it, SIGDN_FILESYSPATH, &path))) {
+                if ((args[k] = _wcsdup(path))) k++;
+                CoTaskMemFree(path);
+            }
+            IShellItem_Release(it);
+        }
+        IShellItemArray_Release(items);
+        if (k) open_paths(args, k);
+        for (int i = 0; i < k; i++) free(args[i]);
+        free(args);
+    }
+    IFileOpenDialog_Release(dlg);
+}
+
 #define COPYDATA_OPEN 0x4E56   // "NV": full paths, each 0-terminated, then an empty one
 
 static void on_copydata(const COPYDATASTRUCT *cd) {
@@ -2404,6 +2453,7 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     Decoded *d;
     double ax, ay;
     switch (msg) {
+    case WM_APP_OPEN: open_dialog(0); return 0;
     case WM_APP_DECODED:
         loader_reap();
         if ((int)wp >= 0) image_decoded((int)wp);
@@ -2609,6 +2659,11 @@ static int create_window(const wchar_t *first) {
     V.hwnd = CreateWindowExW(WS_EX_ACCEPTFILES, L"nitroview", L"nitroview", style, CW_USEDEFAULT, CW_USEDEFAULT, 800, 600,
                              NULL, NULL, hi, NULL);
     if (!V.hwnd) return -1;
+    // files dropped from Explorer, and the files of a second start, even when running as
+    // administrator (Windows blocks these messages from a normal process to an elevated one)
+    ChangeWindowMessageFilterEx(V.hwnd, WM_DROPFILES, MSGFLT_ALLOW, NULL);
+    ChangeWindowMessageFilterEx(V.hwnd, WM_COPYDATA, MSGFLT_ALLOW, NULL);
+    ChangeWindowMessageFilterEx(V.hwnd, 0x0049, MSGFLT_ALLOW, NULL);   // (WM_COPYGLOBALDATA: the drop's data)
     // first size: from the header, so the window doesn't jump when the image arrives
     double w, h;
     SIZE cs;
@@ -2857,6 +2912,7 @@ static void usage(void) {
         "  W                       back to the image's own size (small images 100%%, window follows)\n"
         "  E / Shift+E             DNG raw image: brighter / darker (1/3 EV steps, kept while paging)\n"
         "  Del                     move the file to the .delete folder next to it   U / Ctrl+Z  undo\n"
+        "  O / Shift+O             open images / a folder\n"
         "mouse:\n"
         "  drag                    move a zoomed image\n"
         "  wheel                   zoom around the cursor (touchpad: smooth, pinch too)\n"
@@ -2906,6 +2962,7 @@ int wmain(int argc, wchar_t **argv) {
     if (gpu_init()) return 1;
     if (bench) return run_bench(&fl);
     if (selftest) return run_selftest(&fl);
+    CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);   // (the open dialog; the decoder threads have their own)
     timeBeginPeriod(1);   // slideshow timers with 1 ms resolution
 
     loader_start(fl.v, fl.n);   // (the loader owns the list from now on)
@@ -2918,7 +2975,8 @@ int wmain(int argc, wchar_t **argv) {
         V.lazy_dir = nargs == 1 && !wcspbrk(args[0], L"*?") && !(GetFileAttributesW(args[0]) & FILE_ATTRIBUTE_DIRECTORY);
         go(0, 1);
     } else {
-        SetWindowTextW(V.hwnd, L"nitroview - drop images here");
+        update_title();
+        PostMessageW(V.hwnd, WM_APP_OPEN, 0, 0);   // (once the window is on screen)
     }
     V.self_resizing = 1;   // (the first show sends WM_SIZE: not a resize by the user)
     ShowWindow(V.hwnd, SW_SHOW);
