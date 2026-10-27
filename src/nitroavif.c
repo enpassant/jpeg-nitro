@@ -299,6 +299,7 @@ static void keep(const uint8_t *buf, void *cookie) {   // (the data is the calle
 
 // One AV1 still picture. threads: dav1d's (0: all CPUs). Returns 0 on success.
 static int av1_picture(const uint8_t *p, size_t n, int threads, int op, Dav1dPicture *pic) {
+    memset(pic, 0, sizeof *pic);   // (first: the caller looks at pic->data on failure too)
     Dav1dSettings s;
     dav1d_default_settings(&s);
     s.n_threads = threads;
@@ -310,7 +311,6 @@ static int av1_picture(const uint8_t *p, size_t n, int threads, int op, Dav1dPic
     if (dav1d_open(&c, &s)) return -1;
     Dav1dData data;
     memset(&data, 0, sizeof data);
-    memset(pic, 0, sizeof *pic);
     int rc = -1;
     if (!dav1d_data_wrap(&data, p, n, keep, NULL)) {
         for (int k = 0; k < 1000; k++) {   // feed the data, take the picture; then drain
@@ -521,8 +521,10 @@ int na_decode(const uint8_t *data, size_t len, const na_info *in, uint8_t *bgrx,
         Dav1dPicture p, a;
         if (av1_picture(data + in->tile_off[t], in->tile_len[t], 1, in->op, &p)) { atomic_store(pfailed, 1); return; }
         int ok = p.p.w >= x1 - gx && p.p.h >= y1 - gy, ha = 0;
-        if (ok && in->alpha)
-            ok = ha = !av1_picture(data + in->alpha_off[t], in->alpha_len[t], 1, in->op, &a) && a.p.w >= x1 - gx && a.p.h >= y1 - gy;
+        if (ok && in->alpha) {   // (ha: decoded, to be released even if its size is wrong)
+            ha = !av1_picture(data + in->alpha_off[t], in->alpha_len[t], 1, in->op, &a);
+            ok = ha && a.p.w >= x1 - gx && a.p.h >= y1 - gy;
+        }
         Csp c;
         if (!ok || csp(in, &p, in->alpha ? &a : NULL, &c) ||
             convert(&p, in->alpha ? &a : NULL, &c, x0 - gx, y0 - gy, x1 - x0, y1 - y0, bgrx + pitch * (size_t)(y0 - cy) + (size_t)(x0 - cx) * 4,
