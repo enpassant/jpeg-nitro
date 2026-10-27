@@ -359,6 +359,15 @@ static NSData *jpeg_header_only(NSData *data) {
     return nil;
 }
 
+// An embedded ICC profile as the colour space of RGB pixels: sRGB unless it is an RGB one (a gray or
+// CMYK profile cannot describe them).
+static id icc_space(const uint8_t *icc, size_t len) {
+    CGColorSpaceRef c = icc ? CGColorSpaceCreateWithICCData((__bridge CFDataRef)[NSData dataWithBytes:icc length:len]) : NULL;
+    if (c && CGColorSpaceGetModel(c) == kCGColorSpaceModelRGB) return CFBridgingRelease(c);
+    if (c) CGColorSpaceRelease(c);
+    return srgb_space();
+}
+
 // The RGB colour space the file's pixel values are in: its embedded ICC profile
 // (Display P3, Adobe RGB, a screen profile ...), or sRGB when it has none.
 // Only the header is parsed: the CGImage is created lazily and never drawn.
@@ -611,13 +620,7 @@ static Decoded *decode_file(NSString *path, BufferPool *pool, size_t align) {
         id<MTLBuffer> buf = bgra_buffer(d, ti.width, ti.height, pool, align);
         if (buf && !nt_decode(bytes, len, &ti, buf.contents, d.pitch[0], g_nthreads)) {
             d.orientation = ti.orientation;
-            id cs = nil;   // its ICC profile, if an RGB one (scanners: Adobe RGB ...)
-            if (ti.icc && ti.photometric == 2) {
-                CGColorSpaceRef c = CGColorSpaceCreateWithICCData((__bridge CFDataRef)[NSData dataWithBytes:ti.icc length:ti.icc_len]);
-                if (c && CGColorSpaceGetModel(c) == kCGColorSpaceModelRGB) cs = CFBridgingRelease(c);
-                else if (c) CGColorSpaceRelease(c);
-            }
-            d.colorSpace = cs ?: srgb_space();
+            d.colorSpace = icc_space(ti.photometric == 2 ? ti.icc : NULL, ti.icc_len);   // (scanners: Adobe RGB ...)
             bgra_done(d, buf, MODE_NITROTIFF, t1);
             return d;
         }
@@ -648,10 +651,7 @@ static Decoded *decode_file(NSString *path, BufferPool *pool, size_t align) {
                 d.h1 = 1; d.v1 = 1;
                 d.hmax = 2; d.vmax = 2;
                 d.orientation = hi.orientation;
-                id cs = hi.icc ? CFBridgingRelease(CGColorSpaceCreateWithICCData(
-                                     (__bridge CFDataRef)[NSData dataWithBytes:hi.icc length:hi.icc_len]))
-                               : nil;
-                d.colorSpace = cs ?: srgb_space();
+                d.colorSpace = icc_space(hi.icc, hi.icc_len);
                 d.mode = MODE_NITROHEIC;
                 d.bands = hi.ntiles;
                 d.decode_ms = now_ms() - t1;
@@ -667,13 +667,7 @@ static Decoded *decode_file(NSString *path, BufferPool *pool, size_t align) {
         id<MTLBuffer> buf = bgra_buffer(d, ai.width, ai.height, pool, align);
         if (buf && !na_decode(bytes, len, &ai, buf.contents, d.pitch[0], g_nthreads)) {
             d.orientation = ai.orientation;
-            id cs = nil;   // its ICC profile, if an RGB one
-            if (ai.icc) {
-                CGColorSpaceRef c = CGColorSpaceCreateWithICCData((__bridge CFDataRef)[NSData dataWithBytes:ai.icc length:ai.icc_len]);
-                if (c && CGColorSpaceGetModel(c) == kCGColorSpaceModelRGB) cs = CFBridgingRelease(c);
-                else if (c) CGColorSpaceRelease(c);
-            }
-            d.colorSpace = cs ?: srgb_space();
+            d.colorSpace = icc_space(ai.icc, ai.icc_len);
             d.bands = ai.ntiles;
             bgra_done(d, buf, MODE_NITROAVIF, t1);
             return d;
@@ -707,10 +701,7 @@ static Decoded *decode_file(NSString *path, BufferPool *pool, size_t align) {
                 d.h1 = 1; d.v1 = 1;
                 d.hmax = 2; d.vmax = 2;
                 d.orientation = wi.orientation;
-                id cs = wi.icc ? CFBridgingRelease(CGColorSpaceCreateWithICCData(
-                                     (__bridge CFDataRef)[NSData dataWithBytes:wi.icc length:wi.icc_len]))
-                               : nil;
-                d.colorSpace = cs ?: srgb_space();
+                d.colorSpace = icc_space(wi.icc, wi.icc_len);
                 d.mode = MODE_NITROWEBP;
                 d.bands = 1;
                 d.decode_ms = now_ms() - t1;
