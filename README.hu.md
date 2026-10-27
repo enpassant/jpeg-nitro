@@ -24,6 +24,7 @@ csempéit párhuzamosan dekódolja, és kettőt a vektoros rajzokhoz:
 | **nitropng** | PNG (8 bites, nem interlaced) | spekulatív párhuzamos inflate (a még ismeretlen adatra mutató visszahivatkozásokat utólag oldja fel, Adler-32-vel ellenőrizve) + „hullámfront” szűrővisszafejtés | 38 valódi PNG: átlag **~43 ms** | Wuffs ~171 ms, ImageIO ~318 ms |
 | **nitropsd** | Photoshop PSD/PSB (8 bites RGB / szürke) | összesített kép: RLE-sorok párhuzamosan, ZIP a nitropng inflate-jével; nagy, rétegekkel teli fájlból csak az összesített képet olvassa be | 24 MP RLE: **~5 ms** | ImageIO ~170 ms |
 | **nitroheic** (macOS) | HEIC (8 bites 4:2:0 HEVC, iPhone-rácsok) | saját HEIF-feldolgozás; egy iPhone-fotó 48 független HEVC-csempéjét a VideoToolbox párhuzamosan bontja ki Y/Cb/Cr síkokba a GPU-nak | 12 MP-es iPhone-fotó: **~33 ms** | ImageIO ~200 ms |
+| **nitrotiff** | TIFF (tömörítetlen, PackBits, LZW, Deflate, CCITT G3 / G4; 1–16 bites szürke, palettás, RGB, CMYK, alfa; csíkok / csempék, chunky / planar) | a csíkok és csempék párhuzamosan (a Deflate a nitropng párhuzamos inflate-jével is); tömörítetlen: közvetlenül a fájlból alakítja át, párhuzamosan | 13 MP-es 16 bites szken (73 MB): **~2 ms**; 17 MP LZW: **~6 ms** | ImageIO ~31 ms; ~46 ms |
 | **nitrosvg** | SVG (szűrők nélkül) | lunasvg-értelmező + plutovg-renderelő, fontkereséssel a rendszer és a felhasználó fontkönyvtáraiban | 38 MB-os SVG: **~0,53 s** | WebKit ~1,4 s, CoreSVG ~2,4 s |
 | **nitrocdr** | CorelDRAW 5 – X6 (CDR), CMX | saját [libcdr-forkunk](https://github.com/gereoffy/libcdr) sok javítással (szövegstílusok, sorköz, vágás, bitkép-átlátszóság) és kétszer gyorsabb librevenge-dzsel; közvetlenül plutovg-vel rajzol | 17,7 MB-os, csak vektoros CDR: **~1,8 s**, ~3× gyorsabb | eredeti libcdr `cdr2xhtml` ~5,4 s (csak SVG-vé alakítás) |
 
@@ -39,7 +40,8 @@ fotókat (iPhone) a nitroheic (`src/nitroheic.c`) dekódolja: egy iPhone-fotó 4
 VideoToolbox-dekóderrel, Apple Siliconon 4 szálon a médiamotorral), a színkonverzió a GPU-n megy — egy
 12 MP-es kép ~33 ms alatt az ImageIO ~200 ms-a helyett egy Intel i9-en (M1: lásd lent: „Apple Silicon
 (M1)”).
-A TIFF, WebP, GIF, BMP és a többi HEIC macOS-en az Apple ImageIO-val, Windowson a WIC-kel, Linuxon a GTK betöltőivel nyílik
+A **TIFF** képeket a nitrotiff (`src/nitrotiff.c`, lásd lent: „TIFF (nitrotiff)”) bontja ki. A JPEG-tömörítésű
+TIFF, a WebP, GIF, BMP és a többi HEIC macOS-en az Apple ImageIO-val, Windowson a WIC-kel, Linuxon a GTK betöltőivel nyílik
 meg (lásd lent: „Windows” és „GNOME / Linux”). macOS-en és Windowson vektoros rajzokat is mutat: **SVG**-t
 (lunasvg) és **CorelDRAW** CDR / CMX fájlokat (libcdr, a saját, sok javítást tartalmazó forkunk),
 bármekkora nagyításban élesen, és ugyanolyan gyors lapozással, mint a fotóknál (lásd lent: „SVG” és
@@ -186,8 +188,8 @@ ugyanez a néző: ugyanazok a billentyűk, egérfunkciók, nagyítás és ablakm
 diavetítés, egy fájlból a mappája, ráhúzás. A JPEG / PNG / PSD a három dekóderrel és egy compute
 shaderrel megy, a HEIC-fotók a saját HEVC-dekóderünkkel (`src/nitrohevc.c`, a H.265 szabvány alapján
 írva: a Windowsban Store-bővítmény nélkül nincs HEVC-dekóder; a csempék párhuzamosan, egy 12 MP-es kép
-~55 ms; deblocking és SAO még nincs, ez szemmel alig látszik), minden más (TIFF, WebP,
-GIF, BMP) a Windows saját WIC-
+~55 ms; deblocking és SAO még nincs, ez szemmel alig látszik), a TIFF a nitrotiff-fel, minden más
+(JPEG-tömörítésű TIFF, WebP, GIF, BMP) a Windows saját WIC-
 kodekjeivel; az SVG és a CorelDRAW CDR / CMX ugyanúgy, mint macOS-en (nagyítva éles, [ / ] a rajz
 oldalai között). Egyetlen önálló .exe (csak rendszer-DLL-ek, Windows 10-től), Macen vagy Linuxon
 fordítható a `make windows`-szal (lásd lent: „A dekóderek más rendszeren”). A `nitroview.exe --register`
@@ -390,6 +392,25 @@ Ugyanezen a gépen, 5 futás legjobb értékével, egy 6000×6000-es JPEG és eg
 
 Ez JPEG-nél **12.5×**, PNG-nél **2.9×**. A Nitro érték a `bench/nbench` dekódolási ideje;
 a Glycin érték a `gly_loader_load()` + `gly_image_next_frame()` idejét tartalmazza.
+
+### TIFF (nitrotiff)
+
+A `src/nitrotiff.c` a TIFF 6.0 szabvány alapján készült: tömörítetlen, PackBits, LZW és Deflate (a
+vízszintes predictorral), a fekete-fehér képekhez CCITT G3 (MH, T.4 1D / 2D) és G4; 1–16 bites szürke,
+palettás, RGB és CMYK (egyszerű képlettel, profil nélkül), alfa fekete háttér fölött, csíkok vagy
+csempék, chunky vagy planar elrendezés. A csíkokat és csempéket párhuzamosan bontja ki, utána a
+sorokat párhuzamosan alakítja BGRX-re; a tömörítetlen képet (a szkennerek ilyet írnak: 16 bites RGB,
+70 MB egyetlen csíkban) közvetlenül a fájlból alakítja át. A JPEG-tömörítésű és YCbCr TIFF-ek a
+rendszer dekóderéhez kerülnek. macOS-en az RGB TIFF ICC-profilját használja, ahogy az ImageIO is.
+
+A `bench/tiffverify` (macOS) az ImageIO-val veti össze: 63 szken, fax, ikon és dokumentum, valamint
+33 ImageMagick-kel és libtiff-fel készült változat (minden tömörítés, csempék, planar, 16 bit, alfa,
+bitsorrend) pixelre azonos (palettás képeknél ±1: a 16 bites színtábla kerekítése; a CMYK eltér, mert
+az ImageIO profillal alakít). Linuxon és bármennyi szálon is ugyanaz a kimenet; sérült fájlokon
+(csonkított, összekuszált könyvtárak) AddressSanitizer alatt is hibátlanul fut. A nézőben (i9, a 63
+valódi TIFF) a dekódolás 14,0-ről 3,1 ms/képre gyorsult: egy 13 MP-es 16 bites szken ~58-ról ~2,3
+ms-ra, egy 17 MP-es LZW-s rajz ~46-ról ~6 ms-ra; az egyetlen csíkból álló G4-es faxok sorosak
+maradnak (~2 ms).
 
 ### nitrojpeg: hogyan párhuzamosít egyetlen képen belül?
 
@@ -683,6 +704,7 @@ A `-march=native` miatt a bináris a fordító gép CPU-jára optimalizált.
   `bench/sustain.c`: tartós terhelés, `bench/ab.sh`: zajtűrő A/B összehasonlítás
 - `src/nitropng.c/.h`: önálló párhuzamos PNG-dekóder
 - `src/nitropsd.c/.h`: párhuzamos PSD/PSB-dekóder (összefésült kép)
+- `src/nitrotiff.c/.h`: TIFF-dekóder (csíkok / csempék párhuzamosan); `bench/tiffverify.m`: az ImageIO-val összevetve
 - `src/nitro_os.h`: amit a dekóderek a rendszerből használnak (párhuzamos ciklus, óra, magok száma)
 - `src/png_wuffs.c/.h`: opcionális Wuffs-os PNG-dekódolás a nézőhöz (a nitropng által kihagyott PNG-fajtákhoz)
 - `bench/pngbench.m`, `bench/pngsplit.c`: PNG-dekóderek összehasonlítása, időmegoszlás,

@@ -5,6 +5,7 @@
 #include <gtk/gtk.h>   // GTK_CHECK_VERSION
 
 #include "../nitrodng.h"
+#include "../nitrotiff.h"
 #include "../nitroheic.h"
 #include "../nitrojpeg.h"
 #include "../nitropng.h"
@@ -482,6 +483,30 @@ static gboolean decode_dng(const guint8 *data, gsize len, DecodedPixels *out, in
     return TRUE;
 }
 
+// TIFF: nitrotiff (strips / tiles in parallel; uncompressed: straight from the file)
+static gboolean decode_tiff(const guint8 *data, gsize len, DecodedPixels *out, GError **error) {
+    nt_info info;
+    if (nt_read_info(data, len, &info)) {
+        g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED, "Unsupported TIFF (JPEG, YCbCr, floating point ...)");
+        return FALSE;
+    }
+    gsize stride, size;
+    if (!checked_size(info.width, info.height, 4, &stride, &size, error)) return FALSE;
+    guint8 *bgrx = g_malloc(size);
+    if (nt_decode(data, len, &info, bgrx, stride, decode_threads)) {
+        g_free(bgrx);
+        g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA, "TIFF decode failed");
+        return FALSE;
+    }
+    out->bytes = g_bytes_new_take(bgrx, size);
+    out->format = GDK_MEMORY_B8G8R8A8;   // (X: 255)
+    out->stride = stride;
+    out->width = info.width;
+    out->height = info.height;
+    out->orientation = info.orientation;
+    return TRUE;
+}
+
 // A camera raw file (Canon CR2, Nikon NEF, Sony ARW, Fujifilm RAF ...): the full-size JPEG the camera
 // stored in it, with the raw file's orientation (0: the JPEG's own)
 static gboolean decode_raw_jpeg(const guint8 *data, gsize len, DecodedPixels *out, GError **error) {
@@ -595,6 +620,10 @@ NitroImage *nitro_image_load(GFile *file, GError **error) {
         GError *raw_error = NULL;
         if ((ok = decode_raw_jpeg(data, len, &pixels, &raw_error))) g_clear_error(&nitro_error);
         g_clear_error(&raw_error);
+        if (!ok && len >= 8 && data[0] == data[1] && (data[0] == 'I' || data[0] == 'M')) {   // not a camera raw: a TIFF
+            g_clear_error(&nitro_error);
+            ok = decode_tiff(data, len, &pixels, &nitro_error);
+        }
     }
 
     GdkTexture *texture = NULL;
@@ -605,7 +634,7 @@ NitroImage *nitro_image_load(GFile *file, GError **error) {
         g_free(data);
     } else {
         // Fallback: GTK's own loaders (CMYK / cut-off JPEG, palette / 16-bit / interlaced
-        // PNG, TIFF, and what the installed gdk-pixbuf loaders read: GIF, BMP, WebP ...).
+        // PNG, JPEG / YCbCr TIFF, and what the installed gdk-pixbuf loaders read: GIF, BMP, WebP ...).
         // The EXIF orientation still comes from the file header where we can read it.
         pixels.orientation = 1;
         if (len >= 3 && data[0] == 0xff && data[1] == 0xd8) {

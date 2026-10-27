@@ -34,6 +34,7 @@
 #include "nitroheic.h"
 #include "nitrodng.h"
 #include "nitrowebp.h"
+#include "nitrotiff.h"
 #ifdef NV_WUFFS
 #include "png_wuffs.h"   // optional fast PNG decoder
 #endif
@@ -271,7 +272,7 @@ done:
 
 // Decode one file into a Metal buffer. Runs on the decoder thread.
 enum { MODE_TURBOJPEG = -1, MODE_WUFFS = -2, MODE_IMAGEIO = -3, MODE_NITROPNG = -4, MODE_NITROPSD = -5, MODE_SVG = -6, MODE_CDR = -7,
-       MODE_NITROHEIC = -8, MODE_NITRODNG = -9, MODE_NITROWEBP = -10 };
+       MODE_NITROHEIC = -8, MODE_NITRODNG = -9, MODE_NITROWEBP = -10, MODE_NITROTIFF = -11 };
 static int g_nthreads = 0;   // -j
 static _Atomic int g_dng_ev3;   // DNG exposure correction in 1/3 EV (keys E / Shift+E)
 
@@ -289,6 +290,7 @@ static const char *mode_name(int m) {
     case MODE_NITROHEIC: return "nitroheic";
     case MODE_NITRODNG: return "nitrodng";
     case MODE_NITROWEBP: return "nitrowebp";
+    case MODE_NITROTIFF: return "nitrotiff";
     case MODE_SVG: return "svg";
     case MODE_CDR: return "cdr";
     default: return "?";
@@ -599,6 +601,24 @@ static Decoded *decode_file(NSString *path, BufferPool *pool, size_t align) {
 #ifdef NV_CDR
     if ([ext isEqualToString:@"cdr"] || [ext isEqualToString:@"cmx"]) return decode_cdr(data, d, pool, align, t1);
 #endif
+    nt_info ti;   // TIFF: nitrotiff (strips / tiles in parallel; uncompressed: straight from the file)
+    if (len >= 8 && bytes[0] == bytes[1] && (bytes[0] == 'I' || bytes[0] == 'M') && !nt_read_info(bytes, len, &ti) &&
+        ti.width <= MAX_TEX && ti.height <= MAX_TEX) {
+        id<MTLBuffer> buf = bgra_buffer(d, ti.width, ti.height, pool, align);
+        if (buf && !nt_decode(bytes, len, &ti, buf.contents, d.pitch[0], g_nthreads)) {
+            d.orientation = ti.orientation;
+            id cs = nil;   // its ICC profile, if an RGB one (scanners: Adobe RGB ...)
+            if (ti.icc && ti.photometric == 2) {
+                CGColorSpaceRef c = CGColorSpaceCreateWithICCData((__bridge CFDataRef)[NSData dataWithBytes:ti.icc length:ti.icc_len]);
+                if (c && CGColorSpaceGetModel(c) == kCGColorSpaceModelRGB) cs = CFBridgingRelease(c);
+                else if (c) CGColorSpaceRelease(c);
+            }
+            d.colorSpace = cs ?: srgb_space();
+            bgra_done(d, buf, MODE_NITROTIFF, t1);
+            return d;
+        }
+        if (buf) [pool put:buf];
+    }
     nh_info hi;   // HEIC (iPhone ...): its tiles decoded in parallel by nitroheic (VideoToolbox)
     if (!nh_read_info(bytes, len, &hi) && hi.plane_w[0] <= MAX_TEX && hi.plane_h[0] <= MAX_TEX) {
         size_t total = 0;

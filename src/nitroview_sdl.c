@@ -11,7 +11,7 @@
 // Keys, mouse and window behaviour as in the other viewers (see README), + O: open files,
 // Shift+O: a folder.
 //
-// Pipeline: file -> nitrojpeg / nitropng / nitropsd / nitroheic / nitrowebp / nitrodng
+// Pipeline: file -> nitrojpeg / nitropng / nitropsd / nitroheic / nitrowebp / nitrodng / nitrotiff
 // (multi-threaded, into a host buffer, on the decoder thread) -> OpenGL: the planes as textures
 // -> a fragment shader into the RGBA texture (upsampling, YCbCr->RGB, PNG rows, PSD planes) ->
 // mipmaps -> trilinear scaled draw. Anything else goes through stb_image (16-bit / palette /
@@ -33,6 +33,7 @@
 #include "nitroheic.h"
 #include "nitrodng.h"
 #include "nitrowebp.h"
+#include "nitrotiff.h"
 #ifdef NV_SVG
 #include "nitrosvg.h"   // optional SVG rendering (lunasvg)
 #endif
@@ -201,7 +202,7 @@ static int gl_load(void) {
 // decoded image
 
 typedef enum { KIND_YUV = 0, KIND_BGRA = 1, KIND_PNG = 2, KIND_PLANAR = 3 } Kind;
-enum { MODE_STB = -3, MODE_NITROPNG = -4, MODE_NITROPSD = -5, MODE_SVG = -6, MODE_CDR = -7, MODE_NITROHEVC = -8, MODE_NITRODNG = -9, MODE_NITROWEBP = -10 };
+enum { MODE_STB = -3, MODE_NITROPNG = -4, MODE_NITROPSD = -5, MODE_SVG = -6, MODE_CDR = -7, MODE_NITROHEVC = -8, MODE_NITRODNG = -9, MODE_NITROWEBP = -10, MODE_NITROTIFF = -11 };
 
 #ifdef NV_VECTOR
 // A loaded vector document (SVG, CorelDRAW), shared by the images of its pages and the background
@@ -264,6 +265,7 @@ static const char *mode_name(int m) {
     case MODE_NITROHEVC: return "nitrohevc";
     case MODE_NITRODNG: return "nitrodng";
     case MODE_NITROWEBP: return "nitrowebp";
+    case MODE_NITROTIFF: return "nitrotiff";
     case MODE_SVG: return "svg";
     case MODE_CDR: return "cdr";
     default: return "?";
@@ -400,7 +402,7 @@ static int has_ext(const char *path, const char *const *exts) {
         if (!SDL_strcasecmp(dot + 1, exts[i])) return 1;
     return 0;
 }
-static const char *const g_exts[] = {"jpg", "jpeg", "jpe", "jfif", "png", "heic", "heif", "webp", "gif", "bmp", "tga",
+static const char *const g_exts[] = {"jpg", "jpeg", "jpe", "jfif", "png", "heic", "heif", "webp", "tif", "tiff", "gif", "bmp", "tga",
                                      "psd", "psb", "cr2", "nef", "nrw", "arw", "raf", "dng",
 #ifdef NV_SVG
                                      "svg",
@@ -1244,6 +1246,25 @@ static Decoded *decode_file(const char *path) {
                 buf = NULL;
             }
         }
+    } else if (len >= 8 && data[0] == data[1] && (data[0] == 'I' || data[0] == 'M')) {
+        nt_info ti;   // TIFF: nitrotiff (strips / tiles in parallel; uncompressed: straight from the file)
+        if (!nt_read_info(data, len, &ti) && ti.width <= g_max_tex && ti.height <= g_max_tex) {
+            size_t pitch = (size_t)ti.width * 4;
+            buf = buf_get(pitch * ti.height, &cap);
+            if (buf && !nt_decode(data, len, &ti, buf, pitch, g_nthreads)) {
+                d->kind = KIND_BGRA;
+                d->width = ti.width;
+                d->height = ti.height;
+                d->pitch[0] = pitch;
+                d->size = pitch * ti.height;
+                d->orientation = ti.orientation;
+                d->mode = MODE_NITROTIFF;
+                d->bands = 1;
+            } else if (buf) {
+                buf_put(buf, cap);
+                buf = NULL;
+            }
+        }
     }
 decoded:
     if (!buf) buf = decode_stb(data, len, d, &cap);   // everything else, and what the own decoders could not handle
@@ -1975,7 +1996,7 @@ static void SDLCALL dialog_done(void *userdata, const char *const *files, int fi
 }
 
 static void open_dialog(int folder) {   // (SDL has no dialog for files and folders at once)
-    static const SDL_DialogFileFilter f[] = {{"Images", "jpg;jpeg;jpe;jfif;png;heic;heif;webp;gif;bmp;tga;psd;psb;cr2;nef;nrw;arw;raf;dng"
+    static const SDL_DialogFileFilter f[] = {{"Images", "jpg;jpeg;jpe;jfif;png;heic;heif;webp;tif;tiff;gif;bmp;tga;psd;psb;cr2;nef;nrw;arw;raf;dng"
 #ifdef NV_SVG
                                                          ";svg"
 #endif
@@ -2529,6 +2550,22 @@ static int header_size(const char *path, double *w, double *h) {
             *w = ji.width; *h = ji.height; o = raw_orientation ? raw_orientation : ji.orientation; ok = 1;   // (RAF: the JPEG's own)
         }
     }
+    if (!ok && n >= 8 && b[0] == b[1] && (b[0] == 'I' || b[0] == 'M')) {   // TIFF: from its directory (Photoshop's is at the end)
+        int le = b[0] == 'I', tw, th, to;
+        uint32_t dir = le ? (uint32_t)b[4] | b[5] << 8 | b[6] << 16 | (uint32_t)b[7] << 24
+                          : (uint32_t)b[4] << 24 | (uint32_t)b[5] << 16 | b[6] << 8 | b[7];
+        static uint8_t db[65536];
+        size_t got = 0;
+        if (dir + 2 <= n) {
+            got = MIN(n - dir, sizeof db);
+            memcpy(db, b + dir, got);
+        } else if (SDL_SeekIO(f, dir, SDL_IO_SEEK_SET) >= 0) {
+            got = SDL_ReadIO(f, db, sizeof db);
+        }
+        if (!nt_dir_size(db, got, le, &tw, &th, &to)) {
+            *w = tw; *h = th; o = to; ok = 1;
+        }
+    }
     if (!ok && n >= 3 && b[0] == 0xFF && b[1] == 0xD8 && !nj_read_info(b, n, &ji)) {
         *w = ji.width; *h = ji.height; o = ji.orientation; ok = 1;
     }
@@ -2732,7 +2769,7 @@ static int do_register(int on) {
             "Icon=" APP_ID "\n"
             "Terminal=false\n"
             "Categories=Graphics;Viewer;\n"
-            "MimeType=image/jpeg;image/png;image/gif;image/bmp;image/webp;image/heic;image/heif;image/x-tga;"
+            "MimeType=image/jpeg;image/png;image/tiff;image/gif;image/bmp;image/webp;image/heic;image/heif;image/x-tga;"
             "image/vnd.adobe.photoshop;image/x-adobe-dng;image/x-canon-cr2;image/x-nikon-nef;image/x-sony-arw;image/x-fuji-raf;"
 #ifdef NV_SVG
             "image/svg+xml;"

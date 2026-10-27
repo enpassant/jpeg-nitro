@@ -19,6 +19,9 @@
         ndng_decode;
         nw_read_info;
         nw_decode_planes;
+        nt_read_info;
+        nt_decode;
+        nt_dir_size;
     local:
         *;
 };

@@ -20,6 +20,7 @@
 /bench/psdrobust
 /bench/nbench
 /bench/rgbverify
+/bench/tiffverify
 /bench/*.exe
 *.o
 *.dSYM/

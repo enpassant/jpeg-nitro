@@ -16,7 +16,7 @@ GNOME/Linux**:
 
 All three are built on our own decoders: three that decode a *single* image on all CPU cores —
 although JPEG, PNG and PSD compression are all sequential by design —, one that decodes the tiles of
-HEIC photos in parallel, one that develops DNG raw images, one for WebP, and two for vector drawings:
+HEIC photos in parallel, one that develops DNG raw images, one for WebP, one for TIFF, and two for vector drawings:
 
 | decoder | format | how | time | usual decoders |
 |---|---|---|---|---|
@@ -26,6 +26,7 @@ HEIC photos in parallel, one that develops DNG raw images, one for WebP, and two
 | **nitroheic** (macOS) | HEIC (8-bit 4:2:0 HEVC, iPhone grids) | own HEIF parsing; the 48 independent HEVC tiles of an iPhone photo decoded in parallel by VideoToolbox into Y/Cb/Cr for the GPU | 12 MP iPhone photo: **~33 ms** | ImageIO ~200 ms |
 | **nitrodng** | DNG raw (Bayer; lossless JPEG or uncompressed) | own raw development: lossless JPEG in parallel (a single strip too: speculative Huffman decoding, as in nitrojpeg), black / white levels, white balance, Malvar–He–Cutler demosaicing, colour matrix, tone curve | 20 MP DNG: **~8 ms**; 25 MP in one lossless JPEG strip: ~22 ms | ImageIO 210–510 ms / 490–630 ms |
 | **nitrowebp** | lossy WebP (VP8) | own VP8 decoder (RFC 6386): the coefficient tokens (one serial stream) on one thread, the modes and the reconstruction on others; Y/Cb/Cr for the GPU | 42 MP WebP: **~100 ms**; 137 everyday WebPs: **27 ms** avg. | ImageIO ~360 ms; 54 ms |
+| **nitrotiff** | TIFF (none, PackBits, LZW, Deflate, CCITT G3 / G4; 1–16-bit gray, palette, RGB, CMYK, alpha; strips / tiles, chunky / planar) | strips and tiles in parallel (Deflate also through nitropng's parallel inflate); uncompressed: converted straight from the file, in parallel | 13 MP 16-bit scan (73 MB): **~2 ms**; 17 MP LZW: **~6 ms** | ImageIO ~31 ms; ~46 ms |
 | **nitrosvg** | SVG (without filters) | lunasvg parser + plutovg renderer, with font lookup in the system and user font folders | 38 MB SVG: **~0.53 s** | WebKit ~1.4 s, CoreSVG ~2.4 s |
 | **nitrocdr** | CorelDRAW 5 – X6 (CDR), CMX | our [libcdr fork](https://github.com/gereoffy/libcdr) with many fixes (text styles, line spacing, clipping, bitmap transparency) and a 2× faster librevenge; draws directly with plutovg | 17.7 MB all-vector CDR: **~1.8 s**, ~3× faster | original libcdr `cdr2xhtml` ~5.4 s (only converting to SVG) |
 
@@ -44,7 +45,8 @@ in parallel (Intel: software VideoToolbox decoders, one per core; Apple Silicon:
 media engine) into Y/Cb/Cr planes converted on the GPU — 12 MP in ~33 ms instead of ImageIO's ~200 ms
 on an Intel i9 (M1: see [below](#apple-silicon-m1)). Lossy **WebP** images are decoded by nitrowebp
 (`src/nitrowebp.c`: 2× faster than ImageIO on everyday web images and on 24 MP photos at quality 90,
-3–5× on large web images; no loop filter yet, which is hard to see). TIFF, lossless or transparent WebP, GIF, BMP and other HEICs open
+3–5× on large web images; no loop filter yet, which is hard to see). **TIFF** images are decoded by nitrotiff
+(`src/nitrotiff.c`, [below](#tiff-nitrotiff)). JPEG-compressed TIFF, lossless or transparent WebP, GIF, BMP and other HEICs open
 through Apple ImageIO on macOS, WIC on Windows and GTK's loaders on Linux (see **Windows** and
 **GNOME / Linux** below). On macOS and Windows it also shows vector drawings, **SVG** (lunasvg) and
 **CorelDRAW** CDR / CMX (libcdr, our fork with many fixes), sharp at any zoom and paging as fast
@@ -103,8 +105,8 @@ the same viewer: the same keys, mouse, zoom and window behaviour, full screen, s
 its folder, drag & drop. JPEG / PNG / PSD go through the three decoders and a compute shader,
 HEIC photos through our own HEVC decoder (`src/nitrohevc.c`, written from the H.265 specification:
 Windows has no HEVC decoder without a Store extension; its tiles in parallel, ~55 ms for 12 MP; no
-deblocking / SAO yet, which is hard to see), DNG raw images through nitrodng, lossy WebP through nitrowebp, everything else
-(TIFF, lossless or transparent WebP, GIF, BMP)
+deblocking / SAO yet, which is hard to see), DNG raw images through nitrodng, lossy WebP through nitrowebp, TIFF through
+nitrotiff, everything else (JPEG-compressed TIFF, lossless or transparent WebP, GIF, BMP)
 through Windows' own WIC codecs;
 SVG and CorelDRAW CDR / CMX as on macOS (sharp when zoomed in, [ / ] for the pages of a drawing).
 One self-contained .exe (only system DLLs, Windows 10 or later), built on the Mac or on Linux with
@@ -433,6 +435,24 @@ On the i5 the average went from 119 to 44 ms/image: the development (demosaicing
 curve) vectorised 2–3×, and a single lossless JPEG strip or tile is decoded in parallel like
 nitrojpeg's Huffman data (the Ricoh from ~210 to ~70 ms, the DJI FC4382 from ~125 to 42 ms).
 
+### TIFF (nitrotiff)
+
+`src/nitrotiff.c`, written from the TIFF 6.0 specification: uncompressed, PackBits, LZW and Deflate
+(with the horizontal predictor), CCITT G3 (MH, T.4 1D / 2D) and G4 for bilevel images; 1–16-bit gray,
+palette, RGB and CMYK (a naive conversion, no profile), alpha over black, strips or tiles, chunky or
+planar. Strips and tiles are decoded in parallel, then the rows converted to BGRX in parallel; an
+uncompressed image (scanners write those: 16-bit RGB, 70 MB in one strip) is converted straight from
+the file. JPEG-compressed and YCbCr TIFFs go to the system's decoder. On macOS an RGB TIFF's ICC
+profile is used, as ImageIO did.
+
+`bench/tiffverify` (macOS) compares it with ImageIO: 63 scans, faxes, icons and documents plus 33
+variants made with ImageMagick and libtiff (every compression, tiles, planar, 16-bit, alpha, fill
+order) are pixel-identical (palettes ±1: the 16-bit colour map's rounding; CMYK differs: ImageIO
+converts with the profile). The output is the same on Linux and with any thread count; damaged
+files (truncated, mutated directories) run clean under AddressSanitizer. In the viewer (i9, the 63
+real TIFFs) the decode went from 14.0 to 3.1 ms/image: a 13 MP 16-bit scan from ~58 to ~2.3 ms,
+a 17 MP LZW drawing from ~46 to ~6 ms; single-strip G4 faxes stay sequential (~2 ms).
+
 ### How nitrojpeg parallelises a single image
 
 The Huffman stream is decoded **once**, without libjpeg-turbo:
@@ -646,6 +666,11 @@ TIFF-based ones, Fujifilm RAF) (with its orientation, which the JPEG itself lack
 developed (a 2×2 Bayer pattern, uncompressed 8 / 16-bit or lossless JPEG) and gives its size
 (the default crop) and orientation; `ndng_decode()` develops it into 8-bit sRGB, B G R X order.
 
+**nitrotiff** (`src/nitrotiff.c/.h`, needs nitropng): `nt_read_info()` checks whether nitrotiff can
+decode the first full-size image of a TIFF and gives its size, orientation and ICC profile;
+`nt_decode()` writes 8-bit B G R X. `nt_dir_size()` reads the size from the directory alone (a
+Photoshop TIFF has it at the end of the file), for a window size before the file is read.
+
 **nitropng** (`src/nitropng.c/.h`) works the same way: `np_read_info()`, then `np_decode()`
 into `info.raw_size` bytes — the unfiltered rows, each still preceded by its filter byte
 (row y at `out + y * (stride + 1) + 1`). `np_zlib_decompress()` is the parallel inflate on its
@@ -752,6 +777,7 @@ symlink). The measurements above were made on 50 private photos that are not in 
   else nitrohevc); `src/nitrohevc.c/.h`: our HEVC intra decoder
 - `src/nitrodng.c/.h`: DNG raw development (lossless JPEG, demosaicing, colour)
 - `src/nitrowebp.c/.h`: lossy WebP (VP8) decoder
+- `src/nitrotiff.c/.h`: TIFF decoder (strips / tiles in parallel); `bench/tiffverify.m`: it against ImageIO
 - `src/nitro_os.h`: what the decoders need from the OS (parallel loop, clock, CPU count)
 - `src/png_wuffs.c/.h`: optional Wuffs PNG decoding for the viewer (PNG types nitropng skips)
 - `bench/pngbench.m`, `bench/pngsplit.c`: PNG decoder comparison and time split,

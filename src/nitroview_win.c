@@ -11,10 +11,10 @@
 // W window to image, arrows pan, F/Enter full screen, P pause slideshow, Esc/Q quit,
 // [ / ] the pages of a multi-page CorelDRAW drawing.
 //
-// Pipeline: file -> nitrojpeg / nitropng / nitropsd (multi-threaded, into a
-// buffer the decoder thread hands to Direct3D) -> compute shader (upsampling,
+// Pipeline: file -> nitrojpeg / nitropng / nitropsd / nitroheic / nitrowebp / nitrodng / nitrotiff
+// (multi-threaded, into a buffer the decoder thread hands to Direct3D) -> compute shader (upsampling,
 // YCbCr->RGB, PNG rows, PSD planes) -> mipmaps -> trilinear scaled draw.
-// Anything else goes through WIC (progressive JPEG, HEIC, TIFF, WebP, GIF, BMP).
+// Anything else goes through WIC (damaged or CMYK JPEG, JPEG-compressed TIFF, GIF, BMP ...).
 // SVG / CorelDRAW (optional, NV_SVG / NV_CDR): nitrosvg / nitrocdr render it once in full as
 // BGRA, and the visible part again, sharp, when zoomed in (as nitroview.m does).
 // Neighbouring images are decoded ahead in the background.
@@ -43,6 +43,7 @@
 #include "nitroheic.h"
 #include "nitrodng.h"
 #include "nitrowebp.h"
+#include "nitrotiff.h"
 #ifdef NV_SVG
 #include "nitrosvg.h"   // optional SVG rendering (lunasvg)
 #endif
@@ -99,7 +100,7 @@ static const wchar_t *base_name(const wchar_t *p) {
 // decoded image
 
 typedef enum { KIND_YUV = 0, KIND_BGRA = 1, KIND_PNG = 2, KIND_PLANAR = 3 } Kind;
-enum { MODE_WIC = -3, MODE_NITROPNG = -4, MODE_NITROPSD = -5, MODE_SVG = -6, MODE_CDR = -7, MODE_NITROHEVC = -8, MODE_NITRODNG = -9, MODE_NITROWEBP = -10 };
+enum { MODE_WIC = -3, MODE_NITROPNG = -4, MODE_NITROPSD = -5, MODE_SVG = -6, MODE_CDR = -7, MODE_NITROHEVC = -8, MODE_NITRODNG = -9, MODE_NITROWEBP = -10, MODE_NITROTIFF = -11 };
 
 #ifdef NV_VECTOR
 // A loaded vector document (SVG, CorelDRAW), shared by the images of its pages and the background
@@ -167,6 +168,7 @@ static const char *mode_name(int m) {
     case MODE_NITROHEVC: return "nitrohevc";
     case MODE_NITRODNG: return "nitrodng";
     case MODE_NITROWEBP: return "nitrowebp";
+    case MODE_NITROTIFF: return "nitrotiff";
     case MODE_SVG: return "svg";
     case MODE_CDR: return "cdr";
     default: return "?";
@@ -1182,6 +1184,25 @@ static Decoded *decode_file(const wchar_t *path) {
                 d->orientation = wi.orientation;
                 d->size = total;
                 d->mode = MODE_NITROWEBP;
+                d->bands = 1;
+            } else if (buf) {
+                buf_put(buf, cap);
+                buf = NULL;
+            }
+        }
+    } else if (len >= 8 && data[0] == data[1] && (data[0] == 'I' || data[0] == 'M')) {
+        nt_info ti;   // TIFF: nitrotiff (strips / tiles in parallel; uncompressed: straight from the file)
+        if (!nt_read_info(data, len, &ti) && ti.width <= MAX_TEX && ti.height <= MAX_TEX) {
+            size_t pitch = (size_t)ti.width * 4;
+            buf = buf_get(pitch * ti.height, &cap);
+            if (buf && !nt_decode(data, len, &ti, buf, pitch, g_nthreads)) {
+                d->kind = KIND_BGRA;
+                d->width = ti.width;
+                d->height = ti.height;
+                d->pitch[0] = pitch;
+                d->size = pitch * ti.height;
+                d->orientation = ti.orientation;
+                d->mode = MODE_NITROTIFF;
                 d->bands = 1;
             } else if (buf) {
                 buf_put(buf, cap);
@@ -2489,6 +2510,29 @@ static int header_size(const wchar_t *path, double *w, double *h) {
             int swap = (raw_orientation ? raw_orientation : ji.orientation) >= 5;   // (RAF: the JPEG's own)
             *w = swap ? ji.height : ji.width;
             *h = swap ? ji.width : ji.height;
+            return 1;
+        }
+    }
+    if (n >= 8 && b[0] == b[1] && (b[0] == 'I' || b[0] == 'M')) {   // TIFF: from its directory (Photoshop's is at the end)
+        int le = b[0] == 'I', tw, th, to;
+        uint32_t dir = le ? (uint32_t)b[4] | b[5] << 8 | b[6] << 16 | (uint32_t)b[7] << 24
+                          : (uint32_t)b[4] << 24 | (uint32_t)b[5] << 16 | b[6] << 8 | b[7];
+        static uint8_t db[65536];
+        DWORD got = 0;
+        if (dir + 2 <= n) {
+            got = (DWORD)MIN(n - dir, sizeof db);
+            memcpy(db, b + dir, got);
+        } else {
+            HANDLE g = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+            LARGE_INTEGER at = {.QuadPart = (LONGLONG)dir};
+            if (g != INVALID_HANDLE_VALUE) {
+                if (SetFilePointerEx(g, at, NULL, FILE_BEGIN)) ReadFile(g, db, sizeof db, &got, NULL);
+                CloseHandle(g);
+            }
+        }
+        if (!nt_dir_size(db, got, le, &tw, &th, &to)) {
+            *w = to >= 5 ? th : tw;
+            *h = to >= 5 ? tw : th;
             return 1;
         }
     }
