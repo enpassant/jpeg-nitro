@@ -1529,7 +1529,10 @@ static NSArray<NSString *> *dropped_paths(id<NSDraggingInfo> info);
 - (void)viewDidMoveToWindow {
     [super viewDidMoveToWindow];
     NSNotificationCenter *nc = NSNotificationCenter.defaultCenter;
-    [nc removeObserver:self];
+    for (NSNotificationName n in @[NSWindowDidResizeNotification, NSWindowWillEnterFullScreenNotification,
+                                   NSWindowWillExitFullScreenNotification, NSWindowDidEnterFullScreenNotification,
+                                   NSWindowDidExitFullScreenNotification])   // (only ours: not AppKit's own)
+        [nc removeObserver:self name:n object:nil];
     NSWindow *w = self.window;
     if (!w) return;
     [nc addObserver:self selector:@selector(windowResized:) name:NSWindowDidResizeNotification object:w];
