@@ -36,7 +36,8 @@ typedef struct {
     const uint8_t *p;
     size_t pitch;
     int cw, ch;   // valid (downsampled) size, as libjpeg computes it
-    int hr, vr;   // upsampling factors: hmax / h, vmax / v
+    int hr, vr;   // upsampling factors: hmax / h, vmax / v (0: not a whole number)
+    int h, hmax, v, vmax;   // the sampling factors themselves (replication: also for 3 / 2 ...)
 } Comp;
 
 // One component's samples for output row y, upsampled to full width, into out
@@ -74,8 +75,8 @@ static void upsample_row(const Comp *c, int y, int width, uint8_t *out, int *cs)
         const uint8_t *in0 = c->p + (size_t)r * c->pitch, *in1 = c->p + (size_t)nb * c->pitch;
         for (int x = 0; x < width; x++) out[x] = (uint8_t)((in0[x] * 3 + in1[x] + bias) >> 2);
     } else {                                            // other factors (and tiny images): replication
-        const uint8_t *in = c->p + (size_t)(y / c->vr) * c->pitch;
-        for (int x = 0; x < width; x++) out[x] = in[x / c->hr];
+        const uint8_t *in = c->p + (size_t)y * c->v / c->vmax * c->pitch;
+        for (int x = 0; x < width; x++) out[x] = in[(size_t)x * c->h / c->hmax];
     }
 }
 
@@ -126,8 +127,12 @@ void nc_jpeg_to_rgb(const nj_info *fi, uint8_t *const planes[3], const size_t pi
         c->pitch = pitch[k];
         c->cw = (W * fi->h[k] + fi->hmax - 1) / fi->hmax;
         c->ch = (H * fi->v[k] + fi->vmax - 1) / fi->vmax;
-        c->hr = fi->hmax / fi->h[k];
-        c->vr = fi->vmax / fi->v[k];
+        c->h = fi->h[k];
+        c->hmax = fi->hmax;
+        c->v = fi->v[k];
+        c->vmax = fi->vmax;
+        c->hr = fi->hmax % fi->h[k] ? 0 : fi->hmax / fi->h[k];   // (h 2 of hmax 3: replication)
+        c->vr = fi->vmax % fi->v[k] ? 0 : fi->vmax / fi->v[k];
     }
     convert(comps, fi->ncomp, W, H, 0, dst, stride);
 }
@@ -142,6 +147,8 @@ void nc_yuv420_to_rgb(int width, int height, uint8_t *const planes[3], const siz
         c->cw = k ? (width + 1) / 2 : width;
         c->ch = k ? (height + 1) / 2 : height;
         c->hr = c->vr = k ? 2 : 1;
+        c->h = c->v = 1;
+        c->hmax = c->vmax = c->hr;
     }
     convert(comps, 3, width, height, limited, dst, stride);
 }
