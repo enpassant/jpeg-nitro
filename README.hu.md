@@ -14,9 +14,10 @@ Linuxra**:
 | Linux, GNOME | GTK 4 + libadwaita: `nitroview-gnome`, Flatpakként is | `make gnome` / `make flatpak` |
 | Linux (Wayland / X11), új | SDL3 + OpenGL 3.3: egyetlen önálló `nitroview-sdl` | `make sdl` / `make sdl-dist` |
 
-Mindhárom ugyanazokra a saját dekóderekre épül: hármat, amelyek egyetlen képet is az összes CPU-magon
+Mind a négy ugyanazokra a saját dekóderekre épül: hármat, amelyek egyetlen képet is az összes CPU-magon
 dekódolnak — pedig a JPEG, a PNG és a PSD tömörítése is eredendően soros —, egyet, amely a HEIC-fotók
-csempéit párhuzamosan dekódolja, és kettőt a vektoros rajzokhoz:
+csempéit párhuzamosan dekódolja, egyet a DNG nyers képek előhívásához, egyet-egyet a WebP-hez, a TIFF-hez
+és az AVIF-hez (ez utóbbi a dav1d-vel), és kettőt a vektoros rajzokhoz:
 
 | dekóder | formátum | hogyan | idő | szokásos dekóderek |
 |---|---|---|---|---|
@@ -25,6 +26,7 @@ csempéit párhuzamosan dekódolja, és kettőt a vektoros rajzokhoz:
 | **nitropsd** | Photoshop PSD/PSB (8 bites RGB / szürke) | összesített kép: RLE-sorok párhuzamosan, ZIP a nitropng inflate-jével; nagy, rétegekkel teli fájlból csak az összesített képet olvassa be | 24 MP RLE: **~5 ms** | ImageIO ~170 ms |
 | **nitroheic** (macOS) | HEIC (8 bites 4:2:0 HEVC, iPhone-rácsok) | saját HEIF-feldolgozás; egy iPhone-fotó 48 független HEVC-csempéjét a VideoToolbox párhuzamosan bontja ki Y/Cb/Cr síkokba a GPU-nak | 12 MP-es iPhone-fotó: **~33 ms** | ImageIO ~200 ms |
 | **nitrotiff** | TIFF (tömörítetlen, PackBits, LZW, Deflate, CCITT G3 / G4; 1–16 bites szürke, palettás, RGB, CMYK, alfa; csíkok / csempék, chunky / planar) | a csíkok és csempék párhuzamosan (a Deflate a nitropng párhuzamos inflate-jével is); tömörítetlen: közvetlenül a fájlból alakítja át, párhuzamosan | 13 MP-es 16 bites szken (73 MB): **~2 ms**; 17 MP LZW: **~6 ms** | ImageIO ~31 ms; ~46 ms |
+| **nitroavif** | AVIF (AV1 HEIF-ben: 8–12 bit, 4:2:0 – 4:4:4, szürke, alfa, rácsok, vágás / forgatás / tükrözés) | saját HEIF-feldolgozás (közös a nitroheic-kel), az AV1-et a [dav1d](https://code.videolan.org/videolan/dav1d) bontja ki; a rács csempéi párhuzamosan, saját párhuzamos színkonverzió (a chroma lineárisan nagyítva) | 41 webes AVIF: átlag **~10 ms** (M1: 10,8 ms; Windows, i5: 13 ms) | ImageIO ~32 ms (M1: 22 ms); WIC: csak Store-bővítménnyel |
 | **nitrosvg** | SVG (szűrők nélkül) | lunasvg-értelmező + plutovg-renderelő, fontkereséssel a rendszer és a felhasználó fontkönyvtáraiban | 38 MB-os SVG: **~0,53 s** | WebKit ~1,4 s, CoreSVG ~2,4 s |
 | **nitrocdr** | CorelDRAW 5 – X6 (CDR), CMX | saját [libcdr-forkunk](https://github.com/gereoffy/libcdr) sok javítással (szövegstílusok, sorköz, vágás, bitkép-átlátszóság) és kétszer gyorsabb librevenge-dzsel; közvetlenül plutovg-vel rajzol | 17,7 MB-os, csak vektoros CDR: **~1,8 s**, ~3× gyorsabb | eredeti libcdr `cdr2xhtml` ~5,4 s (csak SVG-vé alakítás) |
 

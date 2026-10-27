@@ -14,9 +14,9 @@ GNOME/Linux**:
 | Linux with GNOME | GTK 4 + libadwaita: `nitroview-gnome`, also as a Flatpak | `make gnome` / `make flatpak` |
 | Linux (Wayland / X11), new | SDL3 + OpenGL 3.3: one self-contained `nitroview-sdl` | `make sdl` / `make sdl-dist` |
 
-All three are built on our own decoders: three that decode a *single* image on all CPU cores —
+All four are built on our own decoders: three that decode a *single* image on all CPU cores —
 although JPEG, PNG and PSD compression are all sequential by design —, one that decodes the tiles of
-HEIC photos in parallel, one that develops DNG raw images, one for WebP, one for TIFF, and two for vector drawings:
+HEIC photos in parallel, one that develops DNG raw images, one for WebP, one for TIFF, one for AVIF (with dav1d), and two for vector drawings:
 
 | decoder | format | how | time | usual decoders |
 |---|---|---|---|---|
@@ -27,6 +27,7 @@ HEIC photos in parallel, one that develops DNG raw images, one for WebP, one for
 | **nitrodng** | DNG raw (Bayer; lossless JPEG or uncompressed) | own raw development: lossless JPEG in parallel (a single strip too: speculative Huffman decoding, as in nitrojpeg), black / white levels, white balance, Malvar–He–Cutler demosaicing, colour matrix, tone curve | 20 MP DNG: **~8 ms**; 25 MP in one lossless JPEG strip: ~22 ms | ImageIO 210–510 ms / 490–630 ms |
 | **nitrowebp** | lossy WebP (VP8) | own VP8 decoder (RFC 6386): the coefficient tokens (one serial stream) on one thread, the modes and the reconstruction on others; Y/Cb/Cr for the GPU | 42 MP WebP: **~100 ms**; 137 everyday WebPs: **27 ms** avg. | ImageIO ~360 ms; 54 ms |
 | **nitrotiff** | TIFF (none, PackBits, LZW, Deflate, CCITT G3 / G4; 1–16-bit gray, palette, RGB, CMYK, alpha; strips / tiles, chunky / planar) | strips and tiles in parallel (Deflate also through nitropng's parallel inflate); uncompressed: converted straight from the file, in parallel | 13 MP 16-bit scan (73 MB): **~2 ms**; 17 MP LZW: **~6 ms** | ImageIO ~31 ms; ~46 ms |
+| **nitroavif** | AVIF (AV1 in HEIF: 8–12-bit, 4:2:0 – 4:4:4, gray, alpha, grids, crop / rotation / mirroring) | own HEIF parsing (shared with nitroheic), AV1 by [dav1d](https://code.videolan.org/videolan/dav1d); grid tiles decoded in parallel, our own parallel colour conversion (chroma upsampled linearly) | 41 web AVIFs: **~10 ms** avg. (M1: 10.8 ms; Windows i5: 13 ms) | ImageIO ~32 ms (M1: 22 ms); WIC: only with a Store extension |
 | **nitrosvg** | SVG (without filters) | lunasvg parser + plutovg renderer, with font lookup in the system and user font folders | 38 MB SVG: **~0.53 s** | WebKit ~1.4 s, CoreSVG ~2.4 s |
 | **nitrocdr** | CorelDRAW 5 – X6 (CDR), CMX | our [libcdr fork](https://github.com/gereoffy/libcdr) with many fixes (text styles, line spacing, clipping, bitmap transparency) and a 2× faster librevenge; draws directly with plutovg | 17.7 MB all-vector CDR: **~1.8 s**, ~3× faster | original libcdr `cdr2xhtml` ~5.4 s (only converting to SVG) |
 
