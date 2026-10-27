@@ -92,6 +92,16 @@ static uint32_t bits_ue(Bits *b) {
     return (1u << zeros) - 1 + bits_u(b, zeros);
 }
 
+// A ue(v) that is an index or a size: above max (damaged; 0xFFFFFFFF after 32 zero bits) sets *bad.
+static int ue_max(Bits *b, uint32_t max, int *bad) {
+    uint32_t v = bits_ue(b);
+    if (v > max) {
+        *bad = 1;
+        return 0;
+    }
+    return (int)v;
+}
+
 static int32_t bits_se(Bits *b) {
     uint32_t k = bits_ue(b);
     return k & 1 ? (int32_t)((k + 1) / 2) : -(int32_t)(k / 2);
@@ -231,7 +241,11 @@ static int parse_st_ref_pic_set(Bits *b, int idx, int num_sets, Rps *rps) {
     if (idx != 0) inter = (int)bits_u(b, 1);
     if (inter) {
         int delta_idx = 1;
-        if (idx == num_sets) delta_idx = (int)bits_ue(b) + 1;
+        if (idx == num_sets) {
+            int bad = 0;
+            delta_idx = ue_max(b, (uint32_t)num_sets - 1, &bad) + 1;   // (7.4.8: up to num_sets)
+            if (bad) return -1;
+        }
         int sign = (int)bits_u(b, 1);
         uint32_t abs_minus1 = bits_ue(b);
         if (abs_minus1 > 32767) return -1;
@@ -312,34 +326,34 @@ static int parse_sps(const uint8_t *rbsp, size_t len, Sps *sps_table) {
     if (id > 15) return -1;
     Sps *s = &sps_table[id];
     memset(s, 0, sizeof *s);
-    s->chroma_format_idc = (int)bits_ue(&b);
+    int bad = 0;   // (the limits: 7.4.3.2, or what this decoder takes)
+    s->chroma_format_idc = ue_max(&b, 3, &bad);
     if (s->chroma_format_idc == 3) bits_u(&b, 1);
-    s->width = (int)bits_ue(&b);
-    s->height = (int)bits_ue(&b);
+    s->width = ue_max(&b, 16384, &bad);
+    s->height = ue_max(&b, 16384, &bad);
     if (bits_u(&b, 1)) {   // conformance window (in chroma units for 4:2:0)
         int sub = s->chroma_format_idc == 1 || s->chroma_format_idc == 2 ? 2 : 1;
         int subh = s->chroma_format_idc == 1 ? 2 : 1;
-        s->conf_left = (int)bits_ue(&b) * sub;
-        s->conf_right = (int)bits_ue(&b) * sub;
-        s->conf_top = (int)bits_ue(&b) * subh;
-        s->conf_bottom = (int)bits_ue(&b) * subh;
+        s->conf_left = ue_max(&b, 16384, &bad) * sub;
+        s->conf_right = ue_max(&b, 16384, &bad) * sub;
+        s->conf_top = ue_max(&b, 16384, &bad) * subh;
+        s->conf_bottom = ue_max(&b, 16384, &bad) * subh;
     }
-    s->bit_depth_luma = (int)bits_ue(&b) + 8;
-    s->bit_depth_chroma = (int)bits_ue(&b) + 8;
-    s->log2_max_poc_lsb = (int)bits_ue(&b) + 4;
-    if (s->log2_max_poc_lsb > 16) return -1;
+    s->bit_depth_luma = ue_max(&b, 8, &bad) + 8;
+    s->bit_depth_chroma = ue_max(&b, 8, &bad) + 8;
+    s->log2_max_poc_lsb = ue_max(&b, 12, &bad) + 4;
     int ordering = (int)bits_u(&b, 1);
     for (int i = ordering ? 0 : max_sub_layers_minus1; i <= max_sub_layers_minus1; i++) {
         bits_ue(&b);
         bits_ue(&b);
         bits_ue(&b);
     }
-    s->log2_min_cb = (int)bits_ue(&b) + 3;
-    s->log2_ctb = s->log2_min_cb + (int)bits_ue(&b);
-    s->log2_min_tb = (int)bits_ue(&b) + 2;
-    s->log2_max_tb = s->log2_min_tb + (int)bits_ue(&b);
+    s->log2_min_cb = ue_max(&b, 3, &bad) + 3;
+    s->log2_ctb = s->log2_min_cb + ue_max(&b, 3, &bad);
+    s->log2_min_tb = ue_max(&b, 3, &bad) + 2;
+    s->log2_max_tb = s->log2_min_tb + ue_max(&b, 3, &bad);
     bits_ue(&b);   // max_transform_hierarchy_depth_inter
-    s->max_transform_hierarchy_depth_intra = (int)bits_ue(&b);
+    s->max_transform_hierarchy_depth_intra = ue_max(&b, 4, &bad);
     s->scaling_list_enabled = (int)bits_u(&b, 1);
     default_scaling(s->scaling);
     if (s->scaling_list_enabled && bits_u(&b, 1) && parse_scaling_list(&b, s->scaling)) return -1;
@@ -348,18 +362,18 @@ static int parse_sps(const uint8_t *rbsp, size_t len, Sps *sps_table) {
     s->pcm = (int)bits_u(&b, 1);
     if (s->pcm) {
         bits_u(&b, 8);   // PCM sample bit depths
-        s->log2_min_pcm = (int)bits_ue(&b) + 3;
-        s->log2_max_pcm = s->log2_min_pcm + (int)bits_ue(&b);
+        s->log2_min_pcm = ue_max(&b, 2, &bad) + 3;
+        s->log2_max_pcm = s->log2_min_pcm + ue_max(&b, 2, &bad);
         bits_u(&b, 1);
     }
-    s->num_short_term_ref_pic_sets = (int)bits_ue(&b);
-    if (s->num_short_term_ref_pic_sets > 64) return -1;
+    s->num_short_term_ref_pic_sets = ue_max(&b, 64, &bad);
+    if (bad) return -1;
     for (int i = 0; i < s->num_short_term_ref_pic_sets; i++)
         if (parse_st_ref_pic_set(&b, i, s->num_short_term_ref_pic_sets, s->rps)) return -1;
     s->long_term_ref_pics_present = (int)bits_u(&b, 1);
     if (s->long_term_ref_pics_present) {
-        s->num_long_term_ref_pics_sps = (int)bits_ue(&b);
-        if (s->num_long_term_ref_pics_sps > 32) return -1;
+        s->num_long_term_ref_pics_sps = ue_max(&b, 32, &bad);
+        if (bad) return -1;
         for (int i = 0; i < s->num_long_term_ref_pics_sps; i++) {
             bits_u(&b, s->log2_max_poc_lsb);
             bits_u(&b, 1);
@@ -386,6 +400,7 @@ static int parse_sps(const uint8_t *rbsp, size_t len, Sps *sps_table) {
     if (s->chroma_format_idc != 1 || s->bit_depth_luma != 8 || s->bit_depth_chroma != 8) return -1;   // 8-bit 4:2:0
     // BT.601 coefficients (matrix 6, or 5 as Samsung phones write it), full range: else not ours
     if (!s->full_range || (s->matrix_coeffs != 2 && s->matrix_coeffs != 5 && s->matrix_coeffs != 6)) return -1;
+    if (bad || s->conf_left + s->conf_right >= s->width || s->conf_top + s->conf_bottom >= s->height) return -1;
     if (s->width < 8 || s->height < 8 || s->width > 16384 || s->height > 16384 || s->log2_ctb < 4 || s->log2_ctb > 6 ||
         s->log2_max_tb > 5 || s->log2_max_tb > s->log2_ctb || s->log2_min_tb >= s->log2_min_cb ||
         (s->width & ((1 << s->log2_min_cb) - 1)) || (s->height & ((1 << s->log2_min_cb) - 1)))
@@ -400,8 +415,9 @@ static int parse_pps(const uint8_t *rbsp, size_t len, const Sps *sps_table, Pps 
     if (id > 63) return -1;
     Pps *p = &pps_table[id];
     memset(p, 0, sizeof *p);
-    p->sps_id = (int)bits_ue(&b);
-    if (p->sps_id > 15 || !sps_table[p->sps_id].valid) return -1;
+    int bad = 0;
+    p->sps_id = ue_max(&b, 15, &bad);
+    if (bad || !sps_table[p->sps_id].valid) return -1;
     p->dependent_slice_segments = (int)bits_u(&b, 1);
     p->output_flag_present = (int)bits_u(&b, 1);
     p->num_extra_slice_header_bits = (int)bits_u(&b, 3);
@@ -413,7 +429,7 @@ static int parse_pps(const uint8_t *rbsp, size_t len, const Sps *sps_table, Pps 
     p->constrained_intra_pred = (int)bits_u(&b, 1);
     p->transform_skip = (int)bits_u(&b, 1);
     p->cu_qp_delta_enabled = (int)bits_u(&b, 1);
-    if (p->cu_qp_delta_enabled) p->diff_cu_qp_delta_depth = (int)bits_ue(&b);
+    if (p->cu_qp_delta_enabled) p->diff_cu_qp_delta_depth = ue_max(&b, 3, &bad);
     p->cb_qp_offset = bits_se(&b);
     p->cr_qp_offset = bits_se(&b);
     p->slice_chroma_qp_offsets_present = (int)bits_u(&b, 1);
@@ -442,6 +458,7 @@ static int parse_pps(const uint8_t *rbsp, size_t len, const Sps *sps_table, Pps 
     bits_u(&b, 1);   // lists_modification_present_flag
     bits_ue(&b);     // log2_parallel_merge_level_minus2
     p->slice_header_extension_present = (int)bits_u(&b, 1);
+    if (bad || p->diff_cu_qp_delta_depth > sps_table[p->sps_id].log2_ctb - sps_table[p->sps_id].log2_min_cb) return -1;
     if (p->init_qp < 0 || p->init_qp > 51 || p->cb_qp_offset < -12 || p->cb_qp_offset > 12 || p->cr_qp_offset < -12 ||
         p->cr_qp_offset > 12)
         return -1;
@@ -1562,6 +1579,7 @@ static int decode_slice(Dec *d, const Sps *sps_table, const Pps *pps_table, cons
     }
     if (pps->slice_header_extension_present) {
         uint32_t n = bits_ue(&b);
+        if (n > 256) goto out;
         for (uint32_t i = 0; i < n; i++) bits_u(&b, 8);
     }
     bits_u(&b, 1);   // alignment_bit_equal_to_one
