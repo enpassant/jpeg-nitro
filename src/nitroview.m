@@ -2000,6 +2000,7 @@ static int debug_zoom(void) {   // NV_DEBUG_ZOOM=1: log wheel / pinch events and
             dispatch_async(dispatch_get_main_queue(), ^{
                 ViewerView *v2 = ws;
                 if (v2 && !rc) [v2 vectorDetailDone:d pixels:px w:w h:h scale:s rect:wr ms:ms];
+                else if (v2 && v2->_wantFor == d) v2->_wantFor = nil;   // (failed: may be asked for again)
                 free(px);
             });
         });
@@ -2008,6 +2009,7 @@ static int debug_zoom(void) {   // NV_DEBUG_ZOOM=1: log wheel / pinch events and
 
 - (void)vectorDetailDone:(Decoded *)d pixels:(const uint8_t *)px w:(int)w h:(int)h scale:(double)s
                  rect:(CGRect)rect ms:(double)ms {
+    if (_wantFor == d) _wantFor = nil;   // (no longer on its way: paging back asks for it again)
     if (d != [_loader get:_index]) return;   // paged away
     MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
                                                                                   width:w height:h mipmapped:YES];
