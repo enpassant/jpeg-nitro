@@ -353,12 +353,15 @@ look better; nitrodng develops all of them at full size, 12× faster on the M1, 
 Progressive JPEG (`nitroview --bench` on 100 progressive web JPEGs over 1 MB, 5.8 MP on average;
 decode / with the GPU upload and conversion, ms/image):
 
-| decoder | M1 | i9 |
-|---|---|---|
-| libjpeg-turbo (TurboJPEG, the viewer's earlier path) | 43.4 / 47.1 | 41.9 / 47.9 |
-| **nitrojpeg** (the scans as a pipeline) | **10.6 / 15.8** | **9.5 / 14.3** |
+| decoder | M1 | i9 | i5-9600K, Windows |
+|---|---|---|---|
+| libjpeg-turbo (TurboJPEG, the viewer's earlier path on macOS) | 43.4 / 47.1 | 41.9 / 47.9 | |
+| WIC (the viewer's earlier path on Windows) | | | 118 / 128 |
+| **nitrojpeg** (the scans as a pipeline) | **10.6 / 15.8** | **9.5 / 14.3** | **11.0 / 18.3** |
 
-4× faster on the M1, 4.4× on the i9. The 16-bit IDCT (pmaddwd / vmlal) made a difference only on
+4× faster on the M1, 4.4× on the i9, 10.7× faster than WIC on the i5 (6 cores without
+hyper-threading; the Windows viewer also builds mipmaps, 1.5 ms). On the i5 one thread takes
+29.3 ms (`bench/nbench -1`), 4 workers 11.0, 6 workers (`-j 6`) 11.8. The 16-bit IDCT (pmaddwd / vmlal) made a difference only on
 one thread (its 32-bit vector multiplies are slow on the i9); 4 workers instead of all cores took
 the M1 from 11.3 to 10.6 ms and the i9 from 11.7 to 9.5 ms (more can't be kept busy, see
 [Progressive JPEG](#progressive-jpeg); `-j` sets more).

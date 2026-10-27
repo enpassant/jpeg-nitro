@@ -329,12 +329,15 @@ Siliconon a hardvert, Intelen magonként egy szoftveres dekódert használ.
 Progresszív JPEG (`nitroview --bench` 100 darab, 1 MB-nál nagyobb progresszív webes JPEG-en, átlag
 5.8 MP; dekódolás / a GPU-ra töltéssel és konverzióval együtt, ms/kép):
 
-| dekóder | M1 | i9 |
-|---|---|---|
-| libjpeg-turbo (TurboJPEG, a néző korábbi útja) | 43.4 / 47.1 | 41.9 / 47.9 |
-| **nitrojpeg** (a menetek csővezetékben) | **10.6 / 15.8** | **9.5 / 14.3** |
+| dekóder | M1 | i9 | i5-9600K, Windows |
+|---|---|---|---|
+| libjpeg-turbo (TurboJPEG, a néző korábbi útja macOS-en) | 43.4 / 47.1 | 41.9 / 47.9 | |
+| WIC (a néző korábbi útja Windowson) | | | 118 / 128 |
+| **nitrojpeg** (a menetek csővezetékben) | **10.6 / 15.8** | **9.5 / 14.3** | **11.0 / 18.3** |
 
-Az M1-en 4×, az i9-en 4.4× gyorsabb. A 16 bites IDCT (pmaddwd / vmlal) csak egy szálon számított
+Az M1-en 4×, az i9-en 4.4×, az i5-ön 10.7× gyorsabb (a WIC-nél; 6 mag hyper-threading nélkül, a
+windowsos néző mipmapeket is készít, 1.5 ms). Az i5-ön egy szálon 29.3 ms (`bench/nbench -1`),
+4 workerrel 11.0, 6-tal (`-j 6`) 11.8. A 16 bites IDCT (pmaddwd / vmlal) csak egy szálon számított
 (az i9-en lassúak a 32 bites vektoros szorzások); a 4 worker az összes mag helyett az M1-et
 11.3-ról 10.6 ms-ra, az i9-et 11.7-ről 9.5 ms-ra gyorsította (többet nem lehet munkával ellátni,
 lásd: Progresszív JPEG; a `-j` többet is beállíthat).
