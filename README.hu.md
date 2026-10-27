@@ -240,8 +240,9 @@ színkonverzió a miénk, párhuzamosan: 8 / 10 / 12 bit, 4:2:0 / 4:2:2 / 4:4:4 
 párhuzamosan. Mindkét Linuxos néző ezt használja (a GTK-nak külön csomag nélkül nincs AVIF-betöltője),
 és a macOS-es is, ha a `scripts/get-deps.sh` lefordította a dav1d-t (univerzálisan: x86_64 + arm64; a
 `make DAV1D=0` az AVIF-et az ImageIO-ra hagyja), és a windowsos is, ha a `WINCC=… scripts/get-deps.sh`
-lefordította rá (`third_party/dav1d-win`; különben a WIC, az AV1 Store-bővítménnyel). 22, a webről mentett AVIF-en
-(i9, macOS): ImageIO 37 ms/kép, nitroavif 13,5 ms (egy 3000×3000-es 99 → 37 ms); a pixelek ±1-en belül egyeznek 4:4:4-nél és a
+lefordította rá (`third_party/dav1d-win`; különben a WIC, az AV1 Store-bővítménnyel). 41, webáruházakból és
+hírportálokról mentett AVIF dekódolása (300×200 … 3000×3000), ms/kép: i9 (macOS) ImageIO 31,7 → nitroavif
+10,0, M1 22,4 → 10,8, i5-9600K (Windows) 13,0 (a WIC Store-bővítmény nélkül egyiket sem nyitja meg). A pixelek ±1-en belül egyeznek 4:4:4-nél és a
 világosságban, 4:2:0-nál a színes éleken eltérnek, mert az ImageIO ismétli a chroma-mintákat, mi
 lineárisan interpolálunk (mint a JPEG-nél). Ellenőrizve az AOM tesztfájljain
 ([av1-avif](https://github.com/AOMediaCodec/av1-avif)) és a [Link-U mintáin](https://github.com/link-u/avif-sample-images)

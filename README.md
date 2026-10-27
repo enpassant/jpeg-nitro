@@ -159,8 +159,9 @@ the colour conversion is ours, in parallel: 8 / 10 / 12-bit, 4:2:0 / 4:2:2 / 4:4
 parallel. Both Linux viewers use it (GTK has no AVIF loader without an extra package), and so does
 the macOS viewer when `scripts/get-deps.sh` has built dav1d (universal: x86_64 + arm64; `make
 DAV1D=0` leaves AVIF to ImageIO), and the Windows viewer when `WINCC=… scripts/get-deps.sh` has
-cross-compiled it (`third_party/dav1d-win`; otherwise WIC, with the AV1 Store extension). On 22 AVIFs saved from the web (i9, macOS):
-ImageIO 37 ms/image, nitroavif 13.5 ms (a 3000×3000 one 99 → 37 ms); the same pixels within ±1 for 4:4:4 and for luma,
+cross-compiled it (`third_party/dav1d-win`; otherwise WIC, with the AV1 Store extension). Decoding 41 AVIFs saved from
+webshops and news sites (300×200 … 3000×3000), ms/image: i9 (macOS) ImageIO 31.7 → nitroavif 10.0, M1
+22.4 → 10.8, i5-9600K (Windows) 13.0 (WIC without the Store extension: none of them). The same pixels within ±1 for 4:4:4 and for luma,
 4:2:0 chroma differs at colour edges because ImageIO repeats chroma samples where we interpolate
 linearly (as for JPEG). Checked on the AOM test files ([av1-avif](https://github.com/AOMediaCodec/av1-avif))
 and [Link-U's samples](https://github.com/link-u/avif-sample-images) against their PNG references:
