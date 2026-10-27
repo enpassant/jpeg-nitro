@@ -144,11 +144,24 @@ PNG, GIF, BMP, damaged or CMYK JPEG) goes to stb_image. SDL3 is linked in static
 OpenGL and Wayland / X11 are loaded at run time, so it needs no GTK. `scripts/get-deps.sh` builds
 SDL3 (the window systems' development packages it needs are listed there). It builds on macOS too,
 only for testing (there OpenGL is slow; the Metal viewer stays the real one). `make sdl-dist` makes
-the one file to give away, `nitroview-linux-x64.tar.gz` (3 MB): built for x86-64-v3 (AVX2) instead
-of the build machine's CPU, libstdc++ and zlib linked in, it needs only glibc (2.35+ when built on
-Ubuntu 22.04). `nitroview-sdl --register` adds it to the desktop's applications for the current user
+the one file to give away, `nitroview-linux-x64.tar.gz` (4 MB): built for x86-64-v3 (AVX2) instead
+of the build machine's CPU, libstdc++, zlib and dav1d linked in, it needs only glibc (2.35+ when built
+on Ubuntu 22.04). `nitroview-sdl --register` adds it to the desktop's applications for the current user
 (a desktop file and the icon in `~/.local/share`: "Open with" in the file manager), `--unregister`
 removes it.
+
+**AVIF on Linux** (nitroavif, `src/nitroavif.c`): AV1 stills in a HEIF container, as webshops and
+CDNs send them more and more. The HEIF structure is read by our own code (`src/heif.h`, shared with
+nitroheic), AV1 is decoded by [dav1d](https://code.videolan.org/videolan/dav1d) (VideoLAN,
+BSD-2-Clause, built by `scripts/get-deps.sh` with meson + ninja in a Python virtual environment),
+the colour conversion is ours, in parallel: 8 / 10 / 12-bit, 4:2:0 / 4:2:2 / 4:4:4 / gray, BT.601 /
+709 / 2020 / RGB matrices, full or limited range, alpha over black, grids of tiles decoded in
+parallel. Both Linux viewers use it (GTK has no AVIF loader without an extra package); macOS and
+Windows keep ImageIO / WIC. On 22 AVIFs saved from the web (i9, macOS): ImageIO 37 ms/image,
+nitroavif 13.5 ms (a 3000×3000 one 99 → 37 ms); the same pixels within ±1 for 4:4:4 and for luma,
+4:2:0 chroma differs at colour edges because ImageIO repeats chroma samples where we interpolate
+linearly (as for JPEG). The output is identical on Linux and with any thread count; damaged files
+run clean under AddressSanitizer.
 
 The window is sized to the image: at exactly 100% if it is smaller than the screen, otherwise
 with the image's aspect ratio as large as fits (no black bars). When zooming in, the window grows with the image up to the screen
@@ -781,6 +794,8 @@ symlink). The measurements above were made on 50 private photos that are not in 
   else nitrohevc); `src/nitrohevc.c/.h`: our HEVC intra decoder
 - `src/nitrodng.c/.h`: DNG raw development (lossless JPEG, demosaicing, colour)
 - `src/nitrowebp.c/.h`: lossy WebP (VP8) decoder
+- `src/nitroavif.c/.h`: AVIF (AV1 through dav1d, our colour conversion); `src/heif.h`: the HEIF
+  structure, shared with nitroheic
 - `src/nitrotiff.c/.h`: TIFF decoder (strips / tiles in parallel); `bench/bgrxverify.m`: its and nitropng's BGRX output against ImageIO
 - `src/nitro_os.h`: what the decoders need from the OS (parallel loop, clock, CPU count)
 - `src/png_wuffs.c/.h`: optional Wuffs PNG decoding for the viewer (interlaced PNGs, which nitropng skips)
@@ -874,7 +889,7 @@ back-references and reversing the row filters, which don't depend on the tables.
 
 MIT, see [LICENSE](LICENSE). The optional dependencies downloaded by `scripts/get-deps.sh`
 have their own licenses: libjpeg-turbo (BSD-style / IJG / zlib), Wuffs (Apache-2.0),
-stb_image (public domain / MIT), lunasvg and plutovg (MIT; plutovg's rasterizer is FreeType's
+stb_image (public domain / MIT), SDL3 (zlib), dav1d (BSD-2-Clause), lunasvg and plutovg (MIT; plutovg's rasterizer is FreeType's
 smooth rasterizer, FreeType License: portions of this software are copyright © 2014 The FreeType
 Project (www.freetype.org), all rights reserved), libcdr and librevenge (MPL-2.0; our libcdr
 changes are in github.com/gereoffy/libcdr, the librevenge one in patches/), lcms2 (MIT), boost (Boost Software License), mimalloc (MIT). The inverse DCT implements the algorithm of jidctint.c from the

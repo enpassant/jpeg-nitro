@@ -224,11 +224,24 @@ stb_image bontja ki. Az SDL3 statikusan van belefordítva, az OpenGL-t és a Way
 tölti be, GTK nem kell hozzá. Az SDL3-at a `scripts/get-deps.sh` fordítja (az ehhez szükséges
 fejlesztői csomagok ott vannak felsorolva). macOS-en is lefordul, de csak teszteléshez (ott az OpenGL
 lassú; a valódi néző a Metal-os marad). A `make sdl-dist` készíti a továbbadható egyetlen fájlt, a
-`nitroview-linux-x64.tar.gz`-t (3 MB): a fordító gép processzora helyett x86-64-v3-ra (AVX2) fordítva,
-a libstdc++-szal és a zlibbel együtt, csak a glibc kell hozzá (Ubuntu 22.04-en fordítva 2.35-ös vagy
-újabb). A `nitroview-sdl --register` az aktuális felhasználónak felveszi az asztal alkalmazásai közé
+`nitroview-linux-x64.tar.gz`-t (4 MB): a fordító gép processzora helyett x86-64-v3-ra (AVX2) fordítva,
+a libstdc++-szal, a zlibbel és a dav1d-vel együtt, csak a glibc kell hozzá (Ubuntu 22.04-en fordítva
+2.35-ös vagy újabb). A `nitroview-sdl --register` az aktuális felhasználónak felveszi az asztal alkalmazásai közé
 (desktop fájl és ikon a `~/.local/share`-ben: „Megnyitás ezzel” a fájlkezelőben), az `--unregister`
 eltávolítja.
+
+**AVIF Linuxon** (nitroavif, `src/nitroavif.c`): AV1-es állókép HEIF-tárolóban, egyre több webáruház
+és CDN ezt küldi. A HEIF-szerkezetet a saját kódunk olvassa (`src/heif.h`, közös a nitroheic-kel), az
+AV1-et a [dav1d](https://code.videolan.org/videolan/dav1d) bontja ki (VideoLAN, BSD-2-Clause; a
+`scripts/get-deps.sh` fordítja meson + ninja segítségével, egy saját Python virtuális környezetben), a
+színkonverzió a miénk, párhuzamosan: 8 / 10 / 12 bit, 4:2:0 / 4:2:2 / 4:4:4 / szürke, BT.601 / 709 /
+2020 / RGB mátrix, teljes vagy szűkített tartomány, alfa fekete háttér fölött, a csemperácsok
+párhuzamosan. Mindkét Linuxos néző ezt használja (a GTK-nak külön csomag nélkül nincs AVIF-betöltője);
+macOS-en és Windowson marad az ImageIO / WIC. 22, a webről mentett AVIF-en (i9, macOS): ImageIO 37
+ms/kép, nitroavif 13,5 ms (egy 3000×3000-es 99 → 37 ms); a pixelek ±1-en belül egyeznek 4:4:4-nél és a
+világosságban, 4:2:0-nál a színes éleken eltérnek, mert az ImageIO ismétli a chroma-mintákat, mi
+lineárisan interpolálunk (mint a JPEG-nél). Linuxon és bármennyi szálon ugyanaz a kimenet; sérült
+fájlokon AddressSanitizer alatt is hibátlan.
 
 Az ablak a képhez igazodik: ha a kép kisebb a képernyőnél, pontosan 100%-on, egyébként a kép
 arányával, akkorára, amekkora kifér (fekete sávok nélkül). Nagyításkor az ablak a képpel együtt nő, a
@@ -707,6 +720,8 @@ A `-march=native` miatt a bináris a fordító gép CPU-jára optimalizált.
   `bench/sustain.c`: tartós terhelés, `bench/ab.sh`: zajtűrő A/B összehasonlítás
 - `src/nitropng.c/.h`: önálló párhuzamos PNG-dekóder
 - `src/nitropsd.c/.h`: párhuzamos PSD/PSB-dekóder (összefésült kép)
+- `src/nitroavif.c/.h`: AVIF (AV1 a dav1d-vel, saját színkonverzió); `src/heif.h`: a HEIF-szerkezet,
+  közös a nitroheic-kel
 - `src/nitrotiff.c/.h`: TIFF-dekóder (csíkok / csempék párhuzamosan); `bench/bgrxverify.m`: az ő és a nitropng BGRX-kimenete az ImageIO-val összevetve
 - `src/nitro_os.h`: amit a dekóderek a rendszerből használnak (párhuzamos ciklus, óra, magok száma)
 - `src/png_wuffs.c/.h`: opcionális Wuffs-os PNG-dekódolás a nézőhöz (az interlaced PNG-khez, ezeket a nitropng kihagyja)
@@ -802,7 +817,7 @@ másolására és a sorszűrők visszafejtésére megy el, amelyek nem függnek 
 
 MIT, lásd [LICENSE](LICENSE). A `scripts/get-deps.sh` által letöltött opcionális függőségeknek
 saját licencük van: libjpeg-turbo (BSD-szerű / IJG / zlib), Wuffs (Apache-2.0), stb_image
-(public domain / MIT), lunasvg és plutovg (MIT; a plutovg raszterizálója a FreeType
+(public domain / MIT), SDL3 (zlib), dav1d (BSD-2-Clause), lunasvg és plutovg (MIT; a plutovg raszterizálója a FreeType
 „smooth” raszterizálója, FreeType License: portions of this software are copyright © 2014 The
 FreeType Project (www.freetype.org), all rights reserved), libcdr és librevenge (MPL-2.0; a libcdr-
 módosításaink a github.com/gereoffy/libcdr-ben, a librevenge-é a patches/ mappában), lcms2 (MIT), boost (Boost Software License), mimalloc (MIT). Az IDCT a Independent JPEG Group libjpeg-jének jidctint.c

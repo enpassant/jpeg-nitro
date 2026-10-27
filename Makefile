@@ -103,6 +103,10 @@ LCMS       := third_party/lcms2
 BOOST      := third_party/boost
 # zlib for CorelDRAW in the Windows and the portable Linux build (macOS / Linux have it)
 ZLIB       := third_party/zlib
+# dav1d (VideoLAN, BSD-2-Clause) for AVIF in the Linux viewers (nitroavif), once scripts/get-deps.sh built it
+DAV1D_DIR  := third_party/dav1d
+DAV1D      ?= $(if $(wildcard $(DAV1D_DIR)/lib/libdav1d.a),1,0)
+DAV1D_LIB  := $(DAV1D_DIR)/lib/libdav1d.a
 CDR        ?= $(if $(and $(filter 1,$(SVG)),$(wildcard $(LIBCDR)/inc/libcdr/libcdr.h),$(wildcard $(LIBREVENGE)/inc/librevenge/librevenge.h),$(wildcard $(LCMS)/include/lcms2.h),$(wildcard $(BOOST)/boost/optional.hpp)),1,0)
 MI         := third_party/mimalloc
 MIMALLOC   ?= $(if $(and $(filter 1,$(SVG)),$(wildcard $(MI)/include/mimalloc-new-delete.h)),1,0)
@@ -154,7 +158,7 @@ build/nitrojpeg_ref.o: src/nitrojpeg.c src/nitrojpeg.h src/nitro_os.h | ljt
 build/nitropsd.o: src/nitropsd.c src/nitropsd.h src/nitropng.h src/nitro_os.h
 	@mkdir -p build
 	$(CC) $(CFLAGS) -c $< -o $@
-build/nitroheic.o: src/nitroheic.c src/nitroheic.h src/nitrohevc.h   # (macOS: VideoToolbox)
+build/nitroheic.o: src/nitroheic.c src/nitroheic.h src/nitrohevc.h src/heif.h   # (macOS: VideoToolbox)
 	@mkdir -p build
 	$(CC) $(CFLAGS) -c $< -o $@
 build/nitrohevc.o: src/nitrohevc.c src/nitrohevc.h
@@ -169,6 +173,9 @@ build/nitrowebp.o: src/nitrowebp.c src/nitrowebp.h src/nitro_os.h
 build/nitrotiff.o: src/nitrotiff.c src/nitrotiff.h src/nitropng.h src/nitro_os.h
 	@mkdir -p build
 	$(CC) $(CFLAGS) -c $< -o $@
+build/nitroavif.o: src/nitroavif.c src/nitroavif.h src/heif.h src/nitro_os.h
+	@mkdir -p build
+	$(CC) $(CFLAGS) -I$(DAV1D_DIR)/include -c $< -o $@
 
 build/nitropng.o: src/nitropng.c src/nitropng.h src/nitro_os.h
 	@mkdir -p build
@@ -186,7 +193,7 @@ $(LIBDIR)/nitropsd.o: src/nitropsd.c src/nitropsd.h src/nitropng.h src/nitro_os.
 	@mkdir -p $(LIBDIR)
 	$(CC) $(LIB_CFLAGS) -c $< -o $@
 
-$(LIBDIR)/nitroheic.o: src/nitroheic.c src/nitroheic.h src/nitrohevc.h src/nitro_os.h
+$(LIBDIR)/nitroheic.o: src/nitroheic.c src/nitroheic.h src/nitrohevc.h src/heif.h src/nitro_os.h
 	@mkdir -p $(LIBDIR)
 	$(CC) $(LIB_CFLAGS) -c $< -o $@
 
@@ -205,6 +212,10 @@ $(LIBDIR)/nitrowebp.o: src/nitrowebp.c src/nitrowebp.h src/nitro_os.h
 $(LIBDIR)/nitrotiff.o: src/nitrotiff.c src/nitrotiff.h src/nitropng.h src/nitro_os.h
 	@mkdir -p $(LIBDIR)
 	$(CC) $(LIB_CFLAGS) -c $< -o $@
+
+$(LIBDIR)/nitroavif.o: src/nitroavif.c src/nitroavif.h src/heif.h src/nitro_os.h
+	@mkdir -p $(LIBDIR)
+	$(CC) $(LIB_CFLAGS) -I$(DAV1D_DIR)/include -c $< -o $@
 
 $(LIB_SHARED): $(LIB_OBJS) src/libnitro.map
 	$(CC) -shared -Wl,-soname,libnitro.so -Wl,--version-script=src/libnitro.map -o $@ $(LIB_OBJS) $(THREADLIBS)
@@ -228,17 +239,19 @@ GNOME_CDR := $(if $(and $(GNOME_SVG),$(filter 1,$(CDR))),$(LIBDIR)/libnitrocdr.a
 $(LIBDIR)/libnitrocdr.a: src/nitrocdr.cpp src/nitrocdr.h $(CDR_STAMP)
 	$(call cdr_lib,$(CPUFLAGS) -fPIC)
 
-$(GNOME_BIN): $(GNOME_SRC) $(GNOME_HDR) $(LIB_STATIC) $(GNOME_SVG) $(GNOME_CDR)
+GNOME_AVIF := $(if $(filter 1,$(DAV1D)),$(LIBDIR)/nitroavif.o $(DAV1D_LIB))
+$(GNOME_BIN): $(GNOME_SRC) $(GNOME_HDR) $(LIB_STATIC) $(GNOME_SVG) $(GNOME_CDR) $(GNOME_AVIF)
 	@pkg-config --exists $(GNOME_PKGS) || { echo "missing GNOME development packages: gtk4 libadwaita-1"; exit 1; }
 	@pkg-config --atleast-version=4.6 gtk4 || { echo "GNOME frontend requires GTK 4.6 or newer"; exit 1; }
 	@pkg-config --atleast-version=1.1 libadwaita-1 || { echo "GNOME frontend requires libadwaita 1.1 or newer"; exit 1; }
 	$(CC) -std=gnu11 -O2 $(CPUFLAGS) $(PORTFLAGS) -Wall -Wextra -Wno-unused-parameter -Isrc -I$(GNOME_DIR) $(GNOME_CFLAGS) \
-	  $(if $(GNOME_SVG),-DNV_SVG) $(if $(GNOME_CDR),-DNV_CDR) $(GNOME_SRC) $(GNOME_CDR) $(GNOME_SVG) $(LIB_STATIC) \
+	  $(if $(GNOME_SVG),-DNV_SVG) $(if $(GNOME_CDR),-DNV_CDR) $(if $(GNOME_AVIF),-DNV_DAV1D) $(GNOME_SRC) $(GNOME_CDR) $(GNOME_SVG) \
+	  $(GNOME_AVIF) $(LIB_STATIC) \
 	  $(GNOME_LIBS) $(if $(GNOME_CDR),-lz) $(if $(GNOME_SVG),-lstdc++) $(THREADLIBS) -lm -o $@
 
 # GNOME viewer: command-line open plus a native Open/Quit application shell.
 gnome: $(GNOME_BIN)
-	@echo "built $(GNOME_BIN) (SVG: $(if $(GNOME_SVG),nitrosvg,GTK's loaders), CorelDRAW: $(if $(GNOME_CDR),yes,no))"
+	@echo "built $(GNOME_BIN) (SVG: $(if $(GNOME_SVG),nitrosvg,GTK's loaders), CorelDRAW: $(if $(GNOME_CDR),yes,no), AVIF: $(if $(GNOME_AVIF),dav1d,GTK's loaders))"
 
 # SDL3 viewer (Linux; builds on macOS too, for testing): SDL3 and the decoders linked in
 # statically, OpenGL and the window system (Wayland / X11) loaded at run time
@@ -254,21 +267,22 @@ SDL_DEC   := $(LIB_STATIC)
 SDL_VEC   := $(GNOME_CDR) $(GNOME_SVG)
 SDL_VLIBS := $(if $(GNOME_CDR),-lz) $(if $(GNOME_SVG),-lstdc++)
 endif
-SDL_VDEFS  = $(if $(filter %libnitrosvg.a,$(SDL_VEC)),-DNV_SVG) $(if $(filter %libnitrocdr.a,$(SDL_VEC)),-DNV_CDR)
+SDL_AVIF  := $(if $(filter 1,$(DAV1D)),$(if $(filter Darwin,$(UNAME_S)),build,$(LIBDIR))/nitroavif.o $(DAV1D_LIB))
+SDL_VDEFS  = $(if $(filter %libnitrosvg.a,$(SDL_VEC)),-DNV_SVG) $(if $(filter %libnitrocdr.a,$(SDL_VEC)),-DNV_CDR) $(if $(SDL_AVIF),-DNV_DAV1D)
 
 # the window icon, embedded as a byte array
 build/icon.inc: packaging/icon.png
 	@mkdir -p build
 	cd packaging && xxd -i icon.png > ../build/icon.inc
 
-$(SDL_BIN): src/nitroview_sdl.c build/icon.inc $(SDL_DEC) $(SDL_VEC) $(DEC_HDR) src/nitroheic.h src/nitrodng.h src/nitrowebp.h src/nitrotiff.h \
-            src/nitrosvg.h src/nitrocdr.h
+$(SDL_BIN): src/nitroview_sdl.c build/icon.inc $(SDL_DEC) $(SDL_VEC) $(SDL_AVIF) $(DEC_HDR) src/nitroheic.h src/nitrodng.h src/nitrowebp.h \
+            src/nitrotiff.h src/nitroavif.h src/nitrosvg.h src/nitrocdr.h
 	@test -f $(SDL3_DIR)/lib/libSDL3.a -a -f third_party/stb_image.h || { echo "missing SDL3 / stb_image: run scripts/get-deps.sh first"; exit 1; }
-	$(CC) $(CFLAGS) $(SDL_VDEFS) -Isrc -Ibuild -Ithird_party -I$(SDL3_DIR)/include src/nitroview_sdl.c $(SDL_DEC) $(SDL_VEC) \
-	  $(SDL_LIBS) $(SDL_VLIBS) $(THREADLIBS) -lm -o $@
+	$(CC) $(CFLAGS) $(SDL_VDEFS) -Isrc -Ibuild -Ithird_party -I$(SDL3_DIR)/include src/nitroview_sdl.c $(SDL_DEC) $(SDL_AVIF) \
+	  $(SDL_VEC) $(SDL_LIBS) $(SDL_VLIBS) $(THREADLIBS) -lm -o $@
 
 sdl: $(SDL_BIN)
-	@echo "built $(SDL_BIN) (SVG: $(if $(filter -DNV_SVG,$(SDL_VDEFS)),yes,no), CorelDRAW: $(if $(filter -DNV_CDR,$(SDL_VDEFS)),yes,no))"
+	@echo "built $(SDL_BIN) (SVG: $(if $(filter -DNV_SVG,$(SDL_VDEFS)),yes,no), CorelDRAW: $(if $(filter -DNV_CDR,$(SDL_VDEFS)),yes,no), AVIF: $(if $(SDL_AVIF),dav1d,no))"
 
 # Portable Linux build of it (make sdl-dist): x86-64-v3 (AVX2; DIST_ARCH=x86-64-v2 for older CPUs)
 # instead of -march=native, libstdc++ / libgcc and zlib linked in. One file that needs only the build
@@ -286,11 +300,12 @@ $(DIST_DIR)/libnitrocdr.a: src/nitrocdr.cpp src/nitrocdr.h $(CDR_STAMP)
 	$(call cdr_lib,-march=$(DIST_ARCH) -I$(ZLIB))
 $(DIST_DIR)/nitroview-sdl: src/nitroview_sdl.c build/icon.inc $(DEC_SRC) $(DEC_HDR) src/nitroheic.c src/nitroheic.h src/nitrohevc.c src/nitrohevc.h \
                            src/nitrodng.c src/nitrodng.h src/nitrowebp.c src/nitrowebp.h src/nitrotiff.c src/nitrotiff.h src/nitrosvg.h \
-                           src/nitrocdr.h $(DIST_VEC)
+                           src/nitrocdr.h src/nitroavif.c src/nitroavif.h src/heif.h $(DIST_VEC)
 	@test -f $(SDL3_DIR)/lib/libSDL3.a -a -f third_party/stb_image.h || { echo "missing SDL3 / stb_image: run scripts/get-deps.sh first"; exit 1; }
 	@mkdir -p $(@D)
 	$(CC) -O3 -march=$(DIST_ARCH) $(X86JCC) $(DEFS) -fblocks -Wall -Wextra -Wno-unused-parameter \
 	  $(if $(filter %libnitrosvg.a,$(DIST_VEC)),-DNV_SVG) $(if $(filter %libnitrocdr.a,$(DIST_VEC)),-DNV_CDR) \
+	  $(if $(filter 1,$(DAV1D)),-DNV_DAV1D -I$(DAV1D_DIR)/include src/nitroavif.c $(DAV1D_LIB)) \
 	  -Isrc -Ibuild -Ithird_party -I$(SDL3_DIR)/include src/nitroview_sdl.c $(DEC_SRC) src/nitroheic.c src/nitrohevc.c src/nitrodng.c \
 	  src/nitrowebp.c src/nitrotiff.c $(DIST_VEC) $(SDL_LIBS) $(if $(DIST_VEC),-Wl$(COMMA)-Bstatic -lstdc++ -Wl$(COMMA)-Bdynamic) -static-libgcc \
 	  -lpthread -lm -o $@
@@ -490,9 +505,9 @@ bench/robust: bench/robust.c src/nitrojpeg.c src/nitrojpeg.h | ljt
 bench/pngbench: bench/pngbench.m build/nitropng.o | deps
 	$(CC) -O3 $(CPUFLAGS) -w -fobjc-arc $^ -framework Foundation -framework ImageIO -framework CoreGraphics -o $@
 
-# nitrotiff / nitropng's BGRX output against ImageIO: pixels and time (macOS)
-bench/bgrxverify: bench/bgrxverify.m build/nitrotiff.o build/nitropng.o
-	$(CC) -O3 $(CPUFLAGS) -w -fobjc-arc $^ -framework Foundation -framework ImageIO -framework CoreGraphics -o $@
+# nitrotiff / nitropng / nitroavif's BGRX output against ImageIO: pixels and time (macOS)
+bench/bgrxverify: bench/bgrxverify.m build/nitrotiff.o build/nitropng.o build/nitroavif.o
+	$(CC) -O3 $(CPUFLAGS) -w -fobjc-arc $^ $(DAV1D_LIB) -framework Foundation -framework ImageIO -framework CoreGraphics -o $@
 
 bench/pngverify: bench/pngverify.c build/nitropng.o
 	$(CC) -O3 $(CPUFLAGS) $(PORTFLAGS) -w $^ -lz $(THREADLIBS) -o $@

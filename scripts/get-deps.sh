@@ -9,6 +9,8 @@
 #     lcms2 (MIT), the boost headers and (for Windows) zlib: CorelDRAW
 #     drawings in nitroview (sources only; the Makefile compiles them)
 #   - SDL3 (static): the Linux viewer's window (SDL=0 skips it)
+#   - dav1d (static, BSD-2-Clause, VideoLAN): the AV1 decoder for AVIF images (DAV1D=0 skips it);
+#     built with meson + ninja (pip, in third_party/tools/venv) and nasm
 # Nothing is installed system-wide.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -24,6 +26,7 @@ ZLIB_VER=1.3.1      # (only for the Windows build: macOS and Linux have it)
 MIMALLOC_VER=2.1.7
 BOOST_VER=1.89.0
 SDL_VER=3.4.18
+DAV1D_VER=1.5.4
 JOBS=$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 8)
 
 if [ ! -f stb_image.h ]; then
@@ -165,4 +168,18 @@ if [ "${SDL:-1}" = 1 ] && [ ! -f sdl3/.version-$SDL_VER ]; then
   rm -rf SDL3-$SDL_VER
   touch sdl3/.version-$SDL_VER
 fi
-echo "dependencies ready in third_party/ (libjpeg-turbo $LJT_VER, stb_image, wuffs, lunasvg, libcdr$([ "${SDL:-1}" = 1 ] && echo ", SDL $SDL_VER"))"
+# dav1d: AV1 decoding for AVIF (nitroavif); meson + ninja from pip, in a virtual environment of their own
+if [ "${DAV1D:-1}" = 1 ] && [ ! -f dav1d/.version-$DAV1D_VER ]; then
+  [ -x tools/venv/bin/meson ] || { python3 -m venv tools/venv && tools/venv/bin/pip install -q meson ninja; }
+  rm -rf dav1d dav1d-$DAV1D_VER
+  curl -fsSL -o dav1d.tar.xz https://downloads.videolan.org/pub/videolan/dav1d/$DAV1D_VER/dav1d-$DAV1D_VER.tar.xz
+  tar xf dav1d.tar.xz && rm dav1d.tar.xz
+  (cd dav1d-$DAV1D_VER && export PATH="$TP/tools/nasm/bin:$TP/tools/venv/bin:$PATH" &&
+   meson setup build --buildtype=release --default-library=static -Denable_tools=false -Denable_tests=false \
+     -Denable_examples=false --prefix="$TP/dav1d" --libdir=lib >/dev/null &&
+   meson install -C build >/dev/null)
+  rm -rf dav1d-$DAV1D_VER
+  touch dav1d/.version-$DAV1D_VER
+fi
+
+echo "dependencies ready in third_party/ (libjpeg-turbo $LJT_VER, stb_image, wuffs, lunasvg, libcdr$([ "${SDL:-1}" = 1 ] && echo ", SDL $SDL_VER")$([ "${DAV1D:-1}" = 1 ] && echo ", dav1d $DAV1D_VER"))"

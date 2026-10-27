@@ -6,6 +6,9 @@
 
 #include "../nitrodng.h"
 #include "../nitrotiff.h"
+#ifdef NV_DAV1D
+#include "../nitroavif.h"   // AVIF: AV1 through dav1d
+#endif
 #include "../nitroheic.h"
 #include "../nitrojpeg.h"
 #include "../nitropng.h"
@@ -502,6 +505,32 @@ static gboolean decode_dng(const guint8 *data, gsize len, DecodedPixels *out, in
     return TRUE;
 }
 
+#ifdef NV_DAV1D
+// AVIF: nitroavif (AV1 through dav1d, the colour conversion in parallel)
+static gboolean decode_avif(const guint8 *data, gsize len, DecodedPixels *out, GError **error) {
+    na_info info;
+    if (na_read_info(data, len, &info)) {
+        g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED, "Unsupported AVIF");
+        return FALSE;
+    }
+    gsize stride, size;
+    if (!checked_size(info.width, info.height, 4, &stride, &size, error)) return FALSE;
+    guint8 *bgrx = g_malloc(size);
+    if (na_decode(data, len, &info, bgrx, stride, decode_threads)) {
+        g_free(bgrx);
+        g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA, "AVIF decode failed");
+        return FALSE;
+    }
+    out->bytes = g_bytes_new_take(bgrx, size);
+    out->format = GDK_MEMORY_B8G8R8A8;   // (X: 255)
+    out->stride = stride;
+    out->width = info.width;
+    out->height = info.height;
+    out->orientation = info.orientation;
+    return TRUE;
+}
+#endif
+
 // TIFF: nitrotiff (strips / tiles in parallel; uncompressed: straight from the file)
 static gboolean decode_tiff(const guint8 *data, gsize len, DecodedPixels *out, GError **error) {
     nt_info info;
@@ -630,8 +659,15 @@ NitroImage *nitro_image_load(GFile *file, GError **error) {
         ok = decode_psd(data, len, &pixels, &nitro_error);
     else if (len >= 12 && memcmp(data, "RIFF", 4) == 0 && memcmp(data + 8, "WEBP", 4) == 0)
         ok = decode_webp(data, len, &pixels, &nitro_error);
-    else if (len >= 12 && memcmp(data + 4, "ftyp", 4) == 0)
+    else if (len >= 12 && memcmp(data + 4, "ftyp", 4) == 0) {
         ok = decode_heic(data, len, &pixels, &nitro_error);
+#ifdef NV_DAV1D
+        if (!ok) {   // (not a HEIC: an AVIF?)
+            g_clear_error(&nitro_error);
+            ok = decode_avif(data, len, &pixels, &nitro_error);
+        }
+#endif
+    }
     else if (len >= 4 && (memcmp(data, "II*", 4) == 0 || memcmp(data, "MM\0*", 4) == 0) &&
              (ok = decode_dng(data, len, &pixels, &ev3, &nitro_error)))
         dng = 1;
