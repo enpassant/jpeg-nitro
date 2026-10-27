@@ -31,6 +31,23 @@ static int dimg_refs(const uint8_t *d, const Box *iref, uint32_t from, uint32_t 
     return n;
 }
 
+// Is there a reference of this type from item `from` to item `to`?
+static int has_ref(const uint8_t *d, const Box *iref, const char *type, uint32_t from, uint32_t to) {
+    if (!iref->end) return 0;
+    int v = d[iref->start], idsz = v == 0 ? 2 : 4;
+    size_t ro = iref->start + 4;
+    Box b;
+    while (next_box(d, &ro, iref->end, &b)) {
+        if (b.type != FOURCC(type) || b.end - b.start < (size_t)idsz + 2) continue;
+        uint32_t f = idsz == 2 ? be16(d + b.start) : be32(d + b.start), k = be16(d + b.start + idsz);
+        size_t p = b.start + idsz + 2;
+        if (f != from || p + (size_t)k * idsz > b.end) continue;
+        for (uint32_t i = 0; i < k; i++)
+            if ((idsz == 2 ? be16(d + p + 2 * i) : be32(d + p + 4 * i)) == to) return 1;
+    }
+    return 0;
+}
+
 // the alpha plane of the primary image: the item whose auxl reference points to it (0: none)
 static uint32_t alpha_item(Heif *h, const Box *iref, uint32_t primary) {
     const uint8_t *d = h->d;
@@ -203,6 +220,8 @@ int na_read_info(const uint8_t *d, size_t len, na_info *info) {
             an != info->ntiles || ar != info->rows || ac != info->cols || atw != info->tile_w || ath != info->tile_h)
             goto out;
         info->alpha = 1;
+        // prem: the colours are already multiplied by alpha, i.e. over black - as they are drawn
+        if (has_ref(d, &iref, "prem", primary, aid)) info->alpha = 0;
     }
     // the transformations, in the order of the item's properties (HEIF applies them so): rotation,
     // mirroring and a crop (clap, by whole pixels) - the crop is mapped back onto the decoded image,

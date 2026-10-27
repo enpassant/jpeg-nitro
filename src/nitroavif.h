@@ -21,7 +21,7 @@
 typedef struct {
     int width, height;          // visible size (before rotation)
     int orientation;            // EXIF-style 1..8 from irot / imir
-    int alpha;                  // has an alpha plane
+    int alpha;                  // has an alpha plane (0 also when the colours are premultiplied by it)
     const uint8_t *icc;         // ICC profile in the file (NULL: none), and its size
     size_t icc_len;
     // internal
