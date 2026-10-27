@@ -3,6 +3,7 @@
 #   make                 nitroview; JPEGs nitrojpeg can't decode (damaged, CMYK ...) go to ImageIO
 #   make TURBOJPEG=1     with libjpeg-turbo (third_party/ljt, see scripts/get-deps.sh) as their
 #                        decoder before ImageIO, and --selftest
+#   make DAV1D=0         no dav1d: AVIF is decoded by ImageIO (with dav1d - scripts/get-deps.sh - nitroavif is ~3x faster)
 #   make WUFFS=1         with Wuffs (third_party/wuffs.c) for interlaced PNGs before ImageIO (nitropng
 #                        decodes all others)
 #   make SVG=0           no SVG support (lunasvg, from scripts/get-deps.sh)
@@ -130,6 +131,10 @@ ifeq ($(SVG),1)
 VIEWER_DEFS += -DNV_SVG
 VIEWER_OBJS += build/libnitrosvg.a
 VIEWER_LIBS += -lc++
+endif
+ifeq ($(DAV1D),1)   # AVIF: nitroavif with dav1d
+VIEWER_DEFS += -DNV_DAV1D -I$(DAV1D_DIR)/include
+VIEWER_OBJS += build/nitroavif.o $(DAV1D_LIB)
 endif
 ifeq ($(MIMALLOC),1)   # C++ new / delete (the SVG / CorelDRAW code) through mimalloc
 VIEWER_OBJS += build/mimalloc.o build/nitroalloc.o
@@ -409,7 +414,7 @@ build/mimalloc.o build/nitroalloc.o: src/nitroalloc.cpp $(wildcard $(MI)/.versio
 	$(call mimalloc_objs,$(CPUFLAGS))
 
 # rebuild the viewer when the optional parts change
-CONFIG := tj$(TURBOJPEG)-wuffs$(WUFFS)-svg$(SVG)-cdr$(CDR)-mi$(MIMALLOC)
+CONFIG := tj$(TURBOJPEG)-wuffs$(WUFFS)-svg$(SVG)-cdr$(CDR)-mi$(MIMALLOC)-dav1d$(DAV1D)
 build/.config-$(CONFIG):
 	@mkdir -p build
 	@rm -f build/.config-* nitroview
@@ -423,7 +428,7 @@ build/shaders.inc: src/shaders.metal
 nitroview: src/nitroview.m build/shaders.inc build/nitrojpeg.o build/nitropng.o build/nitropsd.o build/nitroheic.o build/nitrohevc.o build/nitrodng.o build/nitrowebp.o build/nitrotiff.o $(VIEWER_OBJS) build/.config-$(CONFIG) Makefile
 	$(CC) $(CFLAGS) $(VIEWER_DEFS) -Ibuild -fobjc-arc src/nitroview.m build/nitrojpeg.o build/nitropng.o build/nitropsd.o build/nitroheic.o build/nitrohevc.o build/nitrodng.o build/nitrowebp.o build/nitrotiff.o $(VIEWER_OBJS) $(VIEWER_LIBS) \
 	  $(FRAMEWORKS) -framework ImageIO -o $@
-	@echo "built nitroview (libjpeg-turbo fallback: $(if $(filter 1,$(TURBOJPEG)),yes,no), Wuffs PNG: $(if $(filter 1,$(WUFFS)),yes,no), SVG: $(if $(filter 1,$(SVG)),yes,no), CDR: $(if $(filter 1,$(CDR)),yes,no), ImageIO: always)"
+	@echo "built nitroview (libjpeg-turbo fallback: $(if $(filter 1,$(TURBOJPEG)),yes,no), Wuffs PNG: $(if $(filter 1,$(WUFFS)),yes,no), SVG: $(if $(filter 1,$(SVG)),yes,no), CDR: $(if $(filter 1,$(CDR)),yes,no), AVIF: $(if $(filter 1,$(DAV1D)),dav1d,ImageIO), ImageIO: always)"
 
 # Dock / Finder icon: every iconset size scaled from packaging/icon.png
 build/nitroview.icns: packaging/icon.png
@@ -444,6 +449,7 @@ MAC_MIN      := -mmacosx-version-min=12.0
 APPCPU_x86_64 := -march=x86-64-v3 $(X86JCC) $(DEFS)
 APPCPU_arm64  := -mcpu=apple-m1 $(DEFS)
 ljt_has = $(if $(filter 1,$(TURBOJPEG)),$(filter $(1),$(shell lipo -archs $(LJT)/lib/libturbojpeg.a 2>/dev/null)))
+dav1d_has = $(if $(filter 1,$(DAV1D)),$(filter $(1),$(shell lipo -archs $(DAV1D_LIB) 2>/dev/null)))
 build/app-%/png_wuffs.o: src/png_wuffs.c src/png_wuffs.h
 	@mkdir -p $(@D)
 	$(CC) -arch $* $(MAC_MIN) -O3 $(APPCPU_$*) -w -c $< -o $@
@@ -453,13 +459,14 @@ build/app-%/libnitrocdr.a: src/nitrocdr.cpp src/nitrocdr.h $(CDR_STAMP)
 	$(call cdr_lib,-arch $* $(MAC_MIN) $(APPCPU_$*))
 build/app-%/mimalloc.o: src/nitroalloc.cpp $(wildcard $(MI)/.version-*)
 	$(call mimalloc_objs,-arch $* $(MAC_MIN) $(APPCPU_$*))
-build/app-%/nitroview: src/nitroview.m build/shaders.inc $(DEC_SRC) $(DEC_HDR) src/nitroheic.c src/nitroheic.h src/nitrohevc.c src/nitrohevc.h src/nitrodng.c src/nitrodng.h src/nitrowebp.c src/nitrowebp.h src/nitrotiff.c src/nitrotiff.h $(if $(filter 1,$(WUFFS)),build/app-%/png_wuffs.o) \
+build/app-%/nitroview: src/nitroview.m build/shaders.inc $(DEC_SRC) $(DEC_HDR) src/nitroheic.c src/nitroheic.h src/nitrohevc.c src/nitrohevc.h src/nitrodng.c src/nitrodng.h src/nitrowebp.c src/nitrowebp.h src/nitrotiff.c src/nitrotiff.h src/nitroavif.c src/nitroavif.h src/heif.h $(if $(filter 1,$(WUFFS)),build/app-%/png_wuffs.o) \
                        $(if $(filter 1,$(SVG)),build/app-%/libnitrosvg.a) $(if $(filter 1,$(CDR)),build/app-%/libnitrocdr.a) \
                        $(if $(filter 1,$(MIMALLOC)),build/app-%/mimalloc.o) \
                        build/.config-$(CONFIG) Makefile
 	@mkdir -p $(@D)
 	$(CC) -arch $* $(MAC_MIN) -O3 $(APPCPU_$*) -Wall -Wextra -Wno-unused-parameter -Ibuild \
 	  $(if $(call ljt_has,$*),-DNV_TURBOJPEG -I$(LJT)/include) $(if $(filter 1,$(WUFFS)),-DNV_WUFFS) $(if $(filter 1,$(SVG)),-DNV_SVG) $(if $(filter 1,$(CDR)),-DNV_CDR) \
+	  $(if $(call dav1d_has,$*),-DNV_DAV1D -I$(DAV1D_DIR)/include src/nitroavif.c $(DAV1D_LIB)) \
 	  -fobjc-arc src/nitroview.m $(DEC_SRC) src/nitroheic.c src/nitrohevc.c src/nitrodng.c src/nitrowebp.c src/nitrotiff.c $(if $(filter 1,$(WUFFS)),$(@D)/png_wuffs.o) $(if $(filter 1,$(CDR)),$(@D)/libnitrocdr.a -liconv -lz) $(if $(filter 1,$(SVG)),$(@D)/libnitrosvg.a -lc++) \
 	  $(if $(filter 1,$(MIMALLOC)),$(@D)/mimalloc.o $(@D)/nitroalloc.o) $(if $(call ljt_has,$*),$(LJT)/lib/libturbojpeg.a -Wl$(COMMA)-w) $(FRAMEWORKS) -framework ImageIO -o $@
 build/nitroview-universal: $(foreach a,$(MAC_ARCHS),build/app-$(a)/nitroview)
@@ -477,7 +484,7 @@ app: build/nitroview-universal packaging/Info.plist build/nitroview.icns
 	cp packaging/Info.plist nitroview.app/Contents/
 	cp build/nitroview.icns nitroview.app/Contents/Resources/
 	codesign --force $(SIGN_FLAGS) --sign "$(SIGN_ID)" nitroview.app
-	@echo "built nitroview.app ($(foreach a,$(MAC_ARCHS),$(a)$(if $(call ljt_has,$(a)),+turbojpeg)) ; copy it to /Applications, then Finder: Get Info > Open with > nitroview > Change All)"
+	@echo "built nitroview.app ($(foreach a,$(MAC_ARCHS),$(a)$(if $(call ljt_has,$(a)),+turbojpeg)$(if $(call dav1d_has,$(a)),+dav1d)) ; copy it to /Applications, then Finder: Get Info > Open with > nitroview > Change All)"
 
 deps:
 	@test -f $(LJT)/lib/libturbojpeg.a -a -f third_party/stb_image.h -a -f third_party/wuffs.c || \

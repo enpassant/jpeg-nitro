@@ -150,15 +150,16 @@ on Ubuntu 22.04). `nitroview-sdl --register` adds it to the desktop's applicatio
 (a desktop file and the icon in `~/.local/share`: "Open with" in the file manager), `--unregister`
 removes it.
 
-**AVIF on Linux** (nitroavif, `src/nitroavif.c`): AV1 stills in a HEIF container, as webshops and
+**AVIF** (nitroavif, `src/nitroavif.c`): AV1 stills in a HEIF container, as webshops and
 CDNs send them more and more. The HEIF structure is read by our own code (`src/heif.h`, shared with
 nitroheic), AV1 is decoded by [dav1d](https://code.videolan.org/videolan/dav1d) (VideoLAN,
 BSD-2-Clause, built by `scripts/get-deps.sh` with meson + ninja in a Python virtual environment),
 the colour conversion is ours, in parallel: 8 / 10 / 12-bit, 4:2:0 / 4:2:2 / 4:4:4 / gray, BT.601 /
 709 / 2020 / RGB matrices, full or limited range, alpha over black, grids of tiles decoded in
-parallel. Both Linux viewers use it (GTK has no AVIF loader without an extra package); macOS and
-Windows keep ImageIO / WIC. On 22 AVIFs saved from the web (i9, macOS): ImageIO 37 ms/image,
-nitroavif 13.5 ms (a 3000×3000 one 99 → 37 ms); the same pixels within ±1 for 4:4:4 and for luma,
+parallel. Both Linux viewers use it (GTK has no AVIF loader without an extra package), and so does
+the macOS viewer when `scripts/get-deps.sh` has built dav1d (universal: x86_64 + arm64; `make
+DAV1D=0` leaves AVIF to ImageIO); Windows keeps WIC. On 22 AVIFs saved from the web (i9, macOS):
+ImageIO 37 ms/image, nitroavif 13.5 ms (a 3000×3000 one 99 → 37 ms); the same pixels within ±1 for 4:4:4 and for luma,
 4:2:0 chroma differs at colour edges because ImageIO repeats chroma samples where we interpolate
 linearly (as for JPEG). The output is identical on Linux and with any thread count; damaged files
 run clean under AddressSanitizer.
@@ -744,6 +745,7 @@ Requirements on macOS: Xcode Command Line Tools.
 make                 # nitroview; JPEGs nitrojpeg can't decode (damaged, CMYK ...) go to ImageIO
 make TURBOJPEG=1     # with libjpeg-turbo for those (from third_party/), and --selftest
 make WUFFS=1         # Wuffs for interlaced PNGs before ImageIO (nitropng decodes all others)
+make DAV1D=0         # AVIF through ImageIO instead of nitroavif + dav1d (built by scripts/get-deps.sh)
 make SVG=0           # no SVG (lunasvg)
 make CDR=0           # no CorelDRAW (libcdr)
 scripts/get-deps.sh  # download + build libjpeg-turbo (macOS: Intel + ARM), stb_image, Wuffs, lunasvg, libcdr into third_party/ (~1 min)

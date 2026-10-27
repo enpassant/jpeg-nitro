@@ -26,7 +26,7 @@ ZLIB_VER=1.3.1      # (only for the Windows build: macOS and Linux have it)
 MIMALLOC_VER=2.1.7
 BOOST_VER=1.89.0
 SDL_VER=3.4.18
-DAV1D_VER=1.5.4
+DAV1D_VER=1.5.4   # (macOS: universal since nitroview.app uses it too)
 JOBS=$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 8)
 
 if [ ! -f stb_image.h ]; then
@@ -168,16 +168,43 @@ if [ "${SDL:-1}" = 1 ] && [ ! -f sdl3/.version-$SDL_VER ]; then
   rm -rf SDL3-$SDL_VER
   touch sdl3/.version-$SDL_VER
 fi
-# dav1d: AV1 decoding for AVIF (nitroavif); meson + ninja from pip, in a virtual environment of their own
+# dav1d: AV1 decoding for AVIF (nitroavif); meson + ninja from pip, in a virtual environment of their own.
+# macOS: x86_64 + arm64 in one (universal) library, for the universal nitroview.app
+build_dav1d() {   # into $TP/$1; $2: meson cross file (macOS) or none
+  (cd dav1d-$DAV1D_VER && export PATH="$TP/tools/nasm/bin:$TP/tools/venv/bin:$PATH" &&
+   rm -rf build && meson setup build ${2:+--cross-file "$2"} --buildtype=release --default-library=static -Denable_tools=false \
+     -Denable_tests=false -Denable_examples=false --prefix="$TP/$1" --libdir=lib >/dev/null &&
+   meson install -C build >/dev/null)
+}
 if [ "${DAV1D:-1}" = 1 ] && [ ! -f dav1d/.version-$DAV1D_VER ]; then
   [ -x tools/venv/bin/meson ] || { python3 -m venv tools/venv && tools/venv/bin/pip install -q meson ninja; }
-  rm -rf dav1d dav1d-$DAV1D_VER
+  rm -rf dav1d dav1d-x86_64 dav1d-arm64 dav1d-$DAV1D_VER
   curl -fsSL -o dav1d.tar.xz https://downloads.videolan.org/pub/videolan/dav1d/$DAV1D_VER/dav1d-$DAV1D_VER.tar.xz
   tar xf dav1d.tar.xz && rm dav1d.tar.xz
-  (cd dav1d-$DAV1D_VER && export PATH="$TP/tools/nasm/bin:$TP/tools/venv/bin:$PATH" &&
-   meson setup build --buildtype=release --default-library=static -Denable_tools=false -Denable_tests=false \
-     -Denable_examples=false --prefix="$TP/dav1d" --libdir=lib >/dev/null &&
-   meson install -C build >/dev/null)
+  if [ "$(uname -s)" = Darwin ]; then
+    for A in x86_64 arm64; do
+      F=$([ $A = arm64 ] && echo aarch64 || echo x86_64)
+      cat > dav1d-$DAV1D_VER/$A.cross <<EOT
+[binaries]
+c = ['clang', '-arch', '$A', '-mmacosx-version-min=12.0']
+ar = 'ar'
+strip = 'strip'
+[built-in options]
+c_link_args = ['-arch', '$A', '-mmacosx-version-min=12.0']
+[host_machine]
+system = 'darwin'
+cpu_family = '$F'
+cpu = '$F'
+endian = 'little'
+EOT
+      build_dav1d dav1d-$A "$TP/dav1d-$DAV1D_VER/$A.cross"
+    done
+    cp -R dav1d-x86_64 dav1d
+    lipo -create dav1d-x86_64/lib/libdav1d.a dav1d-arm64/lib/libdav1d.a -output dav1d/lib/libdav1d.a
+    rm -rf dav1d-x86_64 dav1d-arm64
+  else
+    build_dav1d dav1d
+  fi
   rm -rf dav1d-$DAV1D_VER
   touch dav1d/.version-$DAV1D_VER
 fi

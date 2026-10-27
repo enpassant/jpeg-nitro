@@ -230,15 +230,16 @@ a libstdc++-szal, a zlibbel és a dav1d-vel együtt, csak a glibc kell hozzá (U
 (desktop fájl és ikon a `~/.local/share`-ben: „Megnyitás ezzel” a fájlkezelőben), az `--unregister`
 eltávolítja.
 
-**AVIF Linuxon** (nitroavif, `src/nitroavif.c`): AV1-es állókép HEIF-tárolóban, egyre több webáruház
+**AVIF** (nitroavif, `src/nitroavif.c`): AV1-es állókép HEIF-tárolóban, egyre több webáruház
 és CDN ezt küldi. A HEIF-szerkezetet a saját kódunk olvassa (`src/heif.h`, közös a nitroheic-kel), az
 AV1-et a [dav1d](https://code.videolan.org/videolan/dav1d) bontja ki (VideoLAN, BSD-2-Clause; a
 `scripts/get-deps.sh` fordítja meson + ninja segítségével, egy saját Python virtuális környezetben), a
 színkonverzió a miénk, párhuzamosan: 8 / 10 / 12 bit, 4:2:0 / 4:2:2 / 4:4:4 / szürke, BT.601 / 709 /
 2020 / RGB mátrix, teljes vagy szűkített tartomány, alfa fekete háttér fölött, a csemperácsok
-párhuzamosan. Mindkét Linuxos néző ezt használja (a GTK-nak külön csomag nélkül nincs AVIF-betöltője);
-macOS-en és Windowson marad az ImageIO / WIC. 22, a webről mentett AVIF-en (i9, macOS): ImageIO 37
-ms/kép, nitroavif 13,5 ms (egy 3000×3000-es 99 → 37 ms); a pixelek ±1-en belül egyeznek 4:4:4-nél és a
+párhuzamosan. Mindkét Linuxos néző ezt használja (a GTK-nak külön csomag nélkül nincs AVIF-betöltője),
+és a macOS-es is, ha a `scripts/get-deps.sh` lefordította a dav1d-t (univerzálisan: x86_64 + arm64; a
+`make DAV1D=0` az AVIF-et az ImageIO-ra hagyja); Windowson marad a WIC. 22, a webről mentett AVIF-en
+(i9, macOS): ImageIO 37 ms/kép, nitroavif 13,5 ms (egy 3000×3000-es 99 → 37 ms); a pixelek ±1-en belül egyeznek 4:4:4-nél és a
 világosságban, 4:2:0-nál a színes éleken eltérnek, mert az ImageIO ismétli a chroma-mintákat, mi
 lineárisan interpolálunk (mint a JPEG-nél). Linuxon és bármennyi szálon ugyanaz a kimenet; sérült
 fájlokon AddressSanitizer alatt is hibátlan.
@@ -665,6 +666,7 @@ macOS-en előfeltétel: Xcode Command Line Tools.
 make                 # néző; amit a nitrojpeg nem tud (sérült, CMYK ...), az ImageIO-hoz megy
 make TURBOJPEG=1     # ezekhez a libjpeg-turbóval (third_party/-ből), és --selftest
 make WUFFS=1         # Wuffs az interlaced PNG-khez az ImageIO előtt (minden mást a nitropng dekódol)
+make DAV1D=0         # AVIF az ImageIO-val a nitroavif + dav1d helyett (a scripts/get-deps.sh fordítja)
 make SVG=0           # SVG (lunasvg) nélkül
 make CDR=0           # CorelDRAW (libcdr) nélkül
 make app             # nitroview.app a Finderhez: universal (Intel + Apple Silicon), macOS 12-től,

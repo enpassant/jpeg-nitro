@@ -35,6 +35,9 @@
 #include "nitrodng.h"
 #include "nitrowebp.h"
 #include "nitrotiff.h"
+#ifdef NV_DAV1D
+#include "nitroavif.h"    // optional AVIF decoding (dav1d)
+#endif
 #ifdef NV_WUFFS
 #include "png_wuffs.h"   // optional fast PNG decoder
 #endif
@@ -272,7 +275,7 @@ done:
 
 // Decode one file into a Metal buffer. Runs on the decoder thread.
 enum { MODE_TURBOJPEG = -1, MODE_WUFFS = -2, MODE_IMAGEIO = -3, MODE_NITROPNG = -4, MODE_NITROPSD = -5, MODE_SVG = -6, MODE_CDR = -7,
-       MODE_NITROHEIC = -8, MODE_NITRODNG = -9, MODE_NITROWEBP = -10, MODE_NITROTIFF = -11 };
+       MODE_NITROHEIC = -8, MODE_NITRODNG = -9, MODE_NITROWEBP = -10, MODE_NITROTIFF = -11, MODE_NITROAVIF = -12 };
 static int g_nthreads = 0;   // -j
 static _Atomic int g_dng_ev3;   // DNG exposure correction in 1/3 EV (keys E / Shift+E)
 
@@ -291,6 +294,7 @@ static const char *mode_name(int m) {
     case MODE_NITRODNG: return "nitrodng";
     case MODE_NITROWEBP: return "nitrowebp";
     case MODE_NITROTIFF: return "nitrotiff";
+    case MODE_NITROAVIF: return "nitroavif";
     case MODE_SVG: return "svg";
     case MODE_CDR: return "cdr";
     default: return "?";
@@ -656,6 +660,27 @@ static Decoded *decode_file(NSString *path, BufferPool *pool, size_t align) {
             [pool put:buf];
         }
     }
+#ifdef NV_DAV1D
+    na_info ai;   // AVIF: AV1 through dav1d, our colour conversion (in parallel): ~3x faster than ImageIO
+    if (len >= 12 && !memcmp(bytes + 4, "ftyp", 4) && !na_read_info(bytes, len, &ai) && ai.width <= MAX_TEX &&
+        ai.height <= MAX_TEX) {
+        id<MTLBuffer> buf = bgra_buffer(d, ai.width, ai.height, pool, align);
+        if (buf && !na_decode(bytes, len, &ai, buf.contents, d.pitch[0], g_nthreads)) {
+            d.orientation = ai.orientation;
+            id cs = nil;   // its ICC profile, if an RGB one
+            if (ai.icc) {
+                CGColorSpaceRef c = CGColorSpaceCreateWithICCData((__bridge CFDataRef)[NSData dataWithBytes:ai.icc length:ai.icc_len]);
+                if (c && CGColorSpaceGetModel(c) == kCGColorSpaceModelRGB) cs = CFBridgingRelease(c);
+                else if (c) CGColorSpaceRelease(c);
+            }
+            d.colorSpace = cs ?: srgb_space();
+            d.bands = ai.ntiles;
+            bgra_done(d, buf, MODE_NITROAVIF, t1);
+            return d;
+        }
+        if (buf) [pool put:buf];
+    }
+#endif
     nw_info wi;   // lossy WebP: nitrowebp (the tokens parsed on one thread, the rows reconstructed on another)
     if (!nw_read_info(bytes, len, &wi) && wi.plane_w[0] <= MAX_TEX && wi.plane_h[0] <= MAX_TEX) {
         size_t total = 0;
@@ -2164,7 +2189,7 @@ static NSArray<NSString *> *collect_files(NSArray<NSString *> *args) {
         for (NSString *f in items) {
             NSString *ext = f.pathExtension.lowercaseString;
             static NSSet *exts;
-            if (!exts) exts = [NSSet setWithArray:@[@"jpg", @"jpeg", @"jpe", @"png", @"heic", @"heif", @"tif", @"tiff",
+            if (!exts) exts = [NSSet setWithArray:@[@"jpg", @"jpeg", @"jpe", @"png", @"heic", @"heif", @"avif", @"tif", @"tiff",
                                                     @"webp", @"gif", @"bmp", @"psd", @"psb", @"cr2", @"nef", @"nrw", @"arw", @"raf", @"dng",
 #ifdef NV_SVG
                                                     @"svg",
