@@ -15,7 +15,7 @@
 #                        Gatekeeper warning (once: xcrun notarytool store-credentials name ...)
 #   make tools           benchmarks and tests (need scripts/get-deps.sh first)
 #   make linux-lib       Linux shared + static decoder library: build/lib/libnitro.so/.a
-#   make gnome           GNOME/libadwaita viewer: nitroview-gnome (uses libnitro.so)
+#   make gnome           GNOME/libadwaita viewer: nitroview-gnome (the decoders linked in statically)
 #   make flatpak         GNOME 50 Flatpak bundle: nitroview-gnome.flatpak
 #   make linux           Linux (also the default there): library + portable tools - nbench,
 #                        pngverify, psdverify, the ASan robustness tests, and verify / robust
@@ -66,7 +66,8 @@ LIB_SHARED := $(LIBDIR)/libnitro.so
 LIB_STATIC := $(LIBDIR)/libnitro.a
 LIB_CFLAGS := $(CFLAGS) -fPIC
 
-# GNOME frontend: GtkBuilder template + libadwaita, linked against the Linux shared library.
+# GNOME frontend: GtkBuilder template + libadwaita, with the decoders from the static library
+# (one self-contained binary: nothing to find at run time).
 GNOME_PKGS     := gtk4 libadwaita-1
 # (= not :=: pkg-config runs only when the GNOME viewer is built, not on every make)
 GNOME_CFLAGS    = $(shell pkg-config --cflags $(GNOME_PKGS) 2>/dev/null)
@@ -80,7 +81,6 @@ GNOME_HDR      := $(GNOME_DIR)/nitro-window.h $(GNOME_DIR)/nitro-view.h $(GNOME_
                   src/nitro_os.h
 GNOME_BIN      := nitroview-gnome
 GNOME_APP_ID   := com.github.gereoffy.nitroview
-GNOME_RPATH    ?= $$ORIGIN/build/lib
 GNOME_DESKTOP  := build/gnome/$(GNOME_APP_ID).desktop
 GNOME_DESKTOP_SOURCE := packaging/gnome/$(GNOME_APP_ID).desktop
 GNOME_USER_DATA := $(HOME)/.local/share
@@ -215,13 +215,13 @@ GNOME_CDR := $(if $(and $(GNOME_SVG),$(filter 1,$(CDR))),$(LIBDIR)/libnitrocdr.a
 $(LIBDIR)/libnitrocdr.a: src/nitrocdr.cpp src/nitrocdr.h $(CDR_STAMP)
 	$(call cdr_lib,$(CPUFLAGS) -fPIC)
 
-$(GNOME_BIN): $(GNOME_SRC) $(GNOME_HDR) $(LIB_SHARED) $(GNOME_SVG) $(GNOME_CDR)
+$(GNOME_BIN): $(GNOME_SRC) $(GNOME_HDR) $(LIB_STATIC) $(GNOME_SVG) $(GNOME_CDR)
 	@pkg-config --exists $(GNOME_PKGS) || { echo "missing GNOME development packages: gtk4 libadwaita-1"; exit 1; }
 	@pkg-config --atleast-version=4.6 gtk4 || { echo "GNOME frontend requires GTK 4.6 or newer"; exit 1; }
 	@pkg-config --atleast-version=1.1 libadwaita-1 || { echo "GNOME frontend requires libadwaita 1.1 or newer"; exit 1; }
 	$(CC) -std=gnu11 -O2 $(CPUFLAGS) $(PORTFLAGS) -Wall -Wextra -Wno-unused-parameter -Isrc -I$(GNOME_DIR) $(GNOME_CFLAGS) \
-	  $(if $(GNOME_SVG),-DNV_SVG) $(if $(GNOME_CDR),-DNV_CDR) $(GNOME_SRC) $(GNOME_CDR) $(GNOME_SVG) -L$(LIBDIR) -lnitro \
-	  -Wl,-rpath,'$(GNOME_RPATH)' $(GNOME_LIBS) $(if $(GNOME_CDR),-lz) $(if $(GNOME_SVG),-lstdc++) $(THREADLIBS) -lm -o $@
+	  $(if $(GNOME_SVG),-DNV_SVG) $(if $(GNOME_CDR),-DNV_CDR) $(GNOME_SRC) $(GNOME_CDR) $(GNOME_SVG) $(LIB_STATIC) \
+	  $(GNOME_LIBS) $(if $(GNOME_CDR),-lz) $(if $(GNOME_SVG),-lstdc++) $(THREADLIBS) -lm -o $@
 
 # GNOME viewer: command-line open plus a native Open/Quit application shell.
 gnome: $(GNOME_BIN)

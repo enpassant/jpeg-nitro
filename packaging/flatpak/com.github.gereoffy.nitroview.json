@@ -27,9 +27,8 @@
       "buildsystem": "simple",
       "build-commands": [
         "make clean",
-        "case \"$FLATPAK_ARCH\" in x86_64) cpu='-march=x86-64-v3' ;; aarch64) cpu='-mcpu=generic' ;; *) cpu='' ;; esac; make CPUFLAGS=\"$cpu\" GNOME_RPATH='$$ORIGIN/../lib' linux-lib gnome",
+        "case \"$FLATPAK_ARCH\" in x86_64) cpu='-march=x86-64-v3' ;; aarch64) cpu='-mcpu=generic' ;; *) cpu='' ;; esac; make CPUFLAGS=\"$cpu\" gnome",
         "install -Dm755 nitroview-gnome /app/bin/nitroview-gnome",
-        "install -Dm755 build/lib/libnitro.so /app/lib/libnitro.so",
         "install -Dm644 packaging/gnome/com.github.gereoffy.nitroview.desktop /app/share/applications/com.github.gereoffy.nitroview.desktop",
         "install -Dm644 packaging/icon.png /app/share/icons/hicolor/512x512/apps/com.github.gereoffy.nitroview.png",
         "install -Dm644 packaging/flatpak/com.github.gereoffy.nitroview.metainfo.xml /app/share/metainfo/com.github.gereoffy.nitroview.metainfo.xml",

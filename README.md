@@ -117,7 +117,7 @@ colour management (images are shown as sRGB); touchpad gestures are untested.
 Ferenc Czirok) has the same keys, mouse and trackpad gestures, zoom and pan, full screen, slideshow
 (`-s`), one file → its folder, drag & drop and an Open dialog, Del / U and E / Shift+E. JPEG, PNG,
 PSD, HEIC (through nitrohevc), lossy WebP, DNG and the JPEG of camera raw files go through our
-decoders (as `libnitro.so`), SVG and CorelDRAW CDR / CMX through nitrosvg / nitrocdr (sharp when
+decoders (linked in statically), SVG and CorelDRAW CDR / CMX through nitrosvg / nitrocdr (sharp when
 zoomed in, [ / ] for the pages, when `scripts/get-deps.sh` has fetched them); the JPEG colour conversion is multi-threaded and gives exactly
 libjpeg-turbo's RGB (`bench/rgbverify`), PNG rows go to GTK without a copy, and the EXIF
 orientation is applied when drawing. Images are decoded on a background thread with the same
@@ -655,7 +655,8 @@ clang -O3 -march=native -fblocks bench/nbench.c src/nitrojpeg.c src/nitropng.c s
 PNG or PSD file into memory and decodes it several times (`-r`, default 5), `-j N` limits the
 threads.
 
-`make gnome` builds `nitroview-gnome` against `build/lib/libnitro.so` (GTK4 + libadwaita).
+`make gnome` builds `nitroview-gnome` (GTK4 + libadwaita) with the decoders of `build/lib/libnitro.a`
+linked in: one binary, nothing to find at run time.
 It opens JPEG, PNG, PSD/PSB, HEIC, lossy WebP, DNG and camera raw files through the Nitro decoders,
 SVG and CorelDRAW through nitrosvg / nitrocdr; files can be opened from the command line, the desktop or the native Open
 dialog. `make gnome-register` installs the desktop file and icon for the current user.

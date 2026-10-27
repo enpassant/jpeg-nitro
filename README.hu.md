@@ -199,7 +199,7 @@ színkezelés (a képek sRGB-ként jelennek meg); az érintőpados gesztusok nin
 **GNOME / Linux:** a `nitroview-gnome` ([src/gnome/](src/gnome), GTK 4 + libadwaita, Czirok Ferenc
 munkája) ugyanazokat a billentyűket, egér- és érintőpados gesztusokat, nagyítást és mozgatást, teljes
 képernyőt, diavetítést (`-s`), egy fájlból a mappája lapozását, ráhúzást és Megnyitás-ablakot tudja.
-A JPEG / PNG / PSD a három dekóderrel megy (`libnitro.so`-ként); a JPEG színkonverziója többszálú,
+A JPEG / PNG / PSD a három dekóderrel megy (statikusan belefordítva); a JPEG színkonverziója többszálú,
 és pontosan a libjpeg-turbo RGB-kimenetét adja (`bench/rgbverify`), a PNG-sorok másolás nélkül kerülnek
 a GTK-hoz, az EXIF-forgatást a rajzolás végzi. A képek háttérszálon dekódolódnak, ugyanazzal az
 előtöltéssel, mint macOS-en és Windowson (3 előre, 2 hátra). Minden mást (TIFF, GIF,
@@ -579,8 +579,8 @@ A `bench/nbench` (macOS-en `make bench/nbench` is) a hordozható benchmark: mind
 PSD-fájlt beolvas a memóriába, és többször dekódolja (`-r`, alapból 5); a `-j N` a szálak számát
 korlátozza.
 
-A `make gnome` a `build/lib/libnitro.so`-hoz linkelve fordítja le a `nitroview-gnome`-ot
-(GTK4 + libadwaita). A JPEG-, PNG- és PSD/PSB-fájlokat a Nitro dekóderekkel nyitja meg;
+A `make gnome` a `build/lib/libnitro.a` dekódereit belefordítva készíti el a `nitroview-gnome`-ot
+(GTK4 + libadwaita; egyetlen bináris, futáskor nem kell könyvtárat keresnie). A JPEG-, PNG- és PSD/PSB-fájlokat a Nitro dekóderekkel nyitja meg;
 fájl nyitható parancssorból, az asztali környezetből vagy a natív Megnyitás párbeszédablakkal.
 A `make gnome-register` az aktuális felhasználónak telepíti a desktop fájlt és az ikont.
 
