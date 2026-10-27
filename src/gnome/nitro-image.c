@@ -604,7 +604,7 @@ NitroImage *nitro_image_load(GFile *file, GError **error) {
         g_clear_error(&nitro_error);
         g_free(data);
     } else {
-        // Fallback: GTK's own loaders (progressive / CMYK JPEG, palette / 16-bit / interlaced
+        // Fallback: GTK's own loaders (CMYK / cut-off JPEG, palette / 16-bit / interlaced
         // PNG, TIFF, and what the installed gdk-pixbuf loaders read: GIF, BMP, WebP ...).
         // The EXIF orientation still comes from the file header where we can read it.
         pixels.orientation = 1;
