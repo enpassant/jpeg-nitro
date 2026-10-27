@@ -230,9 +230,13 @@ static bool bitstream_name(std::string &family, int &weight, bool &italic) {
     return true;
 }
 
-// Families of old CorelDRAW drawings that macOS does not have: the closest one it has.
+// Families of old CorelDRAW drawings that macOS does not have: the closest one it has; and the
+// Windows / macOS core fonts that Linux has only as their metric-compatible Liberation fonts.
 static const char *substitute(const std::string &family) {
-    static const char *const subst[][2] = {{"AvantGarde", "Avenir"}, {"Century Gothic", "Avenir"}};
+    static const char *const subst[][2] = {{"AvantGarde", "Avenir"}, {"Century Gothic", "Avenir"},
+                                           {"Arial", "Liberation Sans"}, {"Helvetica", "Liberation Sans"},
+                                           {"Times New Roman", "Liberation Serif"}, {"Times", "Liberation Serif"},
+                                           {"Courier New", "Liberation Mono"}, {"Courier", "Liberation Mono"}};
     for (const auto &e : subst)
         if (!strcasecmp(family.c_str(), e[0])) return e[1];
     return nullptr;
@@ -240,7 +244,7 @@ static const char *substitute(const std::string &family) {
 
 // CorelDRAW font names: "Arial", "Arial CE" (Central European variants of old fonts),
 // "Times New Roman Bold", "Futura Lt BT" ... -> a face of the system fonts, falling back to
-// Arial / Helvetica.
+// Arial / Helvetica (Linux: Liberation Sans / DejaVu Sans).
 plutovg_font_face_t *find_font(const std::string &name, bool bold, bool italic, std::string *familyOut = nullptr) {
     plutovg_font_face_cache_t *cache = font_cache();
     std::string family = name;
@@ -262,12 +266,13 @@ plutovg_font_face_t *find_font(const std::string &name, bool bold, bool italic, 
     const char *sub = substitute(family);
     // a Bitstream font also under Linotype's name of the family ("Futura Lt BT": "Futura LT" Light)
     std::string linotype = bitstream ? family + " LT" : family;
-    const char *tries[] = {name.c_str(), linotype.c_str(), family.c_str(), sub ? sub : family.c_str(), "Arial", "Helvetica"};
+    const char *tries[] = {name.c_str(), linotype.c_str(), family.c_str(), sub ? sub : family.c_str(),
+                           "Arial", "Helvetica", "Liberation Sans", "DejaVu Sans"};   // (from [4]: the last resorts)
     for (const char *t : tries) {
         // upright text: not from a family that has only italic faces (an installed "Futura Lt BT"
         // Light Italic alone made every Futura text italic); the next candidate instead
-        if (!italic && t != tries[4] && t != tries[5] && !plutovg_font_face_cache_has_style(cache, t, false) &&
-            plutovg_font_face_cache_has_style(cache, t, true))
+        if (!italic && t != tries[4] && t != tries[5] && t != tries[6] && t != tries[7] &&
+            !plutovg_font_face_cache_has_style(cache, t, false) && plutovg_font_face_cache_has_style(cache, t, true))
             continue;
         plutovg_font_face_t *f = plutovg_font_face_cache_get_weight(cache, t, weight, italic);
         if (f) return f;
@@ -281,7 +286,8 @@ plutovg_font_face_t *fallback_font(const std::string &name, bool bold, bool ital
     std::string family;
     find_font(name, bold, italic, &family);
     const char *sub = substitute(family);
-    const char *tries[] = {sub ? sub : "Arial", "Arial", "Helvetica", "Lucida Grande", "Arial Unicode MS"};
+    const char *tries[] = {sub ? sub : "Arial", "Arial", "Helvetica", "Lucida Grande", "Arial Unicode MS", "Liberation Sans",
+                           "DejaVu Sans"};
     for (const char *t : tries) {
         plutovg_font_face_t *f = find_font(t, bold, italic);
         if (f && plutovg_font_face_has_glyph(f, cp)) return f;
