@@ -2528,7 +2528,8 @@ static void handle(const SDL_Event *e) {
             V.dragging = 1;
             V.drag_x = e->button.x;
             V.drag_y = e->button.y;
-            if (V.zoomed) SDL_SetCursor(SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_MOVE));
+            static SDL_Cursor *move;   // (made once: SDL keeps cursors until destroyed)
+            if (V.zoomed && (move || (move = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_MOVE)))) SDL_SetCursor(move);
         } else if (e->button.button == SDL_BUTTON_RIGHT) {
             page((SDL_GetModState() & SDL_KMOD_SHIFT) ? -1 : 1);
         } else if (e->button.button == SDL_BUTTON_X1) {
