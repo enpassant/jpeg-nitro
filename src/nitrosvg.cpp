@@ -77,7 +77,7 @@ static std::string var_fallbacks(const std::string &s) {
 // Line breaks in text: SVG 1.1 (xml:space="default") removes them, newer renderers (lunasvg,
 // resvg, CSS white-space) turn them into spaces. Old exporters (LibreOffice) split words into
 // tspans on separate lines, "N\n...\népszínház" -> "N épszínház": removed, as SVG 1.1 says.
-// Not when the file uses xml:space="preserve" anywhere (there they do become spaces).
+// Not when the file uses xml:space="preserve" (or 'preserve') anywhere (there they do become spaces).
 static std::string text_newlines(const std::string &s) {
     std::string out;
     out.reserve(s.size());
@@ -109,7 +109,8 @@ nitrosvg *nitrosvg_load(const void *data, size_t len) {
     std::string src(static_cast<const char *>(data), len);
     if (src.find("<svg:svg") != std::string::npos) src = unprefix(src);
     if (src.find("var(--") != std::string::npos) src = var_fallbacks(src);
-    if (src.find("<text") != std::string::npos && src.find("xml:space=\"preserve\"") == std::string::npos)
+    if (src.find("<text") != std::string::npos && src.find("xml:space=\"preserve\"") == std::string::npos &&
+        src.find("xml:space='preserve'") == std::string::npos)
         src = text_newlines(src);
     const char *s = src.data();
     len = src.size();
