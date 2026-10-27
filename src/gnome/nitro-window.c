@@ -433,7 +433,11 @@ static void page_done(GObject *source, GAsyncResult *result, gpointer user_data)
     NitroWindow *self = NITRO_WINDOW(source);
     PageJob *j = g_task_get_task_data(G_TASK(result));
     NitroImage *image = g_task_propagate_pointer(G_TASK(result), NULL);
-    if (image && self->loader && nitro_loader_replace_image(self->loader, j->index, j->vector, image) &&
+    if (image && !self->loader) {   // (the window was closed meanwhile)
+        nitro_image_free(image);
+        return;
+    }
+    if (image && nitro_loader_replace_image(self->loader, j->index, j->vector, image) &&
         j->index == self->index) {   // (zoom and position stay, as when paging images)
         nitro_image_free(self->image);
         self->image = NULL;
