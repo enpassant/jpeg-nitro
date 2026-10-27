@@ -495,6 +495,7 @@ int nj_find_embedded(const uint8_t *data, size_t len, size_t *offset, size_t *si
 
 int nj_read_info(const uint8_t *data, size_t len, nj_info *info) {
     Jpeg *j = malloc(sizeof *j);
+    if (!j) return -1;
     int rc = parse(data, len, j);
     *info = j->info;
     free(j);
@@ -873,7 +874,7 @@ static int nj_decode(const uint8_t *data, size_t len, const Output *o, int nthre
     if (!st) st = &dummy;
     memset(st, 0, sizeof *st);
     Jpeg *j = malloc(sizeof *j);
-    if (parse(data, len, j) || !j->info.supported || j->progressive || j->hdr_overflow) { free(j); return -1; }
+    if (!j || parse(data, len, j) || !j->info.supported || j->progressive || j->hdr_overflow) { free(j); return -1; }
     const nj_info *fi = &j->info;
     if (nthreads <= 0) nthreads = 4 * ncpu();   // many more pieces than cores: dynamic load balance (see README)
     const int R = fi->mcu_rows, mpr = fi->mcus_per_row;
@@ -1638,8 +1639,9 @@ static void *pool_take(size_t need, size_t *cap) {
         return p;
     }
     pthread_mutex_unlock(&g_pool_mu);
-    *cap = need;
-    return malloc(need);
+    void *p = malloc(need);
+    *cap = p ? need : 0;
+    return p;
 }
 
 static void pool_give(void *p, size_t cap) {
@@ -1657,12 +1659,14 @@ static void pool_give(void *p, size_t cap) {
     pthread_mutex_unlock(&g_pool_mu);
 }
 
-static void *pool_grow(void *p, size_t *cap, size_t need) {   // like realloc, keeps contents
-    if (need <= *cap) return p;
+static int pool_grow(void **p, size_t *cap, size_t need) {   // like realloc, keeps contents; -1: *p unchanged
+    if (need <= *cap) return 0;
     size_t ncap = need + need / 2;
-    void *np = realloc(p, ncap);
+    void *np = realloc(*p, ncap);
+    if (!np) return -1;
+    *p = np;
     *cap = ncap;
-    return np;
+    return 0;
 }
 
 // --- pipelined chunk processing (own engine, no restart markers) ---
@@ -1691,7 +1695,8 @@ typedef struct {
 static int g_chunks = 0;
 void nj_set_chunks(int n) { g_chunks = n; }
 
-static void chunk_decode(const Jpeg *j, const uint8_t *buf, Chunk *s, size_t max_mcus) {
+// Returns -1 if out of memory.
+static int chunk_decode(const Jpeg *j, const uint8_t *buf, Chunk *s, size_t max_mcus) {
     const size_t msz = (size_t)j->nblocks * 64;
     BR br;
     br_init(&br, buf, s->start);
@@ -1699,8 +1704,9 @@ static void chunk_decode(const Jpeg *j, const uint8_t *buf, Chunk *s, size_t max
     int32_t dc[3] = {0, 0, 0};
     size_t n = 0;
     while (pos < s->end && n < max_mcus) {
-        if ((n + 2) * sizeof(Rec) > s->rec_cap) s->rec = pool_grow(s->rec, &s->rec_cap, (n + 2) * sizeof(Rec));
-        if ((n + 1) * msz * 2 > s->coef_cap) s->coef = pool_grow(s->coef, &s->coef_cap, (n + 1) * msz * 2);
+        if (pool_grow((void **)&s->rec, &s->rec_cap, (n + 2) * sizeof(Rec)) ||
+            pool_grow((void **)&s->coef, &s->coef_cap, (n + 1) * msz * 2))
+            return -1;
         Rec *r = &s->rec[n];
         r->pos = pos;
         memcpy(r->dc, dc, sizeof dc);
@@ -1712,10 +1718,11 @@ static void chunk_decode(const Jpeg *j, const uint8_t *buf, Chunk *s, size_t max
         n++;
         pos = br_pos(&br, buf);
     }
-    if ((n + 2) * sizeof(Rec) > s->rec_cap) s->rec = pool_grow(s->rec, &s->rec_cap, (n + 2) * sizeof(Rec));
+    if (pool_grow((void **)&s->rec, &s->rec_cap, (n + 2) * sizeof(Rec))) return -1;
     s->rec[n].pos = pos;
     memcpy(s->rec[n].dc, dc, sizeof dc);
     s->n = n;
+    return 0;
 }
 
 // Did a record in [lo, hi) fail? (The garbage before a chunk synchronises may fail many times.)
@@ -1816,7 +1823,7 @@ static int nj_decode_prog(const Jpeg *j, const uint8_t *data, size_t len, const 
 
 static int nj_decode_own(const uint8_t *data, size_t len, const Output *o, int nthreads, nj_stats *st) {
     Jpeg *j = malloc(sizeof *j);
-    if (parse(data, len, j) || !j->info.supported) { free(j); return -1; }
+    if (!j || parse(data, len, j) || !j->info.supported) { free(j); return -1; }
     if (j->progressive) {
         int r = nj_decode_prog(j, data, len, o, st);
         free(j);
@@ -1827,13 +1834,16 @@ static int nj_decode_own(const uint8_t *data, size_t len, const Output *o, int n
     const int R = fi->mcu_rows, mpr = fi->mcus_per_row;
     const size_t total = (size_t)R * mpr;
     const size_t msz = (size_t)j->nblocks * 64;   // coefficients per MCU
-    int rc = -1;
+    int rc = -1, fail = 0, *const pfail = &fail;
     double t0 = now_ms();
+    uint8_t *clean = NULL;
+    size_t clean_cap = 0;
 
     // --- 1. scan (parallel): end of scan, stuffing, restart markers ---
     const size_t lo = j->scan_start;
     const int T = nthreads;
     ScanChunk *sc = calloc(T, sizeof *sc);
+    if (!sc) { free(j); return -1; }
     for (int t = 0; t < T; t++) {
         sc[t].a = lo + (len - lo) * t / T;
         sc[t].b = lo + (len - lo) * (t + 1) / T;
@@ -1846,14 +1856,15 @@ static int nj_decode_own(const uint8_t *data, size_t len, const Output *o, int n
 
     // --- 2. unstuff into a clean stream, dropping RST markers (parallel) ---
     size_t *coff = malloc((T + 1) * sizeof *coff);
+    if (!coff) goto out;
     size_t acc = 0;
     for (int t = 0; t < T; t++) {
         coff[t] = (sc[t].a < scan_end ? sc[t].a : scan_end) - lo - acc;
         if (t <= tend) acc += sc[t].removed;
     }
     const size_t clean_len = (scan_end - lo) - acc;
-    size_t clean_cap;
-    uint8_t *clean = pool_take(clean_len + PAD_BYTES, &clean_cap);
+    clean = pool_take(clean_len + PAD_BYTES, &clean_cap);
+    if (!clean) { free(coff); goto out; }
     memset(clean + clean_len, 0, PAD_BYTES);
     parallel_for(T, ^(size_t t) {
         ScanChunk *c = &sc[t];
@@ -1873,8 +1884,10 @@ static int nj_decode_own(const uint8_t *data, size_t len, const Output *o, int n
             uint8_t nb = i + 1 < len ? data[i + 1] : 0;
             if (nb >= 0xD0 && nb <= 0xD7) {          // RST: dropped, next interval starts here
                 if (c->nrstc == cap) {
+                    size_t *more = realloc(c->rstc, (cap ? cap * 2 : 64) * sizeof *c->rstc);
+                    if (!more) { *pfail = 1; return; }
+                    c->rstc = more;
                     cap = cap ? cap * 2 : 64;
-                    c->rstc = realloc(c->rstc, cap * sizeof *c->rstc);
                 }
                 c->rstc[c->nrstc++] = (size_t)(out - clean);
                 i += 2;
@@ -1888,9 +1901,9 @@ static int nj_decode_own(const uint8_t *data, size_t len, const Output *o, int n
         }
     });
     free(coff);
+    if (fail) goto out;
     st->scan_ms = now_ms() - t0;
     const uint64_t Lbits = (uint64_t)clean_len * 8;
-    int fail = 0, *const pfail = &fail;
 
     if (fi->restart_interval) {
         // --- restart intervals: decode + IDCT fused, in parallel, no big buffers ---
@@ -1899,6 +1912,7 @@ static int nj_decode_own(const uint8_t *data, size_t len, const Output *o, int n
         size_t nr = 0;
         for (int t = 0; t <= tend; t++) nr += sc[t].nrstc;
         size_t *istart = malloc((nr + 2) * sizeof *istart);
+        if (!istart) goto out;
         istart[0] = 0;
         size_t k = 1;
         for (int t = 0; t <= tend; t++)
@@ -1939,6 +1953,7 @@ static int nj_decode_own(const uint8_t *data, size_t len, const Output *o, int n
         const int C = g_chunks > 0 ? g_chunks : 32 * ncpu();   // ~200 KB of coefficients each
         const int W = t_workers > 0 ? t_workers : g_max_workers > 0 ? g_max_workers : ncpu();
         Chunk *ch = calloc(C, sizeof *ch);
+        if (!ch) goto out;
         for (int i = 0; i < C; i++) {
             ch[i].start = (uint64_t)(clean_len * i / C) * 8;
             ch[i].end = i == C - 1 ? Lbits : (uint64_t)(clean_len * (i + 1) / C) * 8;
@@ -1956,7 +1971,9 @@ static int nj_decode_own(const uint8_t *data, size_t len, const Output *o, int n
                 Chunk *c = &ch[i];
                 c->rec = pool_take(est * sizeof(Rec), &c->rec_cap);
                 c->coef = pool_take(est * msz * 2, &c->coef_cap);
-                if (!__atomic_load_n(&Sp->fail, __ATOMIC_RELAXED)) chunk_decode(j, clean, c, total + 1);
+                if (!__atomic_load_n(&Sp->fail, __ATOMIC_RELAXED) &&
+                    (!c->rec || !c->coef || chunk_decode(j, clean, c, total + 1)))   // (out of memory: fails)
+                    __atomic_store_n(&Sp->fail, 1, __ATOMIC_RELAXED);
                 __atomic_store_n(&c->state, 1, __ATOMIC_RELEASE);
                 if (nown < 4096) own[nown++] = (int)i;
                 stitch_advance(j, o, clean, Lbits, total, ch, C, Sp, st);
@@ -2137,10 +2154,11 @@ static int prog_layout(Prog *P) {
     return P->nscan ? 0 : -1;
 }
 
-// Unstuffs a scan's data (0xFF 0x00 -> 0xFF, fill bytes and RST markers dropped).
-static void prog_unstuff(PScan *s, const uint8_t *d) {
+// Unstuffs a scan's data (0xFF 0x00 -> 0xFF, fill bytes and RST markers dropped). -1: out of memory.
+static int prog_unstuff(PScan *s, const uint8_t *d) {
     size_t n = s->raw1 - s->raw0, i = s->raw0, cap = 0;
     s->clean = pool_take(n + PAD_BYTES, &s->clean_cap);
+    if (!s->clean) return -1;
     uint8_t *out = s->clean;
     while (i < s->raw1) {
         const uint8_t *f = memchr(d + i, 0xFF, s->raw1 - i);
@@ -2155,12 +2173,18 @@ static void prog_unstuff(PScan *s, const uint8_t *d) {
         if (nb == 0) {
             *out++ = 0xFF;
         } else {                        // RST (the scan ends at any other marker)
-            if (s->nrst == cap) { cap = cap ? 2 * cap : 64; s->rst = realloc(s->rst, cap * sizeof *s->rst); }
+            if (s->nrst == cap) {
+                size_t *more = realloc(s->rst, (cap ? 2 * cap : 64) * sizeof *s->rst);
+                if (!more) return -1;
+                s->rst = more;
+                cap = cap ? 2 * cap : 64;
+            }
             s->rst[s->nrst++] = (size_t)(out - s->clean);
         }
     }
     s->clean_len = (size_t)(out - s->clean);
     memset(out, 0, PAD_BYTES);
+    return 0;
 }
 
 static inline unsigned br_bits(BR *br, int n) {   // n <= 16 bits, n may be 0
@@ -2491,9 +2515,10 @@ static void prog_worker(Prog *P) {
             s->ready = 1;
             if (P->nwait) pthread_cond_signal(&P->cv);   // more may be there: pass it on
             pthread_mutex_unlock(&P->mu);
-            prog_unstuff(s, P->data);
+            int err = prog_unstuff(s, P->data);
             pthread_mutex_lock(&P->mu);
             s->ready = 2;
+            if (err) P->fail = 1;
         } else if (P->clear_next < P->R) {
             int c = P->clear_next / P->K;
             r0 = P->clear_next;
