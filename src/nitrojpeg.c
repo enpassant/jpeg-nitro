@@ -1672,7 +1672,7 @@ typedef struct {
     int16_t *coef; size_t coef_cap;   // coefficients per record
     size_t n;
     int nerr;
-    uint32_t err[32];
+    uint32_t err[32], err_last;       // the first 32 records that failed, and the last one
     long off;                         // absolute MCU index = off + record index
     int32_t dcoff[3];
     size_t lo, hi;                    // valid records after stitching
@@ -1706,6 +1706,7 @@ static void chunk_decode(const Jpeg *j, const uint8_t *buf, Chunk *s, size_t max
         memcpy(r->dc, dc, sizeof dc);
         if (decode_mcu_coef(j, &br, dc, s->coef + n * msz)) {
             if (s->nerr < 32) s->err[s->nerr] = (uint32_t)n;
+            s->err_last = (uint32_t)n;
             s->nerr++;
         }
         n++;
@@ -1717,11 +1718,16 @@ static void chunk_decode(const Jpeg *j, const uint8_t *buf, Chunk *s, size_t max
     s->n = n;
 }
 
+// Did a record in [lo, hi) fail? (The garbage before a chunk synchronises may fail many times.)
 static int chunk_err_in(const Chunk *s, size_t lo, size_t hi) {
-    if (s->nerr > 32) return 1;
-    for (int i = 0; i < s->nerr; i++)
+    if (!s->nerr) return 0;
+    if (s->err_last >= lo && s->err_last < hi) return 1;
+    for (int i = 0; i < s->nerr && i < 32; i++)
         if (s->err[i] >= lo && s->err[i] < hi) return 1;
-    return 0;
+    if (s->nerr <= 33) return 0;
+    // the ones not kept are somewhere between err[31] and err_last
+    size_t a = (size_t)s->err[31] + 1 > lo ? (size_t)s->err[31] + 1 : lo, b = s->err_last < hi ? s->err_last : hi;
+    return a < b;
 }
 
 // Claims a stitched chunk and runs its IDCT. Returns 1 if this call did it.
