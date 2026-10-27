@@ -245,6 +245,7 @@ typedef struct {
     GLuint tex;                        // converted RGBA + mips (main thread)
     double read_ms, decode_ms, upload_ms, conv_ms;
     int mode, bands;
+    unsigned serial;              // (unique: the image a page / DNG job's result replaces)
     int ev3;                           // a DNG: the exposure correction it was developed with (1/3 EV)
     int limited;                       // KIND_YUV: limited range (Y 16..235, as WebP), not full range
 #ifdef NV_VECTOR
@@ -255,6 +256,9 @@ typedef struct {
     double dx, dy, dw, dh, dscale;     // resolution, over the rectangle dx, dy, dw, dh of the image
 #endif
 } Decoded;
+
+static SDL_AtomicInt g_serial;
+static unsigned next_serial(void) { return (unsigned)SDL_AddAtomicInt(&g_serial, 1) + 1; }
 
 static const char *mode_name(int m) {
     switch (m) {
@@ -1102,6 +1106,7 @@ static Decoded *decode_file(const char *path) {
     if (!data) return NULL;
     double t1 = now_ms();
     Decoded *d = calloc(1, sizeof *d);
+    if (d) d->serial = next_serial();
     d->read_ms = t1 - t0;
     d->orientation = 1;
     uint8_t *buf = NULL;
@@ -1488,24 +1493,27 @@ static void loader_vector_target_changed(void) {
 
 static int stale_dng(const Decoded *d) { return d && d->mode == MODE_NITRODNG && d->ev3 != SDL_GetAtomicInt(&g_dng_ev3); }
 
-// Image i decoded again (another page, another DNG exposure): d replaces old if i still shows it
-// (and d is not outdated by a later key press). Returns whether it did.
-static int loader_replace_image(int i, Decoded *old, Decoded *d) {
-    int done = 0;
+// An image decoded again (another page, another DNG exposure): d replaces the one with that serial if
+// it is still in the cache - wherever it is now (Del / U may have moved it) - and d is not outdated by
+// a later key press. Returns its index, -1 if it did not.
+static int loader_replace_image(unsigned serial, Decoded *d) {
+    int at = -1;
     SDL_LockMutex(L.lock);
     for (int c = 0; c < L.ncache; c++)
-        if (L.cache[c].index == i && L.cache[c].d == old && !stale_dng(d)) {
+        if (L.cache[c].d && L.cache[c].d->serial == serial && !stale_dng(d)) {
+            bury_locked(L.cache[c].d);
             L.cache[c].d = d;
-            bury_locked(old);
-            done = 1;
+            at = L.cache[c].index;
+            break;
         }
-    if (!done) bury_locked(d);
+    if (at < 0) bury_locked(d);
     SDL_UnlockMutex(L.lock);
-    return done;
+    return at;
 }
 
 typedef struct {
     Decoded *old, *d;
+    unsigned old_serial;          // (old may be freed meanwhile: matched by this)
     char *path;
     int index;
 } DngJob;
@@ -1534,6 +1542,7 @@ static void loader_dng_exposure_changed(void) {
         if (L.cache[c].index == L.cur) {
             if (stale_dng(d) && (j = calloc(1, sizeof *j)) && (j->path = SDL_strdup(L.files[L.cur]))) {
                 j->old = d;
+                j->old_serial = d->serial;
                 j->index = L.cur;
             }
             c++;
@@ -2227,6 +2236,7 @@ static void detail_done(DetailJob *j) {
 // shown image (the document is shared, only the page is drawn).
 typedef struct {
     Decoded *old, *d;
+    unsigned old_serial;          // (old may be freed meanwhile: matched by this)
     VectorDoc *vec;
     int page, index;
 } PageJob;
@@ -2234,6 +2244,7 @@ typedef struct {
 static int SDLCALL page_run(void *arg) {
     PageJob *j = arg;
     Decoded *d = calloc(1, sizeof *d);
+    if (d) d->serial = next_serial();
     size_t cap = 0;
     double t1 = now_ms();
     uint8_t *buf = d ? decode_vector_page(j->vec, j->page, d, &cap) : NULL;
@@ -2256,6 +2267,7 @@ static void show_page(int delta) {
     PageJob *j = calloc(1, sizeof *j);
     if (!j) return;
     j->old = d;
+    j->old_serial = d->serial;
     j->vec = vec_ref(d->vec);
     j->page = d->page + delta;
     j->index = V.index;
@@ -2266,7 +2278,7 @@ static void show_page(int delta) {
 }
 
 static void page_done(PageJob *j) {
-    if (j->d && loader_replace_image(j->index, j->old, j->d) && j->index == V.index) {
+    if (j->d && loader_replace_image(j->old_serial, j->d) == V.index) {
         fit_window_to(j->d);   // (zoomed in: zoom and position stay, as when paging images)
         update_title();
         redraw();
@@ -2469,7 +2481,7 @@ static void handle(const SDL_Event *e) {
             break;
         case EV_DNG: {
             DngJob *j = e->user.data1;
-            if (j->d && loader_replace_image(j->index, j->old, j->d) && j->index == V.index) {
+            if (j->d && loader_replace_image(j->old_serial, j->d) == V.index) {
                 update_title();
                 redraw();
             }
