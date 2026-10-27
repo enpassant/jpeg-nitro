@@ -68,7 +68,9 @@ typedef struct {
     uint32_t id, type;
     int method;            // iloc construction method (0: file, 1: idat)
     size_t off, len;
-    int located;
+    int located;           // (one extent: off, len)
+    int nextents;          // an item in several pieces (in the file): up to 8 of them
+    size_t xoff[8], xlen[8];
     uint16_t props[16];    // ipma: property indices (1-based)
     int nprops;
 } Item;
@@ -119,6 +121,16 @@ static inline const uint8_t *item_data(Heif *h, const Item *it, size_t *n) {
     if (it->off > limit - base || it->len > limit - base - it->off) return NULL;
     *n = it->len;
     return h->d + base + it->off;
+}
+
+// The pieces of an item in several pieces (in the file): their count (0: not such an item / damaged).
+static inline int item_extents(Heif *h, const Item *it, size_t *off, size_t *len) {
+    for (int k = 0; k < it->nextents; k++) {
+        if (it->xoff[k] > h->len || it->xlen[k] > h->len - it->xoff[k]) return 0;
+        off[k] = it->xoff[k];
+        len[k] = it->xlen[k];
+    }
+    return it->nextents;
 }
 
 static inline int parse_iinf(Heif *h, const Box *b) {
@@ -187,11 +199,15 @@ static inline int parse_iloc(Heif *h, const Box *b) {
             o += osz;
             uint64_t el = ben(d + o, lsz);
             o += lsz;
-            if (it && ext == 1) {   // (items in several pieces: not handled)
+            if (it && ext == 1) {
                 it->method = method;
                 it->off = (size_t)(base + eo);
                 it->len = (size_t)el;
                 it->located = 1;
+            } else if (it && ext <= 8 && method == 0) {   // (several pieces: only item_extents returns them)
+                it->xoff[k] = (size_t)(base + eo);
+                it->xlen[k] = (size_t)el;
+                it->nextents = ext;
             }
         }
     }
@@ -235,8 +251,8 @@ static inline int orientation(int irot, int imir) {
         int n[4] = {m[2], m[3], -m[0], -m[1]};
         memcpy(m, n, sizeof m);
     }
-    if (imir == 0) { m[0] = -m[0]; m[1] = -m[1]; }   // mirror about the vertical axis
-    if (imir == 1) { m[2] = -m[2]; m[3] = -m[3]; }   // about the horizontal axis
+    if (imir == 0) { m[2] = -m[2]; m[3] = -m[3]; }   // top and bottom exchanged (as libavif / libheif read it)
+    if (imir == 1) { m[0] = -m[0]; m[1] = -m[1]; }   // left and right
     for (int o = 1; o <= 8; o++)
         if (!memcmp(m, ex[o], sizeof m)) return o;
     return 1;

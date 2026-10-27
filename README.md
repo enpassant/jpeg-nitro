@@ -161,8 +161,14 @@ the macOS viewer when `scripts/get-deps.sh` has built dav1d (universal: x86_64 +
 DAV1D=0` leaves AVIF to ImageIO); Windows keeps WIC. On 22 AVIFs saved from the web (i9, macOS):
 ImageIO 37 ms/image, nitroavif 13.5 ms (a 3000×3000 one 99 → 37 ms); the same pixels within ±1 for 4:4:4 and for luma,
 4:2:0 chroma differs at colour edges because ImageIO repeats chroma samples where we interpolate
-linearly (as for JPEG). The output is identical on Linux and with any thread count; damaged files
-run clean under AddressSanitizer.
+linearly (as for JPEG). Checked on the AOM test files ([av1-avif](https://github.com/AOMediaCodec/av1-avif))
+and [Link-U's samples](https://github.com/link-u/avif-sample-images) against their PNG references:
+every bit depth, chroma format, monochrome, limited-range alpha, grids, layered images (a1op, data
+in several pieces), crops (also after a rotation, in the order the properties give) and mirroring
+match them; ImageIO gets several of these wrong (limited-range gray and alpha, the crop after a
+rotation, profile 2 files it cannot decode). Not handled: a grid of layered tiles (two Apple test
+files). The output is identical on Linux and with any thread count; damaged files run clean under
+AddressSanitizer. (This also fixed nitroheic's `imir` axis: 0 exchanges top and bottom.)
 
 The window is sized to the image: at exactly 100% if it is smaller than the screen, otherwise
 with the image's aspect ratio as large as fits (no black bars). When zooming in, the window grows with the image up to the screen

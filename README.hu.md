@@ -241,8 +241,15 @@ párhuzamosan. Mindkét Linuxos néző ezt használja (a GTK-nak külön csomag 
 `make DAV1D=0` az AVIF-et az ImageIO-ra hagyja); Windowson marad a WIC. 22, a webről mentett AVIF-en
 (i9, macOS): ImageIO 37 ms/kép, nitroavif 13,5 ms (egy 3000×3000-es 99 → 37 ms); a pixelek ±1-en belül egyeznek 4:4:4-nél és a
 világosságban, 4:2:0-nál a színes éleken eltérnek, mert az ImageIO ismétli a chroma-mintákat, mi
-lineárisan interpolálunk (mint a JPEG-nél). Linuxon és bármennyi szálon ugyanaz a kimenet; sérült
-fájlokon AddressSanitizer alatt is hibátlan.
+lineárisan interpolálunk (mint a JPEG-nél). Ellenőrizve az AOM tesztfájljain
+([av1-avif](https://github.com/AOMediaCodec/av1-avif)) és a [Link-U mintáin](https://github.com/link-u/avif-sample-images)
+a PNG-referenciáikkal: minden bitmélység, chroma-formátum, fekete-fehér, szűkített tartományú alfa,
+rács, többrétegű kép (a1op, több darabban tárolt adat), vágás (forgatás után is, a tulajdonságok
+sorrendjében) és tükrözés egyezik; az ImageIO ezek közül többet rosszul jelenít meg (szűkített
+tartományú szürke és alfa, forgatás utáni vágás, a 2-es profilú fájlokat ki sem bontja). Nem kezeli:
+rétegzett csempékből álló rács (két Apple-tesztfájl). Linuxon és bármennyi szálon ugyanaz a kimenet;
+sérült fájlokon AddressSanitizer alatt is hibátlan. (Közben javult a nitroheic `imir`-tengelye is: a 0
+a felső és alsó részt cseréli.)
 
 Az ablak a képhez igazodik: ha a kép kisebb a képernyőnél, pontosan 100%-on, egyébként a kép
 arányával, akkorára, amekkora kifér (fekete sávok nélkül). Nagyításkor az ablak a képpel együtt nő, a

@@ -7,10 +7,11 @@
 // Handled: a single image or a grid of tiles (decoded in parallel), 8 / 10 / 12 bits, 4:2:0 /
 // 4:2:2 / 4:4:4 / monochrome, BT.601 / BT.709 / BT.2020 / identity (RGB) matrices, full or
 // limited range (from the nclx colour box, else from the AV1 sequence header), an alpha plane
-// (applied over black), rotation (irot), mirroring (imir), a crop from the top left corner (clap),
-// an ICC profile (returned, not applied). Chroma is upsampled linearly (centred, as JPEG's).
-// Not handled (returns an error): YCgCo, other crops, items in several pieces, damaged files;
-// HDR transfer functions (PQ, HLG) are shown as they are.
+// (applied over black), rotation (irot), mirroring (imir), a crop (clap, whole pixels), layered
+// images (the operating point of a1op; their data in several pieces), an ICC profile (returned, not
+// applied). Chroma is upsampled linearly (centred, as JPEG's); limited range is expanded (gray too).
+// Not handled (returns an error): YCgCo, damaged files; HDR transfer functions (PQ, HLG) are shown
+// as they are.
 #ifndef NITROAVIF_H
 #define NITROAVIF_H
 
@@ -28,6 +29,10 @@ typedef struct {
     int tile_w, tile_h;
     size_t tile_off[256], tile_len[256];    // the AV1 data of the colour tiles
     size_t alpha_off[256], alpha_len[256];  // ... and of the alpha tiles (the same grid)
+    int cpieces, apieces;       // a single image in several pieces (layered): its colour / alpha data
+    size_t cpiece_off[8], cpiece_len[8], apiece_off[8], apiece_len[8];
+    int crop_x, crop_y;         // clap: the visible part's top left corner in the (grid) image
+    int op;                     // AV1 operating point (a1op)
     int nclx, matrix, full;     // colour box nclx: matrix coefficients, full range
 } na_info;
 
