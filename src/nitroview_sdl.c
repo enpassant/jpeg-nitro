@@ -1511,8 +1511,8 @@ static int loader_replace_image(unsigned serial, Decoded *d) {
 }
 
 typedef struct {
-    Decoded *old, *d;
-    unsigned old_serial;          // (old may be freed meanwhile: matched by this)
+    Decoded *d;
+    unsigned old_serial;          // the image it replaces (matched by serial: it may be freed meanwhile)
     char *path;
     int index;
 } DngJob;
@@ -1540,7 +1540,6 @@ static void loader_dng_exposure_changed(void) {
         Decoded *d = L.cache[c].d;
         if (L.cache[c].index == L.cur) {
             if (stale_dng(d) && (j = calloc(1, sizeof *j)) && (j->path = SDL_strdup(L.files[L.cur]))) {
-                j->old = d;
                 j->old_serial = d->serial;
                 j->index = L.cur;
             }
@@ -2232,8 +2231,8 @@ static void detail_done(DetailJob *j) {
 // Multi-page documents (CorelDRAW): [ and ] draw another page in the background; it replaces the
 // shown image (the document is shared, only the page is drawn).
 typedef struct {
-    Decoded *old, *d;
-    unsigned old_serial;          // (old may be freed meanwhile: matched by this)
+    Decoded *d;
+    unsigned old_serial;          // the image it replaces (matched by serial: it may be freed meanwhile)
     VectorDoc *vec;
     int page, index;
 } PageJob;
@@ -2263,7 +2262,6 @@ static void show_page(int delta) {
     if (!d || !d->vec || d->page + delta < 0 || d->page + delta >= d->vec->pages) return;
     PageJob *j = calloc(1, sizeof *j);
     if (!j) return;
-    j->old = d;
     j->old_serial = d->serial;
     j->vec = vec_ref(d->vec);
     j->page = d->page + delta;
