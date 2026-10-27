@@ -669,9 +669,9 @@ static int decode_symbols16(BR *r, const Tables *t, uint16_t **pout, size_t *ppo
         if (E_KIND(de) != K_LEN) return -1;
         br_skip(r, E_LEN(de));
         br_refill(r);
-        long dist = (long)(E_VAL(de) + br_peek(r, E_EXTRA(de)));
+        int64_t dist = (int64_t)(E_VAL(de) + br_peek(r, E_EXTRA(de)));   // (int64_t: long is 32-bit on Win64)
         br_skip(r, E_EXTRA(de));
-        long s0 = (long)pos - dist;
+        int64_t s0 = (int64_t)pos - dist;
         uint16_t *dst = out + pos;
         if (s0 >= 0) {
             const uint16_t *src = out + s0;
@@ -683,7 +683,7 @@ static int decode_symbols16(BR *r, const Tables *t, uint16_t **pout, size_t *ppo
         } else {
             if (s0 < -32768) return -1;
             for (unsigned k = 0; k < len; k++) {
-                long sk = s0 + (long)k;
+                int64_t sk = s0 + (int64_t)k;
                 dst[k] = sk < 0 ? (uint16_t)(PH_BASE + sk) : out[sk];
             }
         }
@@ -841,7 +841,7 @@ static int resolve(uint8_t *out, size_t o, const uint16_t *sym, size_t i0, size_
             for (size_t k = i; k < i + 16; k++) {
                 uint16_t s = sym[k];
                 if (s < 256) { out[o + k] = (uint8_t)s; continue; }
-                long w = (long)o + ((long)s - PH_BASE);
+                int64_t w = (int64_t)o + ((int64_t)s - PH_BASE);
                 if (w < 0) return -1;
                 out[o + k] = out[w];
             }
@@ -857,7 +857,7 @@ static int resolve(uint8_t *out, size_t o, const uint16_t *sym, size_t i0, size_
             for (size_t k = i; k < i + 16; k++) {
                 uint16_t s = sym[k];
                 if (s < 256) { out[o + k] = (uint8_t)s; continue; }
-                long w = (long)o + ((long)s - PH_BASE);
+                int64_t w = (int64_t)o + ((int64_t)s - PH_BASE);
                 if (w < 0) return -1;
                 out[o + k] = out[w];
             }
@@ -869,7 +869,7 @@ static int resolve(uint8_t *out, size_t o, const uint16_t *sym, size_t i0, size_
     for (; i < i1; i++) {
         uint16_t s = sym[i];
         if (s < 256) { out[o + i] = (uint8_t)s; continue; }
-        long w = (long)o + ((long)s - PH_BASE);
+        int64_t w = (int64_t)o + ((int64_t)s - PH_BASE);
         if (w < 0) return -1;
         out[o + i] = out[w];
     }
