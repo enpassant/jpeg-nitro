@@ -6,6 +6,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <turbojpeg.h>
+#include <setjmp.h>
+#include <jpeglib.h>
 #include "../src/nitrojpeg.h"
 
 static uint8_t *load(const char *fn, size_t *n) {
@@ -46,8 +48,45 @@ static int is_progressive(const uint8_t *d, size_t n) {
     return 0;
 }
 
-// Progressive: nitrojpeg (all threads and 1 thread) vs TurboJPEG's Y/Cb/Cr planes (the old
-// engine can't decode them), visible part. Returns 1 if they differ.
+// libjpeg-turbo's Y/Cb/Cr planes without block smoothing (it smooths progressive files that
+// lack the last scans, nitrojpeg doesn't; complete files are the same either way).
+typedef struct { struct jpeg_error_mgr pub; jmp_buf jb; } ErrJ;
+static void err_exit(j_common_ptr c) { longjmp(((ErrJ *)c->err)->jb, 1); }
+static void err_emit(j_common_ptr c, int level) { (void)c; (void)level; }
+static void err_out(j_common_ptr c) { (void)c; }
+static int ljt_planes(const uint8_t *d, size_t n, uint8_t *const pl[3], const size_t pitch[3]) {
+    struct jpeg_decompress_struct c;
+    ErrJ e;
+    c.err = jpeg_std_error(&e.pub);
+    e.pub.error_exit = err_exit;
+    e.pub.emit_message = err_emit;
+    e.pub.output_message = err_out;
+    if (setjmp(e.jb)) { jpeg_destroy_decompress(&c); return -1; }
+    jpeg_create_decompress(&c);
+    jpeg_mem_src(&c, d, (unsigned long)n);
+    jpeg_read_header(&c, TRUE);
+    c.raw_data_out = TRUE;
+    c.do_block_smoothing = FALSE;
+    c.dct_method = JDCT_ISLOW;
+    jpeg_start_decompress(&c);
+    const int rows = c.max_v_samp_factor * DCTSIZE;
+    JSAMPROW r[3][4 * DCTSIZE];
+    JSAMPARRAY a[3] = {r[0], r[1], r[2]};
+    while (c.output_scanline < c.output_height) {
+        size_t mcu = c.output_scanline / rows;
+        for (int ci = 0; ci < c.num_components; ci++) {
+            int v = c.comp_info[ci].v_samp_factor * DCTSIZE;
+            for (int y = 0; y < v; y++) r[ci][y] = pl[ci] + (mcu * v + y) * pitch[ci];
+        }
+        jpeg_read_raw_data(&c, a, rows);
+    }
+    jpeg_finish_decompress(&c);
+    jpeg_destroy_decompress(&c);
+    return 0;
+}
+
+// Progressive: nitrojpeg (all threads and 1 thread) vs libjpeg-turbo's Y/Cb/Cr planes (the
+// old engine can't decode them), visible part. Returns 1 if they differ.
 static int verify_progressive(const char *nm, const uint8_t *d, size_t n, const nj_info *fi) {
     size_t pitch[3], tot = 0;
     uint8_t *pl[3][3];
@@ -60,10 +99,7 @@ static int verify_progressive(const char *nm, const uint8_t *d, size_t n, const 
     nj_stats st;
     int r1 = nj_decode_planes(d, n, fi, pl[0], pitch, 0, &st);
     int r2 = nj_decode_planes(d, n, fi, pl[1], pitch, 1, NULL);
-    tjhandle h = tj3Init(TJINIT_DECOMPRESS);
-    int strides[3] = {(int)pitch[0], (int)pitch[1], (int)pitch[2]};
-    int r3 = tj3DecompressToYUVPlanes8(h, d, n, pl[2], strides);
-    tj3Destroy(h);
+    int r3 = ljt_planes(d, n, pl[2], pitch);
     int ok = !r1 && !r2 && !r3;
     for (int c = 0; c < fi->ncomp && ok; c++) {
         int vw = (fi->width * fi->h[c] + fi->hmax - 1) / fi->hmax, vh = (fi->height * fi->v[c] + fi->vmax - 1) / fi->vmax;
@@ -72,7 +108,7 @@ static int verify_progressive(const char *nm, const uint8_t *d, size_t n, const 
                 if (memcmp(pl[k][c] + (size_t)y * pitch[c], pl[2][c] + (size_t)y * pitch[c], (size_t)vw)) ok = 0;
     }
     if (r1 && r2)
-        printf("%-24s %5dx%-5d prog   not decoded (truncated or damaged: the viewer falls back to TurboJPEG)\n", nm, fi->width, fi->height);
+        printf("%-24s %5dx%-5d prog   not decoded (cut off or damaged: the viewer falls back to TurboJPEG)\n", nm, fi->width, fi->height);
     else
         printf("%-24s %5dx%-5d prog   %3d scans  dec %5.1f ms | planes %s\n", nm, fi->width, fi->height, st.bands, st.decode_ms,
                ok ? "OK" : "MISMATCH");

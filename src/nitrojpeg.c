@@ -2043,8 +2043,6 @@ static int prog_layout(Prog *P) {
     const HuffTable *dc[4], *ac[4];
     for (int i = 0; i < 4; i++) { dc[i] = j->dc[i].present ? &j->dc[i] : NULL; ac[i] = j->ac[i].present ? &j->ac[i] : NULL; }
     int ri = fi->restart_interval;
-    int8_t bits[3][64];                 // libjpeg's coef_bits: the Al reached so far, -1 none
-    memset(bits, -1, sizeof bits);
     for (;;) {
         while (pos < len && d[pos] == 0xFF) pos++;
         if (pos + 2 >= len) break;      // no EOI
@@ -2094,7 +2092,6 @@ static int prog_layout(Prog *P) {
                 if (s->Ss == 0 && !s->Ah && (!s->dct[i] || seg[2 + 2 * i] >> 4 > 3)) return -1;
                 if (s->Ss) { s->act = ac[seg[2 + 2 * i] & 3]; if (!s->act || (seg[2 + 2 * i] & 15) > 3) return -1; }
                 nb += ns > 1 ? fi->h[c] * fi->v[c] : 1;
-                for (int k = s->Ss; k <= s->Se; k++) bits[c][k] = (int8_t)s->Al;
                 if (!j->qpresent[j->cq[c]]) return -1;
             }
             if (nb > MAX_BLOCKS) return -1;
@@ -2128,16 +2125,10 @@ static int prog_layout(Prog *P) {
         }
         pos += L;
     }
-    if (!P->nscan) return -1;
-    // libjpeg-turbo smooths the blocks (an approximation of the missing AC bits) when the
-    // DC is known but some of the first 9 AC coefficients never got all their bits: leave
-    // that to it, to stay identical
-    int dc_known = 1, ac_missing = 0;
-    for (int c = 0; c < fi->ncomp; c++) {
-        if (bits[c][0] < 0) dc_known = 0;
-        for (int k = 1; k < 10; k++) if (bits[c][k] != 0) ac_missing = 1;
-    }
-    return dc_known && ac_missing ? -1 : 0;
+    // Files without the last scans (low-quality previews) are decoded as they are: libjpeg
+    // would smooth those blocks (an estimate of the missing low AC coefficients from the
+    // neighbours' DC), we don't
+    return P->nscan ? 0 : -1;
 }
 
 // Unstuffs a scan's data (0xFF 0x00 -> 0xFF, fill bytes and RST markers dropped).

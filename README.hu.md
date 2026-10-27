@@ -401,8 +401,9 @@ rááll a helyes útra. Az esetek 40%-ában 1 MCU után, a leglassabb 21 MCU (87
 **Pontosság:** a párhuzamos kimenet **bitre azonos** az egyszálú libjpeg-turbo
 kimenetével, mind az 50 képen (`bench/verify`, skalár és AVX2 IDCT-vel is). A GPU-s
 konverzió legfeljebb ±1 eltérést ad (kerekítés, `--selftest`).
-Nem támogatott formátumoknál (CMYK, RGB, aritmetikai kódolás, >16384 px), sérült és csonka
-progresszív fájloknál a néző automatikusan a sima TurboJPEG-re vált.
+Nem támogatott formátumoknál (CMYK, RGB, aritmetikai kódolás, >16384 px), sérült és félbevágott
+fájloknál a néző automatikusan a sima TurboJPEG-re vált. Az évek során letöltött ~4100 JPEG közül
+egyiknél sem.
 
 ### A fejlődés lépései (ms/kép, 16 szál)
 
@@ -479,9 +480,13 @@ harmada, több szálnak nem jut munka, csak lassítanak; a `-j` többet is beál
 | 1509 webes kép (átlag 2.7 MP) | **1.66** | 3.50 | 5.33 | 5.61 |
 
 A kimenet mindegyiken bitre azonos a libjpeg-turbóéval (a `bench/verify` a progresszív fájlokat
-a TurboJPEG Y/Cb/Cr síkjaival veti össze, minden szállal és eggyel is). 12 webes kép csonka (hiányoznak az utolsó
-menetek: ezeknek a blokkjait a libjpeg-turbo simítja), ezeket és a sérült fájlokat a TurboJPEG
-dekódolja.
+annak Y/Cb/Cr síkjaival veti össze, minden szállal és eggyel is). További 12 webes kép (nincs a
+táblázatban) alacsony minőségű előnézet, hiányoznak az utolsó menetei, némelyikben csak a DC van
+(blokkonként egy szín): a nitrojpeg azt dekódolja, ami benne van, ahogy az Apple ImageIO is. A
+libjpeg-turbo a hiányzó alacsony AC-együtthatókat a szomszédos blokkokból becsüli is („block
+smoothing”, lágyabb, de elmosódott); a nitrojpeg nem, a `bench/verify` ezeket a simítás nélküli
+libjpeg-turbóval veti össze (azonos, 270, az első meneteire visszavágott tesztfájlon is). A sérült
+és félbevágott fájlokat a TurboJPEG dekódolja.
 
 ### nitropng
 

@@ -17,8 +17,9 @@
 // The IDCT is libjpeg's ISLOW algorithm, so the output is bit-identical to it.
 //
 // Not handled (returns an error, use another decoder): arithmetic, 12-bit,
-// lossless, CMYK/RGB, multi-scan baseline, damaged streams, truncated
-// progressive files (libjpeg-turbo smooths their blocks).
+// lossless, CMYK/RGB, multi-scan baseline, damaged or cut-off streams.
+// Progressive files without their last scans (previews) are decoded as they
+// are, without libjpeg's block smoothing.
 // Built with -DNJ_REFERENCE it also contains the old libjpeg-turbo based
 // engine and BGRX output, for comparison and testing.
 #pragma once

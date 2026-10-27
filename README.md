@@ -445,8 +445,8 @@ Measured synchronisation (`bench/verify`, 512 chunks, first 256 sync points per 
 **Accuracy:** the parallel output is **bit-identical** to single-threaded libjpeg-turbo on all
 50 test images (`bench/verify`, with both the scalar and the AVX2 IDCT). The GPU colour
 conversion differs by at most ±1 (rounding, `--selftest`). Unsupported files (CMYK, RGB,
-arithmetic coding, >16384 px), damaged files and truncated progressive ones fall back to TurboJPEG
-in the viewer.
+arithmetic coding, >16384 px) and damaged or cut-off files fall back to TurboJPEG in the viewer.
+Of ~4100 JPEGs downloaded over the years none does.
 
 ### How it got there (ms/image, 16 threads)
 
@@ -519,8 +519,13 @@ more):
 | 1509 web images (2.7 MP avg.) | **1.66** | 3.50 | 5.33 | 5.61 |
 
 The output is bit-identical to libjpeg-turbo on all of them (`bench/verify` checks progressive
-files against TurboJPEG's Y/Cb/Cr planes, with all threads and with one). 12 web images are truncated (the last
-scans are missing: libjpeg-turbo smooths those blocks), they and damaged files go to TurboJPEG.
+files against its Y/Cb/Cr planes, with all threads and with one). 12 more web images (not in the
+table) are low-quality previews without the last scans, some with only the DC (8×8 blocks of one
+colour each): nitrojpeg decodes what is there, as Apple ImageIO does. libjpeg-turbo also estimates
+the missing low AC coefficients from the neighbouring blocks ("block smoothing", softer but
+blurred); nitrojpeg doesn't, `bench/verify` compares these with libjpeg-turbo without smoothing
+(identical, also on 270 test files cut back to their first scans). Damaged or cut-off files go to
+TurboJPEG.
 
 ### nitropng
 
