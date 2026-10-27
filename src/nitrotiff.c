@@ -659,7 +659,7 @@ int nt_decode(const uint8_t *data, size_t len, const nt_info *in, uint8_t *bgrx,
     volatile int err = 0;
     volatile int *errp = &err;
     if (!rows) return -1;
-    if (in->compression == 1 && !in->tiled) {   // uncompressed strips: the rows straight from the file
+    if (in->compression == 1 && !in->tiled && in->predictor == 1) {   // uncompressed strips: the rows straight from the file
         for (int p = 0; p < P && !err; p++)
             for (int s = 0; s < in->down && !err; s++) {
                 const uint8_t *c;
