@@ -65,7 +65,6 @@ static double now_ms(void) {
 // Where decoded planes live. Shared: system memory, the GPU kernel reads it
 // directly over PCIe (no driver copy). Managed: driver uploads to VRAM first.
 static MTLResourceOptions g_storage = MTLResourceStorageModeShared;
-static BOOL g_use_textures = NO;
 
 #define MAX_TEX 16384
 #define AHEAD 3     // images decoded ahead in the paging direction
@@ -82,7 +81,8 @@ typedef enum { KIND_YUV = 0, KIND_BGRA = 1, KIND_PNG = 2, KIND_PLANAR = 3 } Kind
 @property(nonatomic) int width, height;      // decoded size
 @property(nonatomic) int ncomp, orientation;
 @property(nonatomic) id colorSpace;          // CGColorSpaceRef the pixel values are in (display tags the layer)
-@property(nonatomic) int h0, v0, h1, v1, hmax, vmax;  // sampling (Y, chroma)
+@property(nonatomic) int h1, v1, hmax, vmax;  // sampling (chroma, max)
+@property(nonatomic) int hasa;                    // PSD: plane ncolor is the merged transparency
 - (int *)pw;
 - (int *)ph;
 - (size_t *)offset;                         // plane offsets in the buffer
@@ -647,7 +647,6 @@ static Decoded *decode_file(NSString *path, BufferPool *pool, size_t align) {
                 d.width = hi.width;
                 d.height = hi.height;
                 d.ncomp = 3;
-                d.h0 = 2; d.v0 = 2;
                 d.h1 = 1; d.v1 = 1;
                 d.hmax = 2; d.vmax = 2;
                 d.orientation = hi.orientation;
@@ -697,7 +696,6 @@ static Decoded *decode_file(NSString *path, BufferPool *pool, size_t align) {
                 d.width = wi.width;
                 d.height = wi.height;
                 d.ncomp = 3;
-                d.h0 = 2; d.v0 = 2;
                 d.h1 = 1; d.v1 = 1;
                 d.hmax = 2; d.vmax = 2;
                 d.orientation = wi.orientation;
@@ -780,7 +778,7 @@ static Decoded *decode_file(NSString *path, BufferPool *pool, size_t align) {
                 d.width = pi.width;
                 d.height = pi.height;
                 d.ncomp = pi.ncolor;
-                d.h0 = pi.alpha;   // (reused field) 1: plane ncolor is the merged transparency
+                d.hasa = pi.alpha;
                 d.pitch[0] = (size_t)pi.width;
                 for (int c = 0; c < 3; c++) d.offset[c] = pi.ncolor == 3 ? c * pi.plane_size : 0;
                 d.bands = 1;
@@ -818,7 +816,6 @@ static Decoded *decode_file(NSString *path, BufferPool *pool, size_t align) {
             d.width = fi.width;
             d.height = fi.height;
             d.ncomp = fi.ncomp;
-            d.h0 = fi.h[0]; d.v0 = fi.v[0];
             d.h1 = fi.ncomp > 1 ? fi.h[1] : 1; d.v1 = fi.ncomp > 1 ? fi.v[1] : 1;
             d.hmax = fi.hmax; d.vmax = fi.vmax;
             d.mode = st.mode;
@@ -843,13 +840,6 @@ static Decoded *decode_file(NSString *path, BufferPool *pool, size_t align) {
 #include "shaders.inc"   // src/shaders.metal as shaders_metal[] / shaders_metal_len (xxd -i)
 
 typedef struct {
-    uint32_t size[2];
-    float cscale[2];
-    float csize[2];
-    uint32_t kind;
-} ConvParams;
-
-typedef struct {
     float origin[2];     // NDC position of the image's top-left corner
     float size[2];       // NDC extent
     uint32_t orientation;
@@ -870,7 +860,7 @@ typedef struct {
 @interface GPU : NSObject
 @property(nonatomic, readonly) id<MTLDevice> device;
 @property(nonatomic, readonly) id<MTLCommandQueue> queue;
-@property(nonatomic, readonly) id<MTLComputePipelineState> convert, convertBuf;
+@property(nonatomic, readonly) id<MTLComputePipelineState> convertBuf;
 @property(nonatomic, readonly) id<MTLRenderPipelineState> draw;
 @property(nonatomic, readonly) size_t align;
 - (instancetype)initWithDevice:(id<MTLDevice>)dev;
@@ -888,99 +878,55 @@ typedef struct {
     id<MTLLibrary> lib = [dev newLibraryWithSource:[[NSString alloc] initWithBytes:shaders_metal length:shaders_metal_len encoding:NSUTF8StringEncoding]
                                                   options:opt error:&err];
     if (!lib) { NSLog(@"shader: %@", err); exit(1); }
-    _convert = [dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"convert"] error:&err];
     _convertBuf = [dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"convert_buf"] error:&err];
     MTLRenderPipelineDescriptor *rp = [MTLRenderPipelineDescriptor new];
     rp.vertexFunction = [lib newFunctionWithName:@"vmain"];
     rp.fragmentFunction = [lib newFunctionWithName:@"fmain"];
     rp.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
     _draw = [dev newRenderPipelineStateWithDescriptor:rp error:&err];
-    if (!_convert || !_draw) { NSLog(@"pipeline: %@", err); exit(1); }
+    if (!_convertBuf || !_draw) { NSLog(@"pipeline: %@", err); exit(1); }
     _align = MAX([dev minimumLinearTextureAlignmentForPixelFormat:MTLPixelFormatR8Unorm],
                  [dev minimumLinearTextureAlignmentForPixelFormat:MTLPixelFormatBGRA8Unorm]);
     _align = MAX(_align, (size_t)64);
     return self;
 }
 
-- (id<MTLTexture>)planeTexture:(Decoded *)d index:(int)c format:(MTLPixelFormat)fmt w:(int)w h:(int)h {
-    MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:fmt width:w height:h mipmapped:NO];
-    td.storageMode = MTLStorageModeManaged;
-    td.usage = MTLTextureUsageShaderRead;
-    return [d.buffer newTextureWithDescriptor:td offset:d.offset[c] bytesPerRow:d.pitch[c]];
-}
-
 // Upload + convert + build mipmaps (all on the GPU, asynchronously).
 - (id<MTLTexture>)textureFor:(Decoded *)d commandBuffer:(id<MTLCommandBuffer>)cb {
     if (d.texture) return d.texture;
     id<MTLTexture> out = [_pool textureWidth:d.width height:d.height];
-    if (!g_use_textures || d.kind == KIND_PNG || d.kind == KIND_PLANAR) {
-        PlaneParams pp = {{(uint32_t)d.width, (uint32_t)d.height}, {1, 1}, {0, 0}, {0}, {0}, 0, 0, 0};
-        for (int c = 0; c < 3; c++) { pp.off[c] = (uint32_t)d.offset[c]; pp.pitch[c] = (uint32_t)d.pitch[c]; }
-        if (d.kind == KIND_BGRA) pp.kind = 2;
-        else if (d.kind == KIND_PLANAR) {
-            pp.kind = 4;
-            pp.hasa = (uint32_t)d.h0;
-            pp.aoff = (uint32_t)((size_t)d.ncomp * d.width * d.height);
-        }
-        else if (d.kind == KIND_PNG) {
-            pp.kind = 3; pp.off[0] = 1; pp.off[1] = (uint32_t)d.ncomp;
-            if (getenv("NV_DEBUG_DIFF")) {
-                const uint8_t *b = d.buffer.contents;
-                fprintf(stderr, "   PNG params: off %u/%u pitch %u kind %u size %ux%u, buffer[0..8]: %d %d %d %d %d %d %d %d %d, len %lu\n",
-                        pp.off[0], pp.off[1], pp.pitch[0], pp.kind, pp.size[0], pp.size[1], b[0], b[1], b[2], b[3], b[4],
-                        b[5], b[6], b[7], b[8], (unsigned long)d.buffer.length);
-            }
-        }
-        else if (d.ncomp == 1) pp.kind = 1;
-        else {
-            if (d.limited) pp.kind = 5;
-            pp.cscale[0] = (float)d.h1 / d.hmax;
-            pp.cscale[1] = (float)d.v1 / d.vmax;
-            pp.cmax[0] = d.pw[1] - 1;
-            pp.cmax[1] = d.ph[1] - 1;
-        }
-        id<MTLComputeCommandEncoder> ce = [cb computeCommandEncoder];
-        [ce setComputePipelineState:_convertBuf];
-        [ce setBuffer:d.buffer offset:0 atIndex:1];
-        [ce setTexture:out atIndex:3];
-        [ce setBytes:&pp length:sizeof pp atIndex:0];
-        [ce dispatchThreadgroups:MTLSizeMake((d.width + 15) / 16, (d.height + 15) / 16, 1)
-            threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
-        [ce endEncoding];
-        id<MTLBlitCommandEncoder> be = [cb blitCommandEncoder];
-        [be generateMipmapsForTexture:out];
-        [be endEncoding];
-        d.texture = out;
-        return out;
+    PlaneParams pp = {{(uint32_t)d.width, (uint32_t)d.height}, {1, 1}, {0, 0}, {0}, {0}, 0, 0, 0};
+    for (int c = 0; c < 3; c++) { pp.off[c] = (uint32_t)d.offset[c]; pp.pitch[c] = (uint32_t)d.pitch[c]; }
+    if (d.kind == KIND_BGRA) pp.kind = 2;
+    else if (d.kind == KIND_PLANAR) {
+        pp.kind = 4;
+        pp.hasa = (uint32_t)d.hasa;
+        pp.aoff = (uint32_t)((size_t)d.ncomp * d.width * d.height);
     }
-    id<MTLTexture> t0, t1 = nil, t2 = nil;
-    ConvParams p = {{(uint32_t)d.width, (uint32_t)d.height}, {1, 1}, {1, 1}, 0};
-    if (d.kind == KIND_BGRA) {
-        t0 = [self planeTexture:d index:0 format:MTLPixelFormatBGRA8Unorm w:d.width h:d.height];
-        p.kind = 2;
-    } else {
-        t0 = [self planeTexture:d index:0 format:MTLPixelFormatR8Unorm w:d.pw[0] h:d.ph[0]];
-        if (d.ncomp == 3) {
-            t1 = [self planeTexture:d index:1 format:MTLPixelFormatR8Unorm w:d.pw[1] h:d.ph[1]];
-            t2 = [self planeTexture:d index:2 format:MTLPixelFormatR8Unorm w:d.pw[2] h:d.ph[2]];
-            p.cscale[0] = (float)d.h1 / d.hmax;
-            p.cscale[1] = (float)d.v1 / d.vmax;
-            p.csize[0] = d.pw[1];
-            p.csize[1] = d.ph[1];
-            if (d.limited) p.kind = 5;
-        } else {
-            p.kind = 1;
+    else if (d.kind == KIND_PNG) {
+        pp.kind = 3; pp.off[0] = 1; pp.off[1] = (uint32_t)d.ncomp;
+        if (getenv("NV_DEBUG_DIFF")) {
+            const uint8_t *b = d.buffer.contents;
+            fprintf(stderr, "   PNG params: off %u/%u pitch %u kind %u size %ux%u, buffer[0..8]: %d %d %d %d %d %d %d %d %d, len %lu\n",
+                    pp.off[0], pp.off[1], pp.pitch[0], pp.kind, pp.size[0], pp.size[1], b[0], b[1], b[2], b[3], b[4],
+                    b[5], b[6], b[7], b[8], (unsigned long)d.buffer.length);
         }
+    }
+    else if (d.ncomp == 1) pp.kind = 1;
+    else {
+        if (d.limited) pp.kind = 5;
+        pp.cscale[0] = (float)d.h1 / d.hmax;
+        pp.cscale[1] = (float)d.v1 / d.vmax;
+        pp.cmax[0] = d.pw[1] - 1;
+        pp.cmax[1] = d.ph[1] - 1;
     }
     id<MTLComputeCommandEncoder> ce = [cb computeCommandEncoder];
-    [ce setComputePipelineState:_convert];
-    [ce setTexture:t0 atIndex:0];
-    [ce setTexture:t1 ?: t0 atIndex:1];
-    [ce setTexture:t2 ?: t0 atIndex:2];
+    [ce setComputePipelineState:_convertBuf];
+    [ce setBuffer:d.buffer offset:0 atIndex:1];
     [ce setTexture:out atIndex:3];
-    [ce setBytes:&p length:sizeof p atIndex:0];
-    MTLSize tg = MTLSizeMake(16, 16, 1);
-    [ce dispatchThreadgroups:MTLSizeMake((d.width + 15) / 16, (d.height + 15) / 16, 1) threadsPerThreadgroup:tg];
+    [ce setBytes:&pp length:sizeof pp atIndex:0];
+    [ce dispatchThreadgroups:MTLSizeMake((d.width + 15) / 16, (d.height + 15) / 16, 1)
+        threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
     [ce endEncoding];
     id<MTLBlitCommandEncoder> be = [cb blitCommandEncoder];
     [be generateMipmapsForTexture:out];
@@ -2737,7 +2683,6 @@ int main(int argc, const char **argv) {
         }
         const char *stg = getenv("NV_STORAGE");
         if (stg && !strcmp(stg, "managed")) g_storage = MTLResourceStorageModeManaged;
-        if (getenv("NV_TEXTURES")) g_use_textures = YES, g_storage = MTLResourceStorageModeManaged;
         id<MTLDevice> dev = MTLCreateSystemDefaultDevice();
         if (!dev) { fprintf(stderr, "no Metal device\n"); return 1; }
         GPU *gpu = [[GPU alloc] initWithDevice:dev];

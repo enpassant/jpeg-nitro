@@ -4,44 +4,6 @@
 #include <metal_stdlib>
 using namespace metal;
 
-struct ConvParams {
-    uint2 size;        // output size
-    float2 cscale;     // luma pixel -> chroma pixel scale (h_c/hmax, v_c/vmax)
-    float2 csize;      // chroma plane size
-    uint kind;         // 0 YCbCr, 1 gray, 2 BGRA copy, 5 YCbCr limited range
-};
-
-kernel void convert(texture2d<float, access::read> Y [[texture(0)]],
-                    texture2d<float, access::sample> Cb [[texture(1)]],
-                    texture2d<float, access::sample> Cr [[texture(2)]],
-                    texture2d<float, access::write> out [[texture(3)]],
-                    constant ConvParams &p [[buffer(0)]],
-                    uint2 gid [[thread_position_in_grid]]) {
-    if (gid.x >= p.size.x || gid.y >= p.size.y) return;
-    float4 c;
-    if (p.kind == 2) {
-        c = float4(Y.read(gid).rgb, 1.0);
-    } else {
-        float y = Y.read(gid).r;
-        if (p.kind == 1) {
-            c = float4(y, y, y, 1.0);
-        } else {
-            constexpr sampler s(coord::normalized, filter::linear, address::clamp_to_edge);
-            // chroma sample centres: same "fancy upsampling" as libjpeg (linear, centred)
-            float2 uv = (float2(gid) + 0.5) * p.cscale / p.csize;
-            float cb = Cb.sample(s, uv).r - 128.0 / 255.0;
-            float cr = Cr.sample(s, uv).r - 128.0 / 255.0;
-            if (p.kind == 5) {   // limited range (WebP): Y 16..235, C 16..240
-                y = (y - 16.0 / 255.0) * (255.0 / 219.0);
-                cb *= 255.0 / 224.0;
-                cr *= 255.0 / 224.0;
-            }
-            c = float4(y + 1.402 * cr, y - 0.344136 * cb - 0.714136 * cr, y + 1.772 * cb, 1.0);
-        }
-    }
-    out.write(saturate(c), gid);
-}
-
 struct PlaneParams {
     uint2 size;
     float2 cscale;
