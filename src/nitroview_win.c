@@ -854,7 +854,7 @@ static uint8_t *decode_wic(const uint8_t *bytes, size_t len, Decoded *d, size_t 
     IWICBitmapScaler *sc = NULL;
     uint8_t *buf = NULL;
     UINT w = 0, h = 0;
-    if (!f || FAILED(IWICImagingFactory_CreateStream(f, &st)) ||
+    if (!f || len > 0xFFFFFFFF || FAILED(IWICImagingFactory_CreateStream(f, &st)) ||   // (a memory stream: DWORD size)
         FAILED(IWICStream_InitializeFromMemory(st, (BYTE *)bytes, (DWORD)len)) ||
         FAILED(IWICImagingFactory_CreateDecoderFromStream(f, (IStream *)st, NULL, WICDecodeMetadataCacheOnDemand, &dec)) ||
         FAILED(IWICBitmapDecoder_GetFrame(dec, 0, &frame)) || FAILED(IWICBitmapFrameDecode_GetSize(frame, &w, &h)) || !w || !h)
