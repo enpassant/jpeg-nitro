@@ -1672,6 +1672,14 @@ static void pool_give(void *p, size_t cap) {
     pthread_mutex_unlock(&g_pool_mu);
 }
 
+// Frees the buffers kept for reuse between images (they are taken again by the next decode).
+void nj_free_buffers(void) {
+    pthread_mutex_lock(&g_pool_mu);
+    for (int i = 0; i < g_pool_n; i++) free(g_pool[i].p);
+    g_pool_n = 0;
+    pthread_mutex_unlock(&g_pool_mu);
+}
+
 static int pool_grow(void **p, size_t *cap, size_t need) {   // like realloc, keeps contents; -1: *p unchanged
     if (need <= *cap) return 0;
     size_t ncap = need + need / 2;

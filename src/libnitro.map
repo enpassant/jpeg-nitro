@@ -6,11 +6,14 @@
         nj_set_bands;
         nj_set_scalar_idct;
         nj_set_chunks;
+        nj_free_buffers;
         nj_find_embedded;
         np_read_info;
         np_decode;
         np_zlib_decompress;
         np_set_chunks;
+        np_to_bgrx;
+        np_free_buffers;
         ps_read_info;
         ps_decode;
         nh_read_info;

@@ -65,6 +65,9 @@ int np_zlib_decompress(const uint8_t *z, size_t zlen, uint8_t *out, size_t outle
 // Testing / tuning: number of parallel inflate chunks (0 = one per thread, at least 64 KB of input each).
 void np_set_chunks(int n);
 
+// The parallel inflate keeps its work buffers for the next image; this frees them.
+void np_free_buffers(void);
+
 #ifdef __cplusplus
 }
 #endif

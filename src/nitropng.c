@@ -912,6 +912,14 @@ static void pool_give(void *p, size_t cap) {
     pthread_mutex_unlock(&g_pool_mu);
 }
 
+// Frees the buffers kept for reuse between images (they are taken again by the next decode).
+void np_free_buffers(void) {
+    pthread_mutex_lock(&g_pool_mu);
+    for (int i = 0; i < g_pool_n; i++) free(g_pool[i].p);
+    g_pool_n = 0;
+    pthread_mutex_unlock(&g_pool_mu);
+}
+
 static int ncpu(void) { return nitro_ncpu(); }
 
 // Parallel inflate of the raw deflate stream d (dl bytes, padded) into out.

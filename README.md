@@ -701,8 +701,9 @@ Photoshop TIFF has it at the end of the file), for a window size before the file
 into `info.raw_size` bytes — the unfiltered rows, each still preceded by its filter byte
 (row y at `out + y * (stride + 1) + 1`); 8-bit gray / RGB / RGBA (`info.supported`) are ready for a
 GPU like that, the others (`info.convertible`: palette, 1 / 2 / 4 / 16-bit, a transparency key)
-become B G R X with `np_to_bgrx()`. `np_zlib_decompress()` is the parallel inflate on its
-own, for any zlib stream of known size. **nitropsd** (`src/nitropsd.c/.h`, needs nitropng):
+become B G R X with `np_to_bgrx()`; `info.orientation` is an eXIf chunk's. `np_zlib_decompress()`
+is the parallel inflate on its own, for any zlib stream of known size. Both nitrojpeg and nitropng
+keep their work buffers for the next image; `nj_free_buffers()` / `np_free_buffers()` free them. **nitropsd** (`src/nitropsd.c/.h`, needs nitropng):
 `ps_read_info()`, then `ps_decode()` writes the planes (R, G, B or gray, then transparency if
 `info.alpha`) one after the other.
 
