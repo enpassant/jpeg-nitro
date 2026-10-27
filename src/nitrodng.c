@@ -157,7 +157,6 @@ int ndng_read_info(const uint8_t *data, size_t len, ndng_info *info) {
     int across = (info->raw_w + info->tile_w - 1) / info->tile_w, down = (info->raw_h + info->tile_h - 1) / info->tile_h;
     if ((uint64_t)across * down != to.count) return -1;
     info->ntiles = (int)to.count;
-    info->tiles = data;
     info->tile_off_pos = to.pos;
     info->tile_off_type = to.type;
     info->tile_cnt_pos = tc.pos;
@@ -765,7 +764,6 @@ static int lossless_jpeg(const uint8_t *d, size_t n, uint16_t *out, int tw, int 
                         cur[i] = (uint16_t)(px + diff);
                     }
                     mcus++;
-                    if (ri && mcus == ri && x + 1 == w) first_row = 1;   // (handled at the next sample)
                 }
                 for (size_t i = 0; i < rowlen; i++) {
                     out[oy * ostride + ox] = (uint16_t)(cur[i] << pt);

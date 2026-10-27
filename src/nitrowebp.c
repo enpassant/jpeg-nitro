@@ -1023,7 +1023,7 @@ static void add_residual(int16_t *c, const uint8_t *end, int k, uint8_t *dst) {
 // Reconstruction state: the unfiltered row above (the bottom pixels of the macroblocks above) and
 // the work buffers with the edges of the current macroblock.
 typedef struct {
-    int mbw, mbh, W, H;
+    int mbw, W, H;
     uint8_t *planes[3];
     size_t pitch[3];
     uint8_t *top_y, *top_u, *top_v;
@@ -1173,7 +1173,6 @@ int nw_decode_planes(const uint8_t *data, size_t len, const nw_info *info, uint8
     }
     int mbw = f->mbw, mbh = f->mbh;
     r->mbw = mbw;
-    r->mbh = mbh;
     r->W = info->width;
     r->H = info->height;
     for (int k = 0; k < 3; k++) {

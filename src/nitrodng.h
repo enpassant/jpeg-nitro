@@ -27,7 +27,6 @@ typedef struct {
     int crop[4];         // default crop within it: x, y, w, h
     int compression, bps, cfa[4];   // cfa: colour (0 R, 1 G, 2 B) of the 2x2 positions
     int tile_w, tile_h, ntiles;      // (strips: tile_w = raw_w, tile_h = rows per strip)
-    const uint8_t *tiles;            // the TIFF and its tables (offsets read when decoding)
     uint32_t tile_off_pos, tile_cnt_pos, tile_off_type, tile_cnt_type;
     int big_endian;
     float black[4], white;           // per 2x2 position

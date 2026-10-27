@@ -142,7 +142,7 @@ typedef struct {
     int cu_qp_delta_enabled, diff_cu_qp_delta_depth;
     int cb_qp_offset, cr_qp_offset, slice_chroma_qp_offsets_present;
     int transquant_bypass, tiles, entropy_coding_sync;
-    int loop_filter_across_slices, deblocking_override_enabled, deblocking_disabled, beta_offset, tc_offset;
+    int loop_filter_across_slices, deblocking_override_enabled, deblocking_disabled;
     int scaling_list_present;
     uint8_t scaling[4][6][64 + 1];
     int slice_header_extension_present;
@@ -444,8 +444,8 @@ static int parse_pps(const uint8_t *rbsp, size_t len, const Sps *sps_table, Pps 
         p->deblocking_override_enabled = (int)bits_u(&b, 1);
         p->deblocking_disabled = (int)bits_u(&b, 1);
         if (!p->deblocking_disabled) {
-            p->beta_offset = bits_se(&b) * 2;
-            p->tc_offset = bits_se(&b) * 2;
+            bits_se(&b);   // beta_offset_div2, tc_offset_div2 (no deblocking yet)
+            bits_se(&b);
         }
     }
     const Sps *s = &sps_table[p->sps_id];
@@ -792,7 +792,7 @@ typedef struct {
     int sao_luma, sao_chroma;
     // coding unit / quantization group
     int cu_transquant_bypass;
-    int is_cu_qp_delta_coded, cu_qp_delta;
+    int is_cu_qp_delta_coded;
     int qp_pred, qp_prev_cu, qp_y;
     int intra_chroma_mode;     // of the current CU (final mode, 0..34)
     Cabac cabac;
@@ -1212,7 +1212,6 @@ static void qp_group(Dec *d, int xq, int yq) {
     if ((yq & ctb_mask) == ((yq - 1) & ctb_mask) && yq > 0) qb = d->qp[((yq - 1) >> 2) * d->w4 + (xq >> 2)];
     d->qp_pred = (qa + qb + 1) >> 1;
     d->is_cu_qp_delta_coded = 0;
-    d->cu_qp_delta = 0;
     d->qp_y = d->qp_pred;
 }
 
@@ -1294,7 +1293,6 @@ static int transform_tree(Dec *d, int x0, int y0, int xbase, int ybase, int log2
         }
         if (v && cabac_bypass(c)) v = -v;
         d->is_cu_qp_delta_coded = 1;
-        d->cu_qp_delta = v;
         d->qp_y = ((d->qp_pred + v + 52) % 52 + 52) % 52;
     }
     // luma: prediction, then the residual
@@ -1418,7 +1416,6 @@ static int decode_row(Rows *w, Dec *l, int ry) {
     }
     l->qp_prev_cu = l->qp_y = l->qp_pred = d->slice_qp;
     l->is_cu_qp_delta_coded = 0;
-    l->cu_qp_delta = 0;
     for (int rx = 0; rx < d->ctb_w; rx++) {
         if (ry > 0 && wait_row(w, ry - 1, MIN(rx + 2, d->ctb_w))) return -1;
         if (l->sao_luma || l->sao_chroma) parse_sao(l, rx, ry);
@@ -1609,7 +1606,6 @@ static int decode_slice(Dec *d, const Sps *sps_table, const Pps *pps_table, cons
     int have_wpp_state = 0;
     d->qp_prev_cu = d->qp_y = d->qp_pred = d->slice_qp;
     d->is_cu_qp_delta_coded = 0;
-    d->cu_qp_delta = 0;
     uint32_t sub = 0;
     for (int ctb = addr;; ctb++) {
         if (ctb >= pic_ctbs) goto out;

@@ -382,14 +382,11 @@ static int inflate8_one(BR *r, uint8_t *out, size_t *ppos, size_t cap, Tables *t
     }
 }
 
-// Decodes deflate blocks until BFINAL (stop_at == UINT64_MAX) or until a block
-// boundary equals stop_at. Returns 0 on success.
-static int inflate8(BR *r, uint8_t *out, size_t *ppos, size_t cap, Tables *t, uint64_t stop_at, int *final) {
+// Decodes deflate blocks until BFINAL. Returns 0 on success.
+static int inflate8(BR *r, uint8_t *out, size_t *ppos, size_t cap, Tables *t, int *final) {
     *final = 0;
-    while (!*final) {
-        if (br_pos(r) == stop_at) return 0;
+    while (!*final)
         if (inflate8_one(r, out, ppos, cap, t, final)) return -1;
-    }
     return 0;
 }
 
@@ -1038,7 +1035,7 @@ int np_zlib_decompress(const uint8_t *zin, size_t zlen, uint8_t *out, size_t out
         br_init(&r, z + 2, zlen - 2, 0);
         size_t pos = 0;
         int final;
-        if (t && !inflate8(&r, out, &pos, outlen, t, UINT64_MAX, &final) && final && pos == outlen) {
+        if (t && !inflate8(&r, out, &pos, outlen, t, &final) && final && pos == outlen) {
             size_t ai = (size_t)((br_pos(&r) + 7) / 8) + 2;
             if (ai + 4 <= zlen && adler32(1, out, pos) == be32(z + ai)) rc = 0;
         }
@@ -1082,7 +1079,7 @@ int np_decode(const uint8_t *data, size_t len, const np_info *fi, uint8_t *out, 
         br_init(&r, z + 2, zlen - 2, 0);
         size_t pos = 0;
         int final;
-        if (inflate8(&r, out, &pos, fi->raw_size, t, UINT64_MAX, &final) || !final || pos != fi->raw_size) goto done;
+        if (inflate8(&r, out, &pos, fi->raw_size, t, &final) || !final || pos != fi->raw_size) goto done;
         // Adler-32 trailer: byte-aligned after the last block
         uint64_t bp = (br_pos(&r) + 7) & ~7ull;
         size_t ai = (size_t)(bp / 8) + 2;
