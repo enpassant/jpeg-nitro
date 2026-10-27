@@ -1961,6 +1961,11 @@ static void page_last(void) { expand_directory(); go(V.nfiles - 1, -1); }
 
 static void open_files(FileList *l, int lazy) {   // drag & drop
     if (!l->n) return;
+    for (int k = 0; k < V.ndeleted; k++) {   // (undo: positions in the old list; the files stay in .delete)
+        free(V.deleted[k].path);
+        free(V.deleted[k].to);
+    }
+    V.ndeleted = 0;
     V.lazy_dir = lazy;
     V.files = l->v;
     V.nfiles = l->n;

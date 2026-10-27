@@ -2007,6 +2007,11 @@ static void page_last(void) { if (V.nfiles) { expand_directory(); go(V.nfiles - 
 
 static void open_files(FileList *l, int lazy) {   // drag & drop, the Open dialog
     if (!l->n) return;
+    for (int k = 0; k < V.ndeleted; k++) {   // (undo: positions in the old list; the files stay in .delete)
+        SDL_free(V.deleted[k].path);
+        SDL_free(V.deleted[k].to);
+    }
+    V.ndeleted = 0;
     V.lazy_dir = lazy;
     V.files = l->v;
     V.nfiles = l->n;

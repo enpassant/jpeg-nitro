@@ -1445,6 +1445,7 @@ static NSArray<NSString *> *dropped_paths(id<NSDraggingInfo> info);
 // New files (e.g. opened from the Finder while running).
 - (void)openFiles:(NSArray<NSString *> *)files lazyDir:(BOOL)lazy {
     if (!files.count) return;
+    [_deleted removeAllObjects];   // (undo: positions in the old list; the files stay in .delete)
     _lazyDir = lazy;
     _files = files;
     _started = NO;
