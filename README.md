@@ -12,6 +12,7 @@ GNOME/Linux**:
 | macOS 12+, Intel and Apple Silicon | Cocoa + Metal: a universal `nitroview.app` | `make app` / `make dmg` |
 | Windows 10+ | Win32 + Direct3D 11: one self-contained `nitroview.exe` | `make windows` (llvm-mingw) |
 | Linux with GNOME | GTK 4 + libadwaita: `nitroview-gnome`, also as a Flatpak | `make gnome` / `make flatpak` |
+| Linux (Wayland / X11), new | SDL3 + OpenGL 3.3: one self-contained `nitroview-sdl` | `make sdl` |
 
 All three are built on our own decoders: three that decode a *single* image on all CPU cores —
 although JPEG, PNG and PSD compression are all sequential by design —, one that decodes the tiles of
@@ -131,6 +132,16 @@ pixel-exact 200–800% zoom is smoothed. `make gnome-register` adds it to the de
 user; `make flatpak` builds `nitroview-gnome.flatpak` on the GNOME 50 runtime (with Flathub's
 `org.flatpak.Builder` if installed: older distributions' own flatpak-builder, e.g. Ubuntu 22.04's,
 cannot finish a GNOME 50 build).
+
+**SDL3 / Linux (new, being tested):** `nitroview-sdl` ([src/nitroview_sdl.c](src/nitroview_sdl.c))
+is the Windows viewer's structure on SDL3 + OpenGL 3.3 instead of Win32 + Direct3D: the same keys and
+mouse (+ O: open files), window behaviour, prefetch, Del / U, E / Shift+E, SVG / CorelDRAW with sharp
+zoom, `--bench` and `--selftest`, and the same GPU path (planes as textures, YCbCr→RGB in a shader,
+mipmaps, trilinear drawing; pixel-exact 200–800%). Whatever our decoders don't take (16-bit, palette
+or interlaced PNG, GIF, BMP, damaged or CMYK JPEG) goes to stb_image. SDL3 is linked in statically;
+OpenGL and Wayland / X11 are loaded at run time, so it needs no GTK. `scripts/get-deps.sh` builds
+SDL3 (the window systems' development packages it needs are listed there). It builds on macOS too,
+only for testing (there OpenGL is slow; the Metal viewer stays the real one).
 
 The window is sized to the image: at exactly 100% if it is smaller than the screen, otherwise
 with the image's aspect ratio as large as fits (no black bars). When zooming in, the window grows with the image up to the screen
@@ -722,6 +733,7 @@ symlink). The measurements above were made on 50 private photos that are not in 
 - `src/nitroview.m`: Cocoa + Metal viewer; with `NV_TURBOJPEG` the TurboJPEG fallback
 - `src/nitroview_win.c`: the viewer for Windows (Win32 + Direct3D 11 + WIC); `packaging/nitroview.ico/.rc`: its icon
 - `src/gnome/`: GTK4/libadwaita viewer for GNOME/Linux; `packaging/gnome/`: desktop integration
+- `src/nitroview_sdl.c`: the SDL3 + OpenGL viewer for Linux (Wayland / X11)
 - `src/libnitro.map`: exported API of the Linux shared library
 - `src/shaders.metal`: the viewer's GPU shaders (colour conversion, drawing), embedded at build time
 - `scripts/get-deps.sh`: downloads and builds the optional dependencies

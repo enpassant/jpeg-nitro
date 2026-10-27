@@ -12,6 +12,7 @@ Linuxra**:
 | macOS 12-től, Intel és Apple Silicon | Cocoa + Metal: universal `nitroview.app` | `make app` / `make dmg` |
 | Windows 10-től | Win32 + Direct3D 11: egyetlen önálló `nitroview.exe` | `make windows` (llvm-mingw) |
 | Linux, GNOME | GTK 4 + libadwaita: `nitroview-gnome`, Flatpakként is | `make gnome` / `make flatpak` |
+| Linux (Wayland / X11), új | SDL3 + OpenGL 3.3: egyetlen önálló `nitroview-sdl` | `make sdl` |
 
 Mindhárom ugyanazokra a saját dekóderekre épül: hármat, amelyek egyetlen képet is az összes CPU-magon
 dekódolnak — pedig a JPEG, a PNG és a PSD tömörítése is eredendően soros —, egyet, amely a HEIC-fotók
@@ -207,6 +208,17 @@ WebP ...) a GTK saját betöltői nyitnak meg. Lapozáskor az ablak mérete nem 
 program nem méretezheti át szabadon a saját ablakát). A `make gnome`-hoz GTK 4.10+ és libadwaita 1.4+
 kell; a `make gnome-register` az aktuális felhasználónak felveszi az asztalra; a `make flatpak` a
 GNOME 50 runtime-ra fordítja a `nitroview-gnome.flatpak`-ot.
+
+**SDL3 / Linux (új, tesztelés alatt):** a `nitroview-sdl` ([src/nitroview_sdl.c](src/nitroview_sdl.c))
+a windowsos néző felépítése Win32 + Direct3D helyett SDL3 + OpenGL 3.3-mal: ugyanazok a billentyűk és
+egérműveletek (+ O: fájlok megnyitása), ablakkezelés, előtöltés, Del / U, E / Shift+E, SVG / CorelDRAW
+éles nagyítással, `--bench` és `--selftest`, és ugyanaz a GPU-út (a síkok textúraként, YCbCr→RGB
+shaderben, mipmapek, trilineáris rajzolás; pixelpontos 200–800%). Amit a saját dekóderek nem
+vállalnak (16 bites, palettás vagy interlace-elt PNG, GIF, BMP, sérült vagy CMYK JPEG), azt az
+stb_image bontja ki. Az SDL3 statikusan van belefordítva, az OpenGL-t és a Waylandet / X11-et futáskor
+tölti be, GTK nem kell hozzá. Az SDL3-at a `scripts/get-deps.sh` fordítja (az ehhez szükséges
+fejlesztői csomagok ott vannak felsorolva). macOS-en is lefordul, de csak teszteléshez (ott az OpenGL
+lassú; a valódi néző a Metal-os marad).
 
 Az ablak a képhez igazodik: ha a kép kisebb a képernyőnél, pontosan 100%-on, egyébként a kép
 arányával, akkorára, amekkora kifér (fekete sávok nélkül). Nagyításkor az ablak a képpel együtt nő, a
@@ -656,6 +668,7 @@ A `-march=native` miatt a bináris a fordító gép CPU-jára optimalizált.
 - `src/nitroview.m`: Cocoa + Metal néző; `NV_TURBOJPEG`-gel TurboJPEG-tartalékkal
 - `src/nitroview_win.c`: a néző Windowsra (Win32 + Direct3D 11 + WIC); `packaging/nitroview.ico/.rc`: az ikonja
 - `src/gnome/`: GTK4/libadwaita néző GNOME/Linuxra; `packaging/gnome/`: asztali integráció
+- `src/nitroview_sdl.c`: az SDL3 + OpenGL néző Linuxra (Wayland / X11)
 - `src/libnitro.map`: a Linux megosztott könyvtár exportált API-ja
 - `src/shaders.metal`: a néző GPU-shaderei (színkonverzió, kirajzolás), fordításkor beágyazva
 - `scripts/get-deps.sh`: az opcionális függőségek letöltése és fordítása

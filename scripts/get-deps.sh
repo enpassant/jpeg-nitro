@@ -8,6 +8,7 @@
 #   - libcdr (our fork with fixes, github.com/gereoffy/libcdr) + librevenge (MPL-2.0),
 #     lcms2 (MIT), the boost headers and (for Windows) zlib: CorelDRAW
 #     drawings in nitroview (sources only; the Makefile compiles them)
+#   - SDL3 (static): the Linux viewer's window (SDL=0 skips it)
 # Nothing is installed system-wide.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -22,6 +23,7 @@ LCMS2_VER=2.19.1
 ZLIB_VER=1.3.1      # (only for the Windows build: macOS and Linux have it)
 MIMALLOC_VER=2.1.7
 BOOST_VER=1.89.0
+SDL_VER=3.4.18
 JOBS=$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 8)
 
 if [ ! -f stb_image.h ]; then
@@ -141,4 +143,26 @@ if [ "$(uname -s)" = Darwin ]; then
 elif [ ! -f ljt/lib/libturbojpeg.a ]; then
   build_ljt "$(uname -m)" ljt
 fi
-echo "dependencies ready in third_party/ (libjpeg-turbo $LJT_VER, stb_image, wuffs, lunasvg, libcdr)"
+
+# SDL3 (zlib license, static): the window, input and OpenGL context of the Linux viewer
+# (make sdl; on macOS only for testing it). Video, events and the file dialog only. Linux needs
+# the development packages of the window systems it supports (SDL loads them at run time):
+#   apt install libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxfixes-dev libxss-dev libxtst-dev \
+#     libwayland-dev libxkbcommon-dev wayland-protocols libdecor-0-dev libegl-dev libgl-dev libdbus-1-dev
+if [ "${SDL:-1}" = 1 ] && [ ! -f sdl3/.version-$SDL_VER ]; then
+  rm -rf sdl3 SDL3-$SDL_VER
+  curl -fsSL -o sdl3.tar.gz https://github.com/libsdl-org/SDL/releases/download/release-$SDL_VER/SDL3-$SDL_VER.tar.gz
+  tar xf sdl3.tar.gz && rm sdl3.tar.gz
+  MAC=()
+  [ "$(uname -s)" = Darwin ] && MAC=(-DCMAKE_OSX_DEPLOYMENT_TARGET=12.0)
+  (cd SDL3-$SDL_VER &&
+   "$CMAKE" -S . -B build -DCMAKE_BUILD_TYPE=Release -DSDL_SHARED=OFF -DSDL_STATIC=ON -DSDL_TEST_LIBRARY=OFF \
+     -DSDL_TESTS=OFF -DSDL_EXAMPLES=OFF -DSDL_AUDIO=OFF -DSDL_CAMERA=OFF -DSDL_JOYSTICK=OFF -DSDL_HAPTIC=OFF \
+     -DSDL_HIDAPI=OFF -DSDL_SENSOR=OFF -DSDL_POWER=OFF -DSDL_GPU=OFF -DSDL_RENDER=OFF -DSDL_VULKAN=OFF "${MAC[@]}" \
+     -DCMAKE_INSTALL_PREFIX="$TP/sdl3" -DCMAKE_INSTALL_LIBDIR=lib >/dev/null &&
+   "$CMAKE" --build build -j"$JOBS" >/dev/null &&
+   "$CMAKE" --install build >/dev/null)
+  rm -rf SDL3-$SDL_VER
+  touch sdl3/.version-$SDL_VER
+fi
+echo "dependencies ready in third_party/ (libjpeg-turbo $LJT_VER, stb_image, wuffs, lunasvg, libcdr$([ "${SDL:-1}" = 1 ] && echo ", SDL $SDL_VER"))"

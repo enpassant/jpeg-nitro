@@ -16,6 +16,8 @@
 #   make tools           benchmarks and tests (need scripts/get-deps.sh first)
 #   make linux-lib       Linux shared + static decoder library: build/lib/libnitro.so/.a
 #   make gnome           GNOME/libadwaita viewer: nitroview-gnome (the decoders linked in statically)
+#   make sdl             SDL3 + OpenGL viewer for Linux: nitroview-sdl (SDL3 from scripts/get-deps.sh;
+#                        builds on macOS too, for testing)
 #   make flatpak         GNOME 50 Flatpak bundle: nitroview-gnome.flatpak
 #   make linux           Linux (also the default there): library + portable tools - nbench,
 #                        pngverify, psdverify, the ASan robustness tests, and verify / robust
@@ -226,6 +228,36 @@ $(GNOME_BIN): $(GNOME_SRC) $(GNOME_HDR) $(LIB_STATIC) $(GNOME_SVG) $(GNOME_CDR)
 # GNOME viewer: command-line open plus a native Open/Quit application shell.
 gnome: $(GNOME_BIN)
 	@echo "built $(GNOME_BIN) (SVG: $(if $(GNOME_SVG),nitrosvg,GTK's loaders), CorelDRAW: $(if $(GNOME_CDR),yes,no))"
+
+# SDL3 viewer (Linux; builds on macOS too, for testing): SDL3 and the decoders linked in
+# statically, OpenGL and the window system (Wayland / X11) loaded at run time
+SDL3_DIR  := third_party/sdl3
+SDL_BIN   := nitroview-sdl
+SDL_LIBS   = $(SDL3_DIR)/lib/libSDL3.a $(shell sed -n 's/^Libs:.*-lSDL3//p' $(SDL3_DIR)/lib/pkgconfig/sdl3.pc 2>/dev/null)
+ifeq ($(UNAME_S),Darwin)
+SDL_DEC   := build/nitrojpeg.o build/nitropng.o build/nitropsd.o build/nitroheic.o build/nitrohevc.o build/nitrodng.o build/nitrowebp.o
+SDL_VEC   := $(if $(filter 1,$(CDR)),build/libnitrocdr.a) $(if $(filter 1,$(SVG)),build/libnitrosvg.a)
+SDL_VLIBS := $(if $(filter 1,$(CDR)),-liconv -lz) $(if $(filter 1,$(SVG)),-lc++) -framework VideoToolbox   # (HEIC: hardware decoding)
+else
+SDL_DEC   := $(LIB_STATIC)
+SDL_VEC   := $(GNOME_CDR) $(GNOME_SVG)
+SDL_VLIBS := $(if $(GNOME_CDR),-lz) $(if $(GNOME_SVG),-lstdc++)
+endif
+SDL_VDEFS  = $(if $(filter %libnitrosvg.a,$(SDL_VEC)),-DNV_SVG) $(if $(filter %libnitrocdr.a,$(SDL_VEC)),-DNV_CDR)
+
+# the window icon, embedded as a byte array
+build/icon.inc: packaging/icon.png
+	@mkdir -p build
+	cd packaging && xxd -i icon.png > ../build/icon.inc
+
+$(SDL_BIN): src/nitroview_sdl.c build/icon.inc $(SDL_DEC) $(SDL_VEC) $(DEC_HDR) src/nitroheic.h src/nitrodng.h src/nitrowebp.h \
+            src/nitrosvg.h src/nitrocdr.h
+	@test -f $(SDL3_DIR)/lib/libSDL3.a -a -f third_party/stb_image.h || { echo "missing SDL3 / stb_image: run scripts/get-deps.sh first"; exit 1; }
+	$(CC) $(CFLAGS) $(SDL_VDEFS) -Isrc -Ibuild -Ithird_party -I$(SDL3_DIR)/include src/nitroview_sdl.c $(SDL_DEC) $(SDL_VEC) \
+	  $(SDL_LIBS) $(SDL_VLIBS) $(THREADLIBS) -lm -o $@
+
+sdl: $(SDL_BIN)
+	@echo "built $(SDL_BIN) (SVG: $(if $(filter -DNV_SVG,$(SDL_VDEFS)),yes,no), CorelDRAW: $(if $(filter -DNV_CDR,$(SDL_VDEFS)),yes,no))"
 
 # Development desktop registration for GNOME Shell. The generated desktop entry uses
 # the absolute path of this source-tree binary so it also works without installing it.
@@ -455,7 +487,7 @@ linux: linux-lib $(LINUX_TOOLS)
 	@echo "built $(LIB_SHARED) $(LIB_STATIC) $(LINUX_TOOLS)$(if $(wildcard $(LJT)/lib/libturbojpeg.a),, (verify / robust: run scripts/get-deps.sh first))"
 
 clean:
-	rm -rf build nitroview nitroview-gnome nitroview-gnome.flatpak nitroview.app nitroview.exe nitroview.zip nitroview.dmg \
+	rm -rf build nitroview nitroview-gnome nitroview-sdl nitroview-gnome.flatpak nitroview.app nitroview.exe nitroview.zip nitroview.dmg \
 	  bench/bench bench/verify bench/robust bench/freqprobe bench/sustain bench/pngbench bench/pngsplit \
 	  bench/pngverify bench/pngrobust bench/psdverify bench/psdrobust bench/nbench bench/rgbverify bench/*.exe
 
@@ -534,4 +566,4 @@ notarize:
 	xcrun stapler staple nitroview.dmg
 	@echo "nitroview.dmg is notarized"
 
-.PHONY: all app zip dmg notarize tools linux linux-lib gnome gnome-register flatpak windows clean deps ljt
+.PHONY: all app zip dmg notarize tools linux linux-lib gnome gnome-register sdl flatpak windows clean deps ljt
