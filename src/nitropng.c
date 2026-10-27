@@ -1067,7 +1067,7 @@ int np_decode(const uint8_t *data, size_t len, const np_info *fi, uint8_t *out, 
     uint8_t *z = gather_idat(data, len, &zlen);
     if (!z) return -1;
     int rc = -1;
-    Tables *t = malloc(sizeof *t);
+    Tables *t = NULL;   // (the sequential path's; the parallel one has its own per chunk)
     if (zlen < 6 || (z[0] & 15) != 8 || (z[0] >> 4) > 7 || ((z[0] << 8) | z[1]) % 31 || (z[1] & 0x20)) goto done;
     st->parse_ms = now_ms() - t0;
     if (nthreads != 1) {
@@ -1087,7 +1087,8 @@ int np_decode(const uint8_t *data, size_t len, const np_info *fi, uint8_t *out, 
         br_init(&r, z + 2, zlen - 2, 0);
         size_t pos = 0;
         int final;
-        if (inflate8(&r, out, &pos, fi->raw_size, t, &final) || !final || pos != fi->raw_size) goto done;
+        if (!(t = malloc(sizeof *t)) || inflate8(&r, out, &pos, fi->raw_size, t, &final) || !final || pos != fi->raw_size)
+            goto done;
         // Adler-32 trailer: byte-aligned after the last block
         uint64_t bp = (br_pos(&r) + 7) & ~7ull;
         size_t ai = (size_t)(bp / 8) + 2;
