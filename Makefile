@@ -27,7 +27,8 @@
 #                        once scripts/get-deps.sh has built libjpeg-turbo. Needs clang.
 #   make windows         cross-compile nitroview.exe (the viewer), bench/nbench.exe and
 #                        bench/psdverify.exe for Windows (x64, static, AVX2) with llvm-mingw:
-#                        WINCC=path/to/x86_64-w64-mingw32-clang
+#                        WINCC=path/to/x86_64-w64-mingw32-clang (AVIF with dav1d once
+#                        WINCC=... scripts/get-deps.sh built it into third_party/dav1d-win)
 
 LJT        := third_party/ljt
 TURBOJPEG  ?= 0
@@ -588,6 +589,9 @@ WIN_DEFS += -DNV_SVG
 WIN_OBJS += build/win/libnitrosvg.a
 endif
 WIN_CXXLIBS := $(if $(WIN_OBJS),-lc++)
+# AVIF: nitroavif with dav1d cross-compiled by scripts/get-deps.sh (WINCC=... set there too)
+DAV1D_WIN := third_party/dav1d-win
+WIN_AVIF  := $(if $(and $(filter-out 0,$(DAV1D)),$(wildcard $(DAV1D_WIN)/lib/libdav1d.a)),-DNV_DAV1D -I$(DAV1D_WIN)/include src/nitroavif.c $(DAV1D_WIN)/lib/libdav1d.a)
 build/win/libnitrosvg.a: CC = $(WINCC)
 build/win/libnitrosvg.a: CXX = $(WINCXX)
 build/win/libnitrosvg.a: AR = $(WINAR)
@@ -601,12 +605,12 @@ build/win/libnitrocdr.a: CDR_DEFS += -I$(ZLIB)
 build/win/libnitrocdr.a: src/nitrocdr.cpp src/nitrocdr.h $(CDR_STAMP)
 	$(call cdr_lib,-march=$(WINARCH) -I$(ZLIB))
 nitroview.exe: src/nitroview_win.c $(DEC_SRC) $(DEC_HDR) src/nitroheic.c src/nitroheic.h src/nitrohevc.c src/nitrohevc.h src/nitrodng.c src/nitrodng.h src/nitrowebp.c src/nitrowebp.h \
-               src/nitrotiff.c src/nitrotiff.h \
+               src/nitrotiff.c src/nitrotiff.h src/nitroavif.c src/nitroavif.h src/heif.h \
                build/nitroview_res.o $(WIN_OBJS) src/nitrosvg.h src/nitrocdr.h
 	$(WINCC) $(WINFLAGS) $(WIN_DEFS) -Ibuild -Isrc -municode src/nitroview_win.c $(DEC_SRC) src/nitroheic.c src/nitrohevc.c src/nitrodng.c src/nitrowebp.c src/nitrotiff.c \
-	  build/nitroview_res.o $(WIN_OBJS) $(WINLIBS) $(WIN_CXXLIBS) -o $@
+	  $(WIN_AVIF) build/nitroview_res.o $(WIN_OBJS) $(WINLIBS) $(WIN_CXXLIBS) -o $@
 windows: nitroview.exe bench/nbench.exe bench/psdverify.exe
-	@echo "built nitroview.exe bench/nbench.exe bench/psdverify.exe (Windows x64, $(WINARCH), SVG: $(if $(filter 1,$(SVG)),yes,no), CDR: $(if $(filter 1,$(CDR)),yes,no))"
+	@echo "built nitroview.exe bench/nbench.exe bench/psdverify.exe (Windows x64, $(WINARCH), SVG: $(if $(filter 1,$(SVG)),yes,no), CDR: $(if $(filter 1,$(CDR)),yes,no), AVIF: $(if $(WIN_AVIF),yes,no))"
 
 # Distribution. zip: ditto keeps the signature and the bundle's attributes (like Finder > Compress).
 zip: app

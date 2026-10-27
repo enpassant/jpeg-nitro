@@ -10,7 +10,8 @@
 #     drawings in nitroview (sources only; the Makefile compiles them)
 #   - SDL3 (static): the Linux viewer's window (SDL=0 skips it)
 #   - dav1d (static, BSD-2-Clause, VideoLAN): the AV1 decoder for AVIF images (DAV1D=0 skips it);
-#     built with meson + ninja (pip, in third_party/tools/venv) and nasm
+#     built with meson + ninja (pip, in third_party/tools/venv) and nasm; with WINCC=path/to/
+#     x86_64-w64-mingw32-clang (as for make windows) also for the Windows viewer (third_party/dav1d-win)
 # Nothing is installed system-wide.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -170,17 +171,22 @@ if [ "${SDL:-1}" = 1 ] && [ ! -f sdl3/.version-$SDL_VER ]; then
 fi
 # dav1d: AV1 decoding for AVIF (nitroavif); meson + ninja from pip, in a virtual environment of their own.
 # macOS: x86_64 + arm64 in one (universal) library, for the universal nitroview.app
-build_dav1d() {   # into $TP/$1; $2: meson cross file (macOS) or none
+build_dav1d() {   # into $TP/$1; $2: meson cross file (macOS, Windows) or none
   (cd dav1d-$DAV1D_VER && export PATH="$TP/tools/nasm/bin:$TP/tools/venv/bin:$PATH" &&
    rm -rf build && meson setup build ${2:+--cross-file "$2"} --buildtype=release --default-library=static -Denable_tools=false \
      -Denable_tests=false -Denable_examples=false --prefix="$TP/$1" --libdir=lib >/dev/null &&
    meson install -C build >/dev/null)
 }
-if [ "${DAV1D:-1}" = 1 ] && [ ! -f dav1d/.version-$DAV1D_VER ]; then
+dav1d_source() {
   [ -x tools/venv/bin/meson ] || { python3 -m venv tools/venv && tools/venv/bin/pip install -q meson ninja; }
-  rm -rf dav1d dav1d-x86_64 dav1d-arm64 dav1d-$DAV1D_VER
-  curl -fsSL -o dav1d.tar.xz https://downloads.videolan.org/pub/videolan/dav1d/$DAV1D_VER/dav1d-$DAV1D_VER.tar.xz
-  tar xf dav1d.tar.xz && rm dav1d.tar.xz
+  if [ ! -d dav1d-$DAV1D_VER ]; then
+    curl -fsSL -o dav1d.tar.xz https://downloads.videolan.org/pub/videolan/dav1d/$DAV1D_VER/dav1d-$DAV1D_VER.tar.xz
+    tar xf dav1d.tar.xz && rm dav1d.tar.xz
+  fi
+}
+if [ "${DAV1D:-1}" = 1 ] && [ ! -f dav1d/.version-$DAV1D_VER ]; then
+  rm -rf dav1d dav1d-x86_64 dav1d-arm64
+  dav1d_source
   if [ "$(uname -s)" = Darwin ]; then
     for A in x86_64 arm64; do
       F=$([ $A = arm64 ] && echo aarch64 || echo x86_64)
@@ -205,8 +211,29 @@ EOT
   else
     build_dav1d dav1d
   fi
-  rm -rf dav1d-$DAV1D_VER
   touch dav1d/.version-$DAV1D_VER
 fi
+if [ "${DAV1D:-1}" = 1 ] && [ -n "${WINCC:-}" ] && [ ! -f dav1d-win/.version-$DAV1D_VER ]; then
+  WINBIN=$(dirname "$(command -v "$WINCC")")
+  rm -rf dav1d-win
+  dav1d_source
+  cat > dav1d-$DAV1D_VER/win.cross <<EOT
+[binaries]
+c = '$(command -v "$WINCC")'
+ar = '$WINBIN/llvm-ar'
+strip = '$WINBIN/llvm-strip'
+windres = '$WINBIN/x86_64-w64-mingw32-windres'
+[properties]
+needs_exe_wrapper = true
+[host_machine]
+system = 'windows'
+cpu_family = 'x86_64'
+cpu = 'x86_64'
+endian = 'little'
+EOT
+  build_dav1d dav1d-win "$TP/dav1d-$DAV1D_VER/win.cross"
+  touch dav1d-win/.version-$DAV1D_VER
+fi
+rm -rf dav1d-$DAV1D_VER
 
 echo "dependencies ready in third_party/ (libjpeg-turbo $LJT_VER, stb_image, wuffs, lunasvg, libcdr$([ "${SDL:-1}" = 1 ] && echo ", SDL $SDL_VER")$([ "${DAV1D:-1}" = 1 ] && echo ", dav1d $DAV1D_VER"))"

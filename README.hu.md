@@ -191,7 +191,8 @@ ugyanez a néző: ugyanazok a billentyűk, egérfunkciók, nagyítás és ablakm
 diavetítés, egy fájlból a mappája, ráhúzás. A JPEG / PNG / PSD a három dekóderrel és egy compute
 shaderrel megy, a HEIC-fotók a saját HEVC-dekóderünkkel (`src/nitrohevc.c`, a H.265 szabvány alapján
 írva: a Windowsban Store-bővítmény nélkül nincs HEVC-dekóder; a csempék párhuzamosan, egy 12 MP-es kép
-~55 ms; deblocking és SAO még nincs, ez szemmel alig látszik), a TIFF a nitrotiff-fel, minden más
+~55 ms; deblocking és SAO még nincs, ez szemmel alig látszik), a TIFF a nitrotiff-fel, az AVIF a
+nitroavif + dav1d párossal (AV1-hez is Store-bővítmény kellene a Windowsnak), minden más
 (JPEG-tömörítésű TIFF, WebP, GIF, BMP) a Windows saját WIC-
 kodekjeivel; az SVG és a CorelDRAW CDR / CMX ugyanúgy, mint macOS-en (nagyítva éles, [ / ] a rajz
 oldalai között). Egyetlen önálló .exe (csak rendszer-DLL-ek, Windows 10-től), Macen vagy Linuxon
@@ -238,7 +239,8 @@ színkonverzió a miénk, párhuzamosan: 8 / 10 / 12 bit, 4:2:0 / 4:2:2 / 4:4:4 
 2020 / RGB mátrix, teljes vagy szűkített tartomány, alfa fekete háttér fölött, a csemperácsok
 párhuzamosan. Mindkét Linuxos néző ezt használja (a GTK-nak külön csomag nélkül nincs AVIF-betöltője),
 és a macOS-es is, ha a `scripts/get-deps.sh` lefordította a dav1d-t (univerzálisan: x86_64 + arm64; a
-`make DAV1D=0` az AVIF-et az ImageIO-ra hagyja); Windowson marad a WIC. 22, a webről mentett AVIF-en
+`make DAV1D=0` az AVIF-et az ImageIO-ra hagyja), és a windowsos is, ha a `WINCC=… scripts/get-deps.sh`
+lefordította rá (`third_party/dav1d-win`; különben a WIC, az AV1 Store-bővítménnyel). 22, a webről mentett AVIF-en
 (i9, macOS): ImageIO 37 ms/kép, nitroavif 13,5 ms (egy 3000×3000-es 99 → 37 ms); a pixelek ±1-en belül egyeznek 4:4:4-nél és a
 világosságban, 4:2:0-nál a színes éleken eltérnek, mert az ImageIO ismétli a chroma-mintákat, mi
 lineárisan interpolálunk (mint a JPEG-nél). Ellenőrizve az AOM tesztfájljain
@@ -658,7 +660,8 @@ robusztussági tesztek, ThreadSanitizer négy egyszerre dekódoló szállal). Li
 [llvm-mingw](https://github.com/mstorsjo/llvm-mingw)-vel (clang + MinGW-w64; az MSYS2 CLANG64
 környezetében is megy) lefordítja a `nitroview.exe`-t (a nézőt, ikonnal), a `bench/nbench.exe`-t és a
 `bench/psdverify.exe`-t: statikusan,
-csak rendszer-DLL-ekkel, AVX2-vel (`WINARCH=x86-64-v2`: anélkül). Az `nbench.exe` Windows Serveren
+csak rendszer-DLL-ekkel, AVX2-vel (`WINARCH=x86-64-v2`: anélkül). A nézőben az AVIF-hez előbb a
+dav1d-t kell Windowsra lefordítani: `WINCC=… scripts/get-deps.sh` (ugyanazzal a fordítóval). Az `nbench.exe` Windows Serveren
 is fut; a `*.jpg`-t maga a program bontja ki, és könyvtárnevet is elfogad.
 
 ## Build

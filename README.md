@@ -106,7 +106,7 @@ its folder, drag & drop. JPEG / PNG / PSD go through the three decoders and a co
 HEIC photos through our own HEVC decoder (`src/nitrohevc.c`, written from the H.265 specification:
 Windows has no HEVC decoder without a Store extension; its tiles in parallel, ~55 ms for 12 MP; no
 deblocking / SAO yet, which is hard to see), DNG raw images through nitrodng, lossy WebP through nitrowebp, TIFF through
-nitrotiff, everything else (JPEG-compressed TIFF, lossless or transparent WebP, GIF, BMP)
+nitrotiff, AVIF through nitroavif + dav1d (Windows needs a Store extension for AV1 too), everything else (JPEG-compressed TIFF, lossless or transparent WebP, GIF, BMP)
 through Windows' own WIC codecs;
 SVG and CorelDRAW CDR / CMX as on macOS (sharp when zoomed in, [ / ] for the pages of a drawing).
 One self-contained .exe (only system DLLs, Windows 10 or later), built on the Mac or on Linux with
@@ -158,7 +158,8 @@ the colour conversion is ours, in parallel: 8 / 10 / 12-bit, 4:2:0 / 4:2:2 / 4:4
 709 / 2020 / RGB matrices, full or limited range, alpha over black, grids of tiles decoded in
 parallel. Both Linux viewers use it (GTK has no AVIF loader without an extra package), and so does
 the macOS viewer when `scripts/get-deps.sh` has built dav1d (universal: x86_64 + arm64; `make
-DAV1D=0` leaves AVIF to ImageIO); Windows keeps WIC. On 22 AVIFs saved from the web (i9, macOS):
+DAV1D=0` leaves AVIF to ImageIO), and the Windows viewer when `WINCC=… scripts/get-deps.sh` has
+cross-compiled it (`third_party/dav1d-win`; otherwise WIC, with the AV1 Store extension). On 22 AVIFs saved from the web (i9, macOS):
 ImageIO 37 ms/image, nitroavif 13.5 ms (a 3000×3000 one 99 → 37 ms); the same pixels within ±1 for 4:4:4 and for luma,
 4:2:0 chroma differs at colour edges because ImageIO repeats chroma samples where we interpolate
 linearly (as for JPEG). Checked on the AOM test files ([av1-avif](https://github.com/AOMediaCodec/av1-avif))
@@ -737,7 +738,8 @@ ThreadSanitizer with four threads decoding at once). Tested on Linux (see
 **Windows:** `make windows WINCC=…/llvm-mingw/bin/x86_64-w64-mingw32-clang` cross-compiles
 `nitroview.exe` (the viewer, with its icon), `bench/nbench.exe` and `bench/psdverify.exe` with [llvm-mingw](https://github.com/mstorsjo/llvm-mingw)
 (clang + MinGW-w64; also works in MSYS2's CLANG64): static, only system DLLs, AVX2
-(`WINARCH=x86-64-v2` without). `nbench.exe` runs on Windows Server with the same results;
+(`WINARCH=x86-64-v2` without). AVIF in the viewer needs dav1d built for Windows first:
+`WINCC=… scripts/get-deps.sh` (the same compiler). `nbench.exe` runs on Windows Server with the same results;
 wildcards (`*.jpg`) are expanded by the program, directories work as arguments too.
 
 ## Build

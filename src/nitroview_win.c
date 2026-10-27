@@ -11,7 +11,7 @@
 // W window to image, arrows pan, F/Enter full screen, P pause slideshow, Esc/Q quit,
 // [ / ] the pages of a multi-page CorelDRAW drawing.
 //
-// Pipeline: file -> nitrojpeg / nitropng / nitropsd / nitroheic / nitrowebp / nitrodng / nitrotiff
+// Pipeline: file -> nitrojpeg / nitropng / nitropsd / nitroheic / nitrowebp / nitrodng / nitrotiff / nitroavif
 // (multi-threaded, into a buffer the decoder thread hands to Direct3D) -> compute shader (upsampling,
 // YCbCr->RGB, PNG rows, PSD planes) -> mipmaps -> trilinear scaled draw.
 // Anything else goes through WIC (damaged or CMYK JPEG, JPEG-compressed TIFF, GIF, BMP ...).
@@ -44,6 +44,9 @@
 #include "nitrodng.h"
 #include "nitrowebp.h"
 #include "nitrotiff.h"
+#ifdef NV_DAV1D
+#include "nitroavif.h"   // AVIF: AV1 through dav1d
+#endif
 #ifdef NV_SVG
 #include "nitrosvg.h"   // optional SVG rendering (lunasvg)
 #endif
@@ -100,7 +103,7 @@ static const wchar_t *base_name(const wchar_t *p) {
 // decoded image
 
 typedef enum { KIND_YUV = 0, KIND_BGRA = 1, KIND_PNG = 2, KIND_PLANAR = 3 } Kind;
-enum { MODE_WIC = -3, MODE_NITROPNG = -4, MODE_NITROPSD = -5, MODE_SVG = -6, MODE_CDR = -7, MODE_NITROHEVC = -8, MODE_NITRODNG = -9, MODE_NITROWEBP = -10, MODE_NITROTIFF = -11 };
+enum { MODE_WIC = -3, MODE_NITROPNG = -4, MODE_NITROPSD = -5, MODE_SVG = -6, MODE_CDR = -7, MODE_NITROHEVC = -8, MODE_NITRODNG = -9, MODE_NITROWEBP = -10, MODE_NITROTIFF = -11, MODE_NITROAVIF = -12 };
 
 #ifdef NV_VECTOR
 // A loaded vector document (SVG, CorelDRAW), shared by the images of its pages and the background
@@ -169,6 +172,7 @@ static const char *mode_name(int m) {
     case MODE_NITRODNG: return "nitrodng";
     case MODE_NITROWEBP: return "nitrowebp";
     case MODE_NITROTIFF: return "nitrotiff";
+    case MODE_NITROAVIF: return "nitroavif";
     case MODE_SVG: return "svg";
     case MODE_CDR: return "cdr";
     default: return "?";
@@ -305,7 +309,7 @@ static int has_ext(const wchar_t *path, const wchar_t *const *exts) {
         if (!_wcsicmp(dot + 1, exts[i])) return 1;
     return 0;
 }
-static const wchar_t *const g_exts[] = {L"jpg", L"jpeg", L"jpe", L"jfif", L"png", L"heic", L"heif", L"tif", L"tiff",
+static const wchar_t *const g_exts[] = {L"jpg", L"jpeg", L"jpe", L"jfif", L"png", L"heic", L"heif", L"avif", L"tif", L"tiff",
                                         L"webp", L"gif", L"bmp", L"psd", L"psb", L"cr2", L"nef", L"nrw", L"arw", L"raf", L"dng",
 #ifdef NV_SVG
                                         L"svg",
@@ -1179,6 +1183,26 @@ static Decoded *decode_file(const wchar_t *path) {
                 buf = NULL;
             }
         }
+#ifdef NV_DAV1D
+        na_info ai;   // AVIF: AV1 through dav1d, our colour conversion (in parallel)
+        if (!buf && !na_read_info(data, len, &ai) && ai.width <= MAX_TEX && ai.height <= MAX_TEX) {
+            size_t pitch = (size_t)ai.width * 4;
+            buf = buf_get(pitch * ai.height, &cap);
+            if (buf && !na_decode(data, len, &ai, buf, pitch, g_nthreads)) {
+                d->kind = KIND_BGRA;
+                d->width = ai.width;
+                d->height = ai.height;
+                d->pitch[0] = pitch;
+                d->size = pitch * ai.height;
+                d->orientation = ai.orientation;
+                d->mode = MODE_NITROAVIF;
+                d->bands = ai.ntiles;
+            } else if (buf) {
+                buf_put(buf, cap);
+                buf = NULL;
+            }
+        }
+#endif
     } else if (len >= 12 && !memcmp(data, "RIFF", 4) && !memcmp(data + 8, "WEBP", 4)) {
         nw_info wi;   // lossy WebP: nitrowebp (the tokens parsed on one thread, the rows reconstructed on another)
         if (!nw_read_info(data, len, &wi) && wi.plane_w[0] <= MAX_TEX && wi.plane_h[0] <= MAX_TEX) {
@@ -2631,7 +2655,7 @@ static int create_window(const wchar_t *first) {
 // file association (--register / --unregister): for the current user, no admin rights
 
 static const wchar_t *const g_assoc_exts[] = {L".jpg", L".jpeg", L".jpe", L".jfif", L".png", L".psd", L".psb", L".heic",
-                                              L".heif", L".tif", L".tiff", L".webp", L".gif", L".bmp", L".cr2", L".nef", L".nrw", L".arw", L".raf", L".dng",
+                                              L".heif", L".avif", L".tif", L".tiff", L".webp", L".gif", L".bmp", L".cr2", L".nef", L".nrw", L".arw", L".raf", L".dng",
 #ifdef NV_SVG
                                               L".svg",
 #endif
@@ -2669,7 +2693,7 @@ static int do_register(void) {
     bad |= reg_str(L"Software\\RegisteredApplications", L"NitroView", L"Software\\NitroView\\Capabilities");
     SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, NULL, NULL);
     if (bad) { fprintf(stderr, "could not write the registry\n"); return 1; }
-    printf("NitroView is registered for JPEG, PNG, PSD, HEIC, TIFF, WebP, GIF and BMP (%s).\n"
+    printf("NitroView is registered for JPEG, PNG, PSD, HEIC, AVIF, TIFF, WebP, GIF and BMP (%s).\n"
            "Windows lets only you choose the default app: in the Settings page that opens now, pick NitroView\n"
            "(or right-click an image > Open with > Choose another app > NitroView, \"Always\").\n"
            "After moving nitroview.exe, run --register again; --unregister removes all of it.\n", utf8(exe));
