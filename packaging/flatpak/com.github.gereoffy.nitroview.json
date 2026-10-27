@@ -23,11 +23,31 @@
   },
   "modules": [
     {
+      "name": "dav1d",
+      "buildsystem": "meson",
+      "config-opts": [
+        "--default-library=static",
+        "-Denable_tools=false",
+        "-Denable_tests=false",
+        "-Denable_examples=false"
+      ],
+      "cleanup": [
+        "*"
+      ],
+      "sources": [
+        {
+          "type": "archive",
+          "url": "https://downloads.videolan.org/pub/videolan/dav1d/1.5.4/dav1d-1.5.4.tar.xz",
+          "sha256": "686616b7c69eb88d44459391ab25cac13b6647a3b288835c5784e71c1514a5c5"
+        }
+      ]
+    },
+    {
       "name": "nitroview",
       "buildsystem": "simple",
       "build-commands": [
         "make clean",
-        "case \"$FLATPAK_ARCH\" in x86_64) cpu='-march=x86-64-v3' ;; aarch64) cpu='-mcpu=generic' ;; *) cpu='' ;; esac; make CPUFLAGS=\"$cpu\" gnome",
+        "case \"$FLATPAK_ARCH\" in x86_64) cpu='-march=x86-64-v3' ;; aarch64) cpu='-mcpu=generic' ;; *) cpu='' ;; esac; make CPUFLAGS=\"$cpu\" DAV1D_DIR=/app gnome",
         "install -Dm755 nitroview-gnome /app/bin/nitroview-gnome",
         "install -Dm644 packaging/gnome/com.github.gereoffy.nitroview.desktop /app/share/applications/com.github.gereoffy.nitroview.desktop",
         "install -Dm644 packaging/icon.png /app/share/icons/hicolor/512x512/apps/com.github.gereoffy.nitroview.png",

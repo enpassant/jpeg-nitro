@@ -27,7 +27,7 @@ ZLIB_VER=1.3.1      # (only for the Windows build: macOS and Linux have it)
 MIMALLOC_VER=2.1.7
 BOOST_VER=1.89.0
 SDL_VER=3.4.18
-DAV1D_VER=1.5.4   # (macOS: universal since nitroview.app uses it too)
+DAV1D_VER=1.5.4   # (macOS: universal since nitroview.app uses it too; also in packaging/flatpak/*.json, with its sha256)
 JOBS=$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 8)
 
 if [ ! -f stb_image.h ]; then
