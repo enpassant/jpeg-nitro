@@ -685,6 +685,14 @@ static int tex_get(int w, int h, ID3D11Texture2D **t, ID3D11ShaderResourceView *
 static void gpu_finish(void);
 
 // Convert + mipmaps on the GPU (asynchronous). Main thread.
+// (a failure: the texture back to the pool, not left as if converted)
+static ID3D11ShaderResourceView *texture_failed(Decoded *d) {
+    tex_put(d->tex, d->texsrv, d->width, d->height);
+    d->tex = NULL;
+    d->texsrv = NULL;
+    return NULL;
+}
+
 static ID3D11ShaderResourceView *texture_for(Decoded *d) {
     if (d->texsrv) return d->texsrv;
     if ((!d->rawsrv && !d->plsrv[0]) || tex_get(d->width, d->height, &d->tex, &d->texsrv)) return NULL;
@@ -722,7 +730,7 @@ static ID3D11ShaderResourceView *texture_for(Decoded *d) {
         D3D11_RENDER_TARGET_VIEW_DESC rd = {0};
         rd.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
         rd.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
-        if (FAILED(ID3D11Device_CreateRenderTargetView(g_dev, (ID3D11Resource *)d->tex, &rd, &rtv))) return NULL;
+        if (FAILED(ID3D11Device_CreateRenderTargetView(g_dev, (ID3D11Resource *)d->tex, &rd, &rtv))) return texture_failed(d);
         D3D11_VIEWPORT vp = {0, 0, (float)d->width, (float)d->height, 0, 1};
         ID3D11DeviceContext_OMSetRenderTargets(g_ctx, 1, &rtv, NULL);
         ID3D11DeviceContext_RSSetViewports(g_ctx, 1, &vp);
@@ -743,7 +751,7 @@ static ID3D11ShaderResourceView *texture_for(Decoded *d) {
         D3D11_UNORDERED_ACCESS_VIEW_DESC ud = {0};
         ud.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
         ud.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D;
-        if (FAILED(ID3D11Device_CreateUnorderedAccessView(g_dev, (ID3D11Resource *)d->tex, &ud, &uav))) return NULL;
+        if (FAILED(ID3D11Device_CreateUnorderedAccessView(g_dev, (ID3D11Resource *)d->tex, &ud, &uav))) return texture_failed(d);
         ID3D11DeviceContext_CSSetShader(g_ctx, tex_path ? g_cs_tex : g_cs, NULL, 0);
         ID3D11DeviceContext_CSSetConstantBuffers(g_ctx, 0, 1, &g_cb_conv);
         if (tex_path) {
