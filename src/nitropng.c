@@ -250,6 +250,7 @@ static int read_dynamic(BR *r, Tables *t) {
     uint8_t lens[286 + 30];
     unsigned n = 0, total = hlit + hdist;
     while (n < total) {
+        if (br_over(r)) return -1;   // (the data ended in the header: the padding decodes as codes too)
         br_refill(r);
         uint32_t e = clt[br_peek(r, 7)];
         if (E_KIND(e) == K_BAD) return -1;
