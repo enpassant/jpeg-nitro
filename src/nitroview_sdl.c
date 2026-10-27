@@ -2615,10 +2615,7 @@ static int header_size(const char *path, double *w, double *h) {
         *w = ji.width; *h = ji.height; o = ji.orientation; ok = 1;
     }
     if (!ok && !np_read_info(b, n, &pi)) {   // (an eXIf after the first MB: not seen here)
-        int swap = pi.orientation >= 5;
-        *w = swap ? pi.height : pi.width;
-        *h = swap ? pi.width : pi.height;
-        ok = 1;
+        *w = pi.width; *h = pi.height; o = pi.orientation; ok = 1;
     }
     if (!ok && n >= 26 && !memcmp(b, "8BPS", 4)) {   // (ps_read_info wants the whole file)
         *h = (double)((uint32_t)b[14] << 24 | (uint32_t)b[15] << 16 | (uint32_t)b[16] << 8 | b[17]);
