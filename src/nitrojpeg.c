@@ -198,11 +198,13 @@ typedef struct {
     int progressive;              // SOF2: decoded by nj_decode_prog
     size_t sos_pos;               // the first SOS marker
     uint8_t comp_id[3];
-    // header template for band JPEGs: SOI DQT* DHT* [DRI] SOF SOS
+#ifdef NJ_REFERENCE
+    // header template for band JPEGs (the old engine): SOI DQT* DHT* [DRI] SOF SOS
     uint8_t hdr[4096];
     size_t hdr_len;
     size_t hdr_height_off;        // offset of the SOF height field in hdr
     int hdr_overflow;             // template did not fit: old engine can't split this file
+#endif
 } Jpeg;
 
 // zigzag index -> natural (row-major) index; 16 extra entries guard
@@ -235,12 +237,16 @@ static int parse_exif_orientation(const uint8_t *p, size_t n) {
     return 1;
 }
 
+#ifdef NJ_REFERENCE
 static int hdr_append(Jpeg *j, const uint8_t *p, size_t n) {   // never fails: only the old engine needs it
     if (j->hdr_len + n > sizeof j->hdr) { j->hdr_overflow = 1; return 0; }
     memcpy(j->hdr + j->hdr_len, p, n);
     j->hdr_len += n;
     return 0;
 }
+#else
+static inline int hdr_append(Jpeg *j, const uint8_t *p, size_t n) { (void)j; (void)p; (void)n; return 0; }
+#endif
 
 static int parse(const uint8_t *d, size_t len, Jpeg *j) {
     memset(j, 0, sizeof *j);
@@ -249,7 +255,9 @@ static int parse(const uint8_t *d, size_t len, Jpeg *j) {
     nj_info *fi = &j->info;
     fi->orientation = 1;
     if (len < 4 || d[0] != 0xFF || d[1] != 0xD8) return -1;
+#ifdef NJ_REFERENCE
     j->hdr[0] = 0xFF; j->hdr[1] = 0xD8; j->hdr_len = 2;
+#endif
 
     uint8_t sof[64]; size_t sof_len = 0;
     uint8_t comp_id[3] = {0};
@@ -391,7 +399,9 @@ static int parse(const uint8_t *d, size_t len, Jpeg *j) {
                 uint8_t dri[6] = {0xFF, 0xDD, 0, 4, (uint8_t)(fi->restart_interval >> 8), (uint8_t)fi->restart_interval};
                 if (hdr_append(j, dri, 6)) return -1;
             }
+#ifdef NJ_REFERENCE
             j->hdr_height_off = j->hdr_len + 5;
+#endif
             if (hdr_append(j, sof, sof_len)) return -1;
             if (hdr_append(j, d + pos - 2, L + 2)) return -1;
             fi->supported = ok;
@@ -509,8 +519,10 @@ typedef struct {
     size_t a, b;          // chunk [a, b) of raw bytes
     size_t removed;       // bytes in [a, b) dropped by unstuffing: stuffed 0x00s, RST markers
     size_t end;           // first non-RST marker found (SIZE_MAX if none)
-    size_t *rst;          // raw positions of RST markers (0xFF byte) owned by this chunk
+#ifdef NJ_REFERENCE
+    size_t *rst;          // raw positions of RST markers (0xFF byte) owned by this chunk (old engine)
     size_t nrst, caprst;
+#endif
     size_t *rstc;         // for the own engine: clean offsets where restart intervals start
     size_t nrstc;
 } ScanChunk;
@@ -532,11 +544,13 @@ static void scan_chunk(const uint8_t *d, size_t len, size_t lo, ScanChunk *c) {
             i += 2;
         } else if (nb >= 0xD0 && nb <= 0xD7) {
             if (i >= c->a) {
+#ifdef NJ_REFERENCE
                 if (c->nrst == c->caprst) {
                     c->caprst = c->caprst ? c->caprst * 2 : 256;
                     c->rst = realloc(c->rst, c->caprst * sizeof *c->rst);
                 }
                 c->rst[c->nrst++] = i;
+#endif
                 c->removed++;
             }
             c->removed += partner_here;
@@ -595,7 +609,6 @@ typedef struct {
     const size_t *pitch;
     uint8_t *bgrx;            // bgrx mode
     size_t bgrx_pitch;
-    int width, height;
 } Output;
 
 #ifdef NJ_REFERENCE
@@ -1999,7 +2012,7 @@ static int nj_decode_own(const uint8_t *data, size_t len, const Output *o, int n
         free(ch);
     }
 out:
-    for (int t = 0; t < T; t++) { free(sc[t].rst); free(sc[t].rstc); }
+    for (int t = 0; t < T; t++) free(sc[t].rstc);
     free(sc);
     pool_give(clean, clean_cap);
     free(j);
@@ -2604,7 +2617,7 @@ out:
 
 int nj_decode_planes(const uint8_t *data, size_t len, const nj_info *info, uint8_t *const planes[3],
                      const size_t pitch[3], int nthreads, nj_stats *stats) {
-    Output o = {planes, pitch, NULL, 0, info->width, info->height};
+    Output o = {planes, pitch, NULL, 0};
 #ifdef NJ_REFERENCE
     if (g_engine == 1) return nj_decode(data, len, &o, nthreads, stats);
 #endif
@@ -2620,7 +2633,7 @@ int nj_decode_planes(const uint8_t *data, size_t len, const nj_info *info, uint8
 #ifdef NJ_REFERENCE
 int nj_decode_bgrx(const uint8_t *data, size_t len, const nj_info *info, uint8_t *dst, size_t pitch,
                    int nthreads, nj_stats *stats) {
-    Output o = {NULL, NULL, dst, pitch, info->width, info->height};
+    Output o = {NULL, NULL, dst, pitch};
     return nj_decode(data, len, &o, nthreads, stats);
 }
 #endif
