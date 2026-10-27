@@ -18,6 +18,7 @@
 #   make gnome           GNOME/libadwaita viewer: nitroview-gnome (the decoders linked in statically)
 #   make sdl             SDL3 + OpenGL viewer for Linux: nitroview-sdl (SDL3 from scripts/get-deps.sh;
 #                        builds on macOS too, for testing)
+#   make sdl-dist        nitroview-linux-x64.tar.gz: it as one portable file (x86-64-v3, no libstdc++)
 #   make flatpak         GNOME 50 Flatpak bundle: nitroview-gnome.flatpak
 #   make linux           Linux (also the default there): library + portable tools - nbench,
 #                        pngverify, psdverify, the ASan robustness tests, and verify / robust
@@ -99,6 +100,8 @@ LIBCDR     := third_party/libcdr
 LIBREVENGE := third_party/librevenge
 LCMS       := third_party/lcms2
 BOOST      := third_party/boost
+# zlib for CorelDRAW in the Windows and the portable Linux build (macOS / Linux have it)
+ZLIB       := third_party/zlib
 CDR        ?= $(if $(and $(filter 1,$(SVG)),$(wildcard $(LIBCDR)/inc/libcdr/libcdr.h),$(wildcard $(LIBREVENGE)/inc/librevenge/librevenge.h),$(wildcard $(LCMS)/include/lcms2.h),$(wildcard $(BOOST)/boost/optional.hpp)),1,0)
 MI         := third_party/mimalloc
 MIMALLOC   ?= $(if $(and $(filter 1,$(SVG)),$(wildcard $(MI)/include/mimalloc-new-delete.h)),1,0)
@@ -258,6 +261,35 @@ $(SDL_BIN): src/nitroview_sdl.c build/icon.inc $(SDL_DEC) $(SDL_VEC) $(DEC_HDR) 
 
 sdl: $(SDL_BIN)
 	@echo "built $(SDL_BIN) (SVG: $(if $(filter -DNV_SVG,$(SDL_VDEFS)),yes,no), CorelDRAW: $(if $(filter -DNV_CDR,$(SDL_VDEFS)),yes,no))"
+
+# Portable Linux build of it (make sdl-dist): x86-64-v3 (AVX2; DIST_ARCH=x86-64-v2 for older CPUs)
+# instead of -march=native, libstdc++ / libgcc and zlib linked in. One file that needs only the build
+# system's glibc (or newer) and, at run time, OpenGL and Wayland / X11; --register adds it to the
+# desktop. nitroview-linux-x64.tar.gz: just that file (keeping its execute permission).
+DIST_ARCH  ?= x86-64-v3
+DIST_DIR   := build/dist
+DIST_TGZ   := nitroview-linux-x64.tar.gz
+DIST_VEC   := $(if $(filter 1,$(CDR)),$(DIST_DIR)/libnitrocdr.a) $(if $(filter 1,$(SVG)),$(DIST_DIR)/libnitrosvg.a)
+$(DIST_DIR)/libnitrosvg.a: src/nitrosvg.cpp src/nitrosvg.h $(SVG_STAMP)
+	$(call svg_lib,-march=$(DIST_ARCH))
+$(DIST_DIR)/libnitrocdr.a: CDR_C += $(addprefix $(ZLIB)/,adler32.c crc32.c inflate.c inffast.c inftrees.c zutil.c)
+$(DIST_DIR)/libnitrocdr.a: CDR_DEFS += -I$(ZLIB)
+$(DIST_DIR)/libnitrocdr.a: src/nitrocdr.cpp src/nitrocdr.h $(CDR_STAMP)
+	$(call cdr_lib,-march=$(DIST_ARCH) -I$(ZLIB))
+$(DIST_DIR)/nitroview-sdl: src/nitroview_sdl.c build/icon.inc $(DEC_SRC) $(DEC_HDR) src/nitroheic.c src/nitroheic.h src/nitrohevc.c src/nitrohevc.h \
+                           src/nitrodng.c src/nitrodng.h src/nitrowebp.c src/nitrowebp.h src/nitrosvg.h src/nitrocdr.h $(DIST_VEC)
+	@test -f $(SDL3_DIR)/lib/libSDL3.a -a -f third_party/stb_image.h || { echo "missing SDL3 / stb_image: run scripts/get-deps.sh first"; exit 1; }
+	@mkdir -p $(@D)
+	$(CC) -O3 -march=$(DIST_ARCH) $(X86JCC) $(DEFS) -fblocks -Wall -Wextra -Wno-unused-parameter \
+	  $(if $(filter %libnitrosvg.a,$(DIST_VEC)),-DNV_SVG) $(if $(filter %libnitrocdr.a,$(DIST_VEC)),-DNV_CDR) \
+	  -Isrc -Ibuild -Ithird_party -I$(SDL3_DIR)/include src/nitroview_sdl.c $(DEC_SRC) src/nitroheic.c src/nitrohevc.c src/nitrodng.c \
+	  src/nitrowebp.c $(DIST_VEC) $(SDL_LIBS) $(if $(DIST_VEC),-Wl$(COMMA)-Bstatic -lstdc++ -Wl$(COMMA)-Bdynamic) -static-libgcc \
+	  -lpthread -lm -o $@
+	@echo "$@ needs: $$(objdump -p $@ | sed -n 's/ *NEEDED *//p' | tr '\n' ' ')(glibc $$(objdump -T $@ | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1 | cut -d_ -f2))"
+$(DIST_TGZ): $(DIST_DIR)/nitroview-sdl
+	tar -C $(DIST_DIR) -czf $@ nitroview-sdl
+sdl-dist: $(DIST_TGZ)
+	@echo "built $(DIST_TGZ)"
 
 # Development desktop registration for GNOME Shell. The generated desktop entry uses
 # the absolute path of this source-tree binary so it also works without installing it.
@@ -487,7 +519,7 @@ linux: linux-lib $(LINUX_TOOLS)
 	@echo "built $(LIB_SHARED) $(LIB_STATIC) $(LINUX_TOOLS)$(if $(wildcard $(LJT)/lib/libturbojpeg.a),, (verify / robust: run scripts/get-deps.sh first))"
 
 clean:
-	rm -rf build nitroview nitroview-gnome nitroview-sdl nitroview-gnome.flatpak nitroview.app nitroview.exe nitroview.zip nitroview.dmg \
+	rm -rf build nitroview nitroview-gnome nitroview-sdl nitroview-linux-x64.tar.gz nitroview-gnome.flatpak nitroview.app nitroview.exe nitroview.zip nitroview.dmg \
 	  bench/bench bench/verify bench/robust bench/freqprobe bench/sustain bench/pngbench bench/pngsplit \
 	  bench/pngverify bench/pngrobust bench/psdverify bench/psdrobust bench/nbench bench/rgbverify bench/*.exe
 
@@ -510,7 +542,6 @@ build/nitroview_res.o: packaging/nitroview.rc packaging/nitroview.ico
 # zlib, which Windows lacks, from third_party/zlib into libnitrocdr.a)
 WINCXX  ?= $(patsubst %clang,%clang++,$(WINCC))
 WINAR   ?= $(if $(findstring /,$(WINCC)),$(dir $(WINCC)))llvm-ar
-ZLIB    := third_party/zlib
 WIN_OBJS :=
 WIN_DEFS :=
 ifeq ($(CDR),1)
@@ -566,4 +597,4 @@ notarize:
 	xcrun stapler staple nitroview.dmg
 	@echo "nitroview.dmg is notarized"
 
-.PHONY: all app zip dmg notarize tools linux linux-lib gnome gnome-register sdl flatpak windows clean deps ljt
+.PHONY: all app zip dmg notarize tools linux linux-lib gnome gnome-register sdl sdl-dist flatpak windows clean deps ljt

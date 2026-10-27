@@ -12,7 +12,7 @@ Linuxra**:
 | macOS 12-től, Intel és Apple Silicon | Cocoa + Metal: universal `nitroview.app` | `make app` / `make dmg` |
 | Windows 10-től | Win32 + Direct3D 11: egyetlen önálló `nitroview.exe` | `make windows` (llvm-mingw) |
 | Linux, GNOME | GTK 4 + libadwaita: `nitroview-gnome`, Flatpakként is | `make gnome` / `make flatpak` |
-| Linux (Wayland / X11), új | SDL3 + OpenGL 3.3: egyetlen önálló `nitroview-sdl` | `make sdl` |
+| Linux (Wayland / X11), új | SDL3 + OpenGL 3.3: egyetlen önálló `nitroview-sdl` | `make sdl` / `make sdl-dist` |
 
 Mindhárom ugyanazokra a saját dekóderekre épül: hármat, amelyek egyetlen képet is az összes CPU-magon
 dekódolnak — pedig a JPEG, a PNG és a PSD tömörítése is eredendően soros —, egyet, amely a HEIC-fotók
@@ -218,7 +218,12 @@ vállalnak (16 bites, palettás vagy interlace-elt PNG, GIF, BMP, sérült vagy 
 stb_image bontja ki. Az SDL3 statikusan van belefordítva, az OpenGL-t és a Waylandet / X11-et futáskor
 tölti be, GTK nem kell hozzá. Az SDL3-at a `scripts/get-deps.sh` fordítja (az ehhez szükséges
 fejlesztői csomagok ott vannak felsorolva). macOS-en is lefordul, de csak teszteléshez (ott az OpenGL
-lassú; a valódi néző a Metal-os marad).
+lassú; a valódi néző a Metal-os marad). A `make sdl-dist` készíti a továbbadható egyetlen fájlt, a
+`nitroview-linux-x64.tar.gz`-t (3 MB): a fordító gép processzora helyett x86-64-v3-ra (AVX2) fordítva,
+a libstdc++-szal és a zlibbel együtt, csak a glibc kell hozzá (Ubuntu 22.04-en fordítva 2.35-ös vagy
+újabb). A `nitroview-sdl --register` az aktuális felhasználónak felveszi az asztal alkalmazásai közé
+(desktop fájl és ikon a `~/.local/share`-ben: „Megnyitás ezzel” a fájlkezelőben), az `--unregister`
+eltávolítja.
 
 Az ablak a képhez igazodik: ha a kép kisebb a képernyőnél, pontosan 100%-on, egyébként a kép
 arányával, akkorára, amekkora kifér (fekete sávok nélkül). Nagyításkor az ablak a képpel együtt nő, a

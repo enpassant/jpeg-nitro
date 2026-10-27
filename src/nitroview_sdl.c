@@ -6,6 +6,7 @@
 //   nitroview-sdl [-f] [-s ms] [-j threads] file.jpg [more files, directories or wildcards...]
 //   nitroview-sdl --bench files...     decode everything, print timings (a hidden window)
 //   nitroview-sdl --selftest files...  compare the GPU output with stb_image's decoding
+//   nitroview-sdl --register           add it to the desktop's applications ("Open with")
 //
 // Keys, mouse and window behaviour as in the other viewers (see README), + O: open files,
 // Shift+O: a folder.
@@ -19,6 +20,9 @@
 #include <SDL3/SDL.h>
 #include <math.h>
 #include <stdint.h>
+#ifdef __linux__
+#include <unistd.h>   // readlink
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -603,7 +607,7 @@ static GLuint compile(GLenum type, const char *src) {
     return s;
 }
 
-static GLuint link(const char *vs, const char *fs) {
+static GLuint link_program(const char *vs, const char *fs) {
     GLuint v = compile(GL_VERTEX_SHADER, vs), f = compile(GL_FRAGMENT_SHADER, fs);
     if (!v || !f) return 0;
     GLuint p = glCreateProgram();
@@ -657,9 +661,9 @@ static int png_gpu_check(void) {
 
 static int gpu_init(void) {
     if (gl_load()) return -1;
-    g_conv_prog = link(g_conv_vs, g_conv_fs);
-    g_png_prog = link(g_conv_vs, g_png_fs);
-    g_draw_prog = link(g_draw_vs, g_draw_fs);
+    g_conv_prog = link_program(g_conv_vs, g_conv_fs);
+    g_png_prog = link_program(g_conv_vs, g_png_fs);
+    g_draw_prog = link_program(g_draw_vs, g_draw_fs);
     if (!g_conv_prog || !g_draw_prog) return -1;
     glUseProgram(g_conv_prog);
     U.kind = glGetUniformLocation(g_conv_prog, "kind");
@@ -2683,6 +2687,91 @@ static int run_selftest(FileList *fl) {
 }
 
 // ---------------------------------------------------------------------------
+// desktop integration (--register / --unregister): a desktop file and the icon for the current
+// user, so the file manager offers it ("Open with") and the window gets its icon (Linux)
+
+#define APP_ID "com.github.gereoffy.nitroview.sdl"
+
+#ifdef __linux__
+static char *data_home(const char *sub) {   // $XDG_DATA_HOME/sub, by default ~/.local/share/sub
+    const char *x = getenv("XDG_DATA_HOME"), *h = getenv("HOME");
+    char *p = NULL;
+    if (x && *x) SDL_asprintf(&p, "%s/%s", x, sub);
+    else if (h) SDL_asprintf(&p, "%s/.local/share/%s", h, sub);
+    return p;
+}
+#endif
+
+static int do_register(int on) {
+#ifdef __linux__
+    char exe[4096];
+    ssize_t n = readlink("/proc/self/exe", exe, sizeof exe - 1);
+    char *apps = data_home("applications"), *icons = data_home("icons/hicolor/512x512/apps");
+    if (n <= 0 || !apps || !icons) { fprintf(stderr, "cannot find the program or the home directory\n"); return 1; }
+    exe[n] = 0;
+    char *desktop = NULL, *icon = NULL;
+    SDL_asprintf(&desktop, "%s/" APP_ID ".desktop", apps);
+    SDL_asprintf(&icon, "%s/" APP_ID ".png", icons);
+    int bad = 0;
+    if (on) {
+        char q[8192], *o = q;   // the path as a desktop file wants it: quoted, \ " ` $ escaped
+        *o++ = '"';
+        for (const char *c = exe; *c && o < q + sizeof q - 4; c++) {
+            if (strchr("\\\"`$", *c)) *o++ = '\\';
+            *o++ = *c;
+        }
+        *o++ = '"';
+        *o = 0;
+        char *text = NULL;
+        SDL_asprintf(&text,
+            "[Desktop Entry]\n"
+            "Type=Application\n"
+            "Name=NitroView\n"
+            "Comment=Very fast image viewer (SDL)\n"
+            "Exec=%s %%F\n"
+            "Icon=" APP_ID "\n"
+            "Terminal=false\n"
+            "Categories=Graphics;Viewer;\n"
+            "MimeType=image/jpeg;image/png;image/gif;image/bmp;image/webp;image/heic;image/heif;image/x-tga;"
+            "image/vnd.adobe.photoshop;image/x-adobe-dng;image/x-canon-cr2;image/x-nikon-nef;image/x-sony-arw;image/x-fuji-raf;"
+#ifdef NV_SVG
+            "image/svg+xml;"
+#endif
+#ifdef NV_CDR
+            "image/x-coreldraw;"
+#endif
+            "\n"
+            "StartupNotify=true\n", q);
+        bad = !text || !SDL_CreateDirectory(apps) || !SDL_CreateDirectory(icons) || !SDL_SaveFile(desktop, text, strlen(text)) ||
+              !SDL_SaveFile(icon, icon_png, icon_png_len);
+        SDL_free(text);
+    } else {
+        SDL_RemovePath(desktop);
+        SDL_RemovePath(icon);
+    }
+    char *cmd = NULL;   // (the desktop's caches; not every system has these tools)
+    SDL_asprintf(&cmd, "update-desktop-database '%s' >/dev/null 2>&1; gtk-update-icon-cache -q -t '%s/../..' >/dev/null 2>&1", apps, icons);
+    if (cmd && !strchr(apps, '\'') && !strchr(icons, '\'')) {
+        int r = system(cmd);
+        (void)r;
+    }
+    SDL_free(cmd);
+    if (bad) fprintf(stderr, "could not write %s: %s\n", desktop, SDL_GetError());
+    else if (on) printf("NitroView is registered: %s\n(it runs %s; after moving it, run --register again; --unregister removes it)\n", desktop, exe);
+    else printf("NitroView is unregistered.\n");
+    SDL_free(desktop);
+    SDL_free(icon);
+    SDL_free(apps);
+    SDL_free(icons);
+    return bad;
+#else
+    (void)on;
+    fprintf(stderr, "--register: only on Linux\n");
+    return 1;
+#endif
+}
+
+// ---------------------------------------------------------------------------
 
 static void usage(void) {
     fprintf(stderr,
@@ -2695,6 +2784,8 @@ static void usage(void) {
         "  -j N                  use N decoder threads (default: all logical CPUs; progressive JPEG: 4)\n"
         "  --bench               load all files (a hidden window), print timings\n"
         "  --selftest            compare the GPU output with stb_image's decoding\n"
+        "  --register            add nitroview to the desktop's applications (\"Open with\"), current user\n"
+        "  --unregister          remove that again\n"
         "  -h, --help            this help\n"
         "\n"
         "keys:\n"
@@ -2732,11 +2823,13 @@ int main(int argc, char **argv) {
         else if ((!strcmp(a, "-s") || !strcmp(a, "--slideshow")) && i + 1 < argc) slide_ms = atof(argv[++i]);
         else if (!strcmp(a, "-h") || !strcmp(a, "--help")) help = 1;
         else if (!strcmp(a, "-n") || !strcmp(a, "--new-window")) {}   // (the other viewers' option: always a new window here)
+        else if (!strcmp(a, "--register")) return do_register(1);
+        else if (!strcmp(a, "--unregister")) return do_register(0);
         else args[nargs++] = argv[i];
     }
     if (help) { usage(); return 1; }
     g_pool_lock = SDL_CreateMutex();
-    SDL_SetAppMetadata("NitroView", "1.0", "com.github.gereoffy.nitroview");   // (Wayland: the desktop file's icon)
+    SDL_SetAppMetadata("NitroView", "1.0", APP_ID);   // (Wayland: the desktop file's icon, see --register)
     SDL_SetHint(SDL_HINT_VIDEO_ALLOW_SCREENSAVER, "1");
     if (!SDL_Init(SDL_INIT_VIDEO)) { fprintf(stderr, "SDL: %s\n", SDL_GetError()); return 1; }
     FileList fl = {0};

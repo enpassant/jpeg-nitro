@@ -12,7 +12,7 @@ GNOME/Linux**:
 | macOS 12+, Intel and Apple Silicon | Cocoa + Metal: a universal `nitroview.app` | `make app` / `make dmg` |
 | Windows 10+ | Win32 + Direct3D 11: one self-contained `nitroview.exe` | `make windows` (llvm-mingw) |
 | Linux with GNOME | GTK 4 + libadwaita: `nitroview-gnome`, also as a Flatpak | `make gnome` / `make flatpak` |
-| Linux (Wayland / X11), new | SDL3 + OpenGL 3.3: one self-contained `nitroview-sdl` | `make sdl` |
+| Linux (Wayland / X11), new | SDL3 + OpenGL 3.3: one self-contained `nitroview-sdl` | `make sdl` / `make sdl-dist` |
 
 All three are built on our own decoders: three that decode a *single* image on all CPU cores —
 although JPEG, PNG and PSD compression are all sequential by design —, one that decodes the tiles of
@@ -141,7 +141,12 @@ mipmaps, trilinear drawing; pixel-exact 200–800%). Whatever our decoders don't
 or interlaced PNG, GIF, BMP, damaged or CMYK JPEG) goes to stb_image. SDL3 is linked in statically;
 OpenGL and Wayland / X11 are loaded at run time, so it needs no GTK. `scripts/get-deps.sh` builds
 SDL3 (the window systems' development packages it needs are listed there). It builds on macOS too,
-only for testing (there OpenGL is slow; the Metal viewer stays the real one).
+only for testing (there OpenGL is slow; the Metal viewer stays the real one). `make sdl-dist` makes
+the one file to give away, `nitroview-linux-x64.tar.gz` (3 MB): built for x86-64-v3 (AVX2) instead
+of the build machine's CPU, libstdc++ and zlib linked in, it needs only glibc (2.35+ when built on
+Ubuntu 22.04). `nitroview-sdl --register` adds it to the desktop's applications for the current user
+(a desktop file and the icon in `~/.local/share`: "Open with" in the file manager), `--unregister`
+removes it.
 
 The window is sized to the image: at exactly 100% if it is smaller than the screen, otherwise
 with the image's aspect ratio as large as fits (no black bars). When zooming in, the window grows with the image up to the screen
