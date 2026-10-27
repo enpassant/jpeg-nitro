@@ -2657,7 +2657,8 @@ static int create_window(const char *first, int hidden) {
     SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 0);
     // first size: from the header, so the window doesn't jump when the image arrives
     float k = SDL_GetDisplayContentScale(SDL_GetPrimaryDisplay());
-    if (k > 0 && !strcmp(SDL_GetCurrentVideoDriver(), "cocoa")) g_density = k;   // (Retina: 2 device pixels per point)
+    const char *drv = SDL_GetCurrentVideoDriver();   // (Retina, a scaled Wayland output: device pixels per window
+    if (k > 0 && drv && (!strcmp(drv, "cocoa") || !strcmp(drv, "wayland"))) g_density = k;   // unit; X11: pixels)
     double w, h, cw, ch;
     if (first && header_size(first, &w, &h)) {
         window_content_size(w, h, 0, &cw, &ch);
