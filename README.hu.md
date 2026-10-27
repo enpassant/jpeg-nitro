@@ -211,7 +211,7 @@ GNOME 50 runtime-ra fordítja a `nitroview-gnome.flatpak`-ot.
 
 **SDL3 / Linux (új, tesztelés alatt):** a `nitroview-sdl` ([src/nitroview_sdl.c](src/nitroview_sdl.c))
 a windowsos néző felépítése Win32 + Direct3D helyett SDL3 + OpenGL 3.3-mal: ugyanazok a billentyűk és
-egérműveletek (+ O: fájlok megnyitása), ablakkezelés, előtöltés, Del / U, E / Shift+E, SVG / CorelDRAW
+egérműveletek (+ O: fájlok, Shift+O: mappa megnyitása), ablakkezelés, előtöltés, Del / U, E / Shift+E, SVG / CorelDRAW
 éles nagyítással, `--bench` és `--selftest`, és ugyanaz a GPU-út (a síkok textúraként, YCbCr→RGB
 shaderben, mipmapek, trilineáris rajzolás; pixelpontos 200–800%). Amit a saját dekóderek nem
 vállalnak (16 bites, palettás vagy interlace-elt PNG, GIF, BMP, sérült vagy CMYK JPEG), azt az

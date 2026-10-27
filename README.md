@@ -135,7 +135,7 @@ cannot finish a GNOME 50 build).
 
 **SDL3 / Linux (new, being tested):** `nitroview-sdl` ([src/nitroview_sdl.c](src/nitroview_sdl.c))
 is the Windows viewer's structure on SDL3 + OpenGL 3.3 instead of Win32 + Direct3D: the same keys and
-mouse (+ O: open files), window behaviour, prefetch, Del / U, E / Shift+E, SVG / CorelDRAW with sharp
+mouse (+ O: open files, Shift+O: a folder), window behaviour, prefetch, Del / U, E / Shift+E, SVG / CorelDRAW with sharp
 zoom, `--bench` and `--selftest`, and the same GPU path (planes as textures, YCbCr→RGB in a shader,
 mipmaps, trilinear drawing; pixel-exact 200–800%). Whatever our decoders don't take (16-bit, palette
 or interlaced PNG, GIF, BMP, damaged or CMYK JPEG) goes to stb_image. SDL3 is linked in statically;

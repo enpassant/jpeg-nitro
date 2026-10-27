@@ -7,7 +7,8 @@
 //   nitroview-sdl --bench files...     decode everything, print timings (a hidden window)
 //   nitroview-sdl --selftest files...  compare the GPU output with stb_image's decoding
 //
-// Keys, mouse and window behaviour as in the other viewers (see README), + O: open files.
+// Keys, mouse and window behaviour as in the other viewers (see README), + O: open files,
+// Shift+O: a folder.
 //
 // Pipeline: file -> nitrojpeg / nitropng / nitropsd / nitroheic / nitrowebp / nitrodng
 // (multi-threaded, into a host buffer, on the decoder thread) -> OpenGL: the planes as textures
@@ -1669,7 +1670,7 @@ static void clamp_center(const Decoded *d, double s) {
 static void update_title(void) {
     char t[1024];
     if (!V.nfiles) {
-        SDL_SetWindowTitle(V.win, "nitroview - drop images here, or O to open");
+        SDL_SetWindowTitle(V.win, "nitroview - drop images here, or O to open files, Shift+O a folder");
         return;
     }
     const char *name = base_name(V.files[V.index]);
@@ -1969,7 +1970,7 @@ static void SDLCALL dialog_done(void *userdata, const char *const *files, int fi
     if (l) post(EV_OPEN, 0, l);
 }
 
-static void open_dialog(void) {
+static void open_dialog(int folder) {   // (SDL has no dialog for files and folders at once)
     static const SDL_DialogFileFilter f[] = {{"Images", "jpg;jpeg;jpe;jfif;png;heic;heif;webp;gif;bmp;tga;psd;psb;cr2;nef;nrw;arw;raf;dng"
 #ifdef NV_SVG
                                                          ";svg"
@@ -1979,7 +1980,8 @@ static void open_dialog(void) {
 #endif
                                               },
                                              {"All files", "*"}};
-    SDL_ShowOpenFileDialog(dialog_done, NULL, V.win, f, 2, NULL, true);
+    if (folder) SDL_ShowOpenFolderDialog(dialog_done, NULL, V.win, NULL, false);
+    else SDL_ShowOpenFileDialog(dialog_done, NULL, V.win, f, 2, NULL, true);
 }
 
 // Slideshow: the next image comes slide_ms after the current one was drawn.
@@ -2311,7 +2313,7 @@ static void on_key(SDL_Keycode k, SDL_Keymod mod) {
     double step = (mod & SDL_KMOD_SHIFT) ? 0.5 : 0.125;
     if (mod & (SDL_KMOD_CTRL | SDL_KMOD_GUI)) {
         if (k == SDLK_Z) undo_delete();
-        else if (k == SDLK_O) open_dialog();
+        else if (k == SDLK_O) open_dialog((mod & SDL_KMOD_SHIFT) != 0);
         else if (k == SDLK_Q || k == SDLK_W) V.quit = 1;
         return;
     }
@@ -2326,7 +2328,7 @@ static void on_key(SDL_Keycode k, SDL_Keymod mod) {
     case SDLK_HOME: page_first(); break;
     case SDLK_END: page_last(); break;
     case SDLK_F: case SDLK_RETURN: case SDLK_KP_ENTER: case SDLK_F11: toggle_fullscreen(); break;
-    case SDLK_O: open_dialog(); break;
+    case SDLK_O: open_dialog((mod & SDL_KMOD_SHIFT) != 0); break;   // Shift: a folder
     case SDLK_ESCAPE:
         if (V.fullscreen) toggle_fullscreen();
         else V.quit = 1;
@@ -2704,7 +2706,7 @@ static void usage(void) {
         "  W                       back to the image's own size (small images 100%%, window follows)\n"
         "  E / Shift+E             DNG raw image: brighter / darker (1/3 EV steps, kept while paging)\n"
         "  Del                     move the file to the .delete folder next to it   U / Ctrl+Z  undo\n"
-        "  O / Ctrl+O              open files\n"
+        "  O / Ctrl+O              open files         Shift+O                  open a folder\n"
         "mouse:\n"
         "  drag                    move a zoomed image\n"
         "  wheel                   zoom around the cursor (touchpad: smooth, pinch too)\n"
@@ -2755,7 +2757,7 @@ int main(int argc, char **argv) {
         go(0, 1);
     } else {
         update_title();
-        open_dialog();
+        open_dialog(0);
     }
     if (full) toggle_fullscreen();
     if (slide_ms > 0) {
