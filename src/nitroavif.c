@@ -348,7 +348,7 @@ static int csp(const na_info *in, const Dav1dPicture *p, const Dav1dPicture *a, 
     }
     int bd = p->p.bpc, sh = bd - 8;
     float max = (float)((1 << bd) - 1);
-    if (full || c->identity) {
+    if (full) {   // (identity: G, B and R all in the luma range, H.273)
         c->yscale = c->cscale = 1 / max;
         c->coff = (float)(1 << (bd - 1));
     } else {
