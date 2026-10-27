@@ -32,6 +32,7 @@
 #include <wincodec.h>
 #include <mmsystem.h>
 #include <math.h>
+#include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -94,6 +95,15 @@ static char *utf8(const wchar_t *w) {   // for printing (rotating buffers, per t
     return b;
 }
 
+// _snwprintf that always ends the string (_snwprintf does not when it cuts). Returns -1 if cut.
+static int swfmt(wchar_t *b, size_t n, const wchar_t *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    int r = _vsnwprintf(b, n, fmt, ap);
+    va_end(ap);
+    b[n - 1] = 0;
+    return r < 0 || (size_t)r >= n ? -1 : 0;
+}
 
 static const wchar_t *base_name(const wchar_t *p) {
     const wchar_t *n = p;
@@ -342,7 +352,7 @@ static void list_dir(FileList *out, const wchar_t *dir, const wchar_t *pattern, 
     wchar_t q[MAX_PATH * 2];
     size_t dl = wcslen(dir);
     int sep = dl && (dir[dl - 1] == L'\\' || dir[dl - 1] == L'/');
-    _snwprintf(q, MAX_PATH * 2, L"%ls%ls%ls", dir, dl && !sep ? L"\\" : L"", pattern);
+    if (swfmt(q, MAX_PATH * 2, L"%ls%ls%ls", dir, dl && !sep ? L"\\" : L"", pattern)) return;
     WIN32_FIND_DATAW fd;
     HANDLE h = FindFirstFileW(q, &fd);
     if (h == INVALID_HANDLE_VALUE) return;
@@ -351,8 +361,7 @@ static void list_dir(FileList *out, const wchar_t *dir, const wchar_t *pattern, 
         if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
         if (!any_ext && !has_ext(fd.cFileName, g_exts)) continue;
         wchar_t p[MAX_PATH * 2];
-        _snwprintf(p, MAX_PATH * 2, L"%ls%ls%ls", dir, dl && !sep ? L"\\" : L"", fd.cFileName);
-        fl_add(out, p);
+        if (!swfmt(p, MAX_PATH * 2, L"%ls%ls%ls", dir, dl && !sep ? L"\\" : L"", fd.cFileName)) fl_add(out, p);
     } while (FindNextFileW(h, &fd));
     FindClose(h);
     qsort(out->v + first, (size_t)(out->n - first), sizeof *out->v, cmp_logical);
@@ -1689,25 +1698,25 @@ static void update_title(void) {
     const wchar_t *name = base_name(V.files[V.index]);
     Decoded *d = loader_get(V.index);
     if (d)
-        _snwprintf(t, 1024, L"%ls  %.0f%%%ls  (%d/%d)  %dx%d  decode %.1f ms", name, 100 * current_scale(d),
+        swfmt(t, 1024, L"%ls  %.0f%%%ls  (%d/%d)  %dx%d  decode %.1f ms", name, 100 * current_scale(d),
                    V.zoomed ? L"" : L" (fit)", V.index + 1, V.nfiles, d->width, d->height, d->decode_ms);
     else
-        _snwprintf(t, 1024, L"%ls  (%d/%d)  %ls", name, V.index + 1, V.nfiles,
+        swfmt(t, 1024, L"%ls  (%d/%d)  %ls", name, V.index + 1, V.nfiles,
                    loader_failed(V.index) ? L"CANNOT DECODE (unsupported or damaged)" : L"loading...");
 #ifdef NV_VECTOR
     if (d && d->vec && d->vec->pages > 1) {
         size_t n = wcslen(t);
-        _snwprintf(t + n, 1024 - n, L"  [page %d/%d]", d->page + 1, d->vec->pages);
+        swfmt(t + n, 1024 - n, L"  [page %d/%d]", d->page + 1, d->vec->pages);
     }
 #endif
     if (d && d->mode == MODE_NITRODNG && d->ev3) {
         size_t n = wcslen(t);
-        _snwprintf(t + n, 1024 - n, L"  %+.1f EV", d->ev3 / 3.0);
+        swfmt(t + n, 1024 - n, L"  %+.1f EV", d->ev3 / 3.0);
     }
     if (V.slide_ms > 0) {
         size_t n = wcslen(t);
-        if (V.paused) _snwprintf(t + n, 1024 - n, L"   [slideshow paused: P]");
-        else _snwprintf(t + n, 1024 - n, L"   [slideshow %g ms]", V.slide_ms);
+        if (V.paused) swfmt(t + n, 1024 - n, L"   [slideshow paused: P]");
+        else swfmt(t + n, 1024 - n, L"   [slideshow %g ms]", V.slide_ms);
     }
     SetWindowTextW(V.hwnd, t);
 }
@@ -1907,11 +1916,11 @@ static void delete_current(void) {
         MessageBeep(MB_OK);
         return;
     }
-    _snwprintf(bin, n, L"%.*ls.delete", (int)dl, path);
+    swfmt(bin, n, L"%.*ls.delete", (int)dl, path);
     if (CreateDirectoryW(bin, NULL)) SetFileAttributesW(bin, FILE_ATTRIBUTE_HIDDEN);
-    _snwprintf(to, n, L"%ls\\%ls", bin, name);
+    swfmt(to, n, L"%ls\\%ls", bin, name);
     for (int k = 2; GetFileAttributesW(to) != INVALID_FILE_ATTRIBUTES; k++)   // (never over an earlier one)
-        _snwprintf(to, n, L"%ls\\%.*ls (%d)%ls", bin, (int)(ext - name), name, k, ext);
+        swfmt(to, n, L"%ls\\%.*ls (%d)%ls", bin, (int)(ext - name), name, k, ext);
     free(bin);
     if (!MoveFileW(path, to)) {
         fprintf(stderr, "cannot move %s: error %lu\n", utf8(path), GetLastError());
@@ -2425,7 +2434,7 @@ static void open_dialog(int folder) {
     static wchar_t pattern[1024];
     if (!pattern[0])
         for (int i = 0; g_exts[i]; i++)
-            _snwprintf(pattern + wcslen(pattern), 1024 - wcslen(pattern), L"%ls*.%ls", i ? L";" : L"", g_exts[i]);
+            swfmt(pattern + wcslen(pattern), 1024 - wcslen(pattern), L"%ls*.%ls", i ? L";" : L"", g_exts[i]);
     IFileOpenDialog *dlg;
     if (FAILED(CoCreateInstance(&CLSID_FileOpenDialog, NULL, CLSCTX_INPROC_SERVER, &IID_IFileOpenDialog, (void **)&dlg))) return;
     FILEOPENDIALOGOPTIONS o = 0;
@@ -2758,8 +2767,8 @@ static int reg_str(const wchar_t *key, const wchar_t *name, const wchar_t *val) 
 static int do_register(void) {
     wchar_t exe[MAX_PATH], cmd[MAX_PATH + 16], icon[MAX_PATH + 8], k[256];
     GetModuleFileNameW(NULL, exe, MAX_PATH);
-    _snwprintf(cmd, MAX_PATH + 16, L"\"%ls\" \"%%1\"", exe);
-    _snwprintf(icon, MAX_PATH + 8, L"\"%ls\",0", exe);
+    swfmt(cmd, MAX_PATH + 16, L"\"%ls\" \"%%1\"", exe);
+    swfmt(icon, MAX_PATH + 8, L"\"%ls\",0", exe);
     int bad = 0;
     bad |= reg_str(L"Software\\Classes\\" PROGID, NULL, L"NitroView image");
     bad |= reg_str(L"Software\\Classes\\" PROGID L"\\DefaultIcon", NULL, icon);
@@ -2771,7 +2780,7 @@ static int do_register(void) {
     bad |= reg_str(L"Software\\NitroView\\Capabilities", L"ApplicationIcon", icon);
     for (int i = 0; g_assoc_exts[i]; i++) {
         const wchar_t *e = g_assoc_exts[i];
-        _snwprintf(k, 256, L"Software\\Classes\\%ls\\OpenWithProgids", e);   // "Open with" list
+        swfmt(k, 256, L"Software\\Classes\\%ls\\OpenWithProgids", e);   // "Open with" list
         bad |= RegSetKeyValueW(HKEY_CURRENT_USER, k, PROGID, REG_NONE, NULL, 0) != ERROR_SUCCESS;
         bad |= reg_str(L"Software\\Classes\\Applications\\nitroview.exe\\SupportedTypes", e, L"");
         bad |= reg_str(L"Software\\NitroView\\Capabilities\\FileAssociations", e, PROGID);
@@ -2794,7 +2803,7 @@ static int do_unregister(void) {
     RegDeleteTreeW(HKEY_CURRENT_USER, L"Software\\NitroView");
     RegDeleteKeyValueW(HKEY_CURRENT_USER, L"Software\\RegisteredApplications", L"NitroView");
     for (int i = 0; g_assoc_exts[i]; i++) {
-        _snwprintf(k, 256, L"Software\\Classes\\%ls\\OpenWithProgids", g_assoc_exts[i]);
+        swfmt(k, 256, L"Software\\Classes\\%ls\\OpenWithProgids", g_assoc_exts[i]);
         RegDeleteKeyValueW(HKEY_CURRENT_USER, k, PROGID);
     }
     SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, NULL, NULL);
