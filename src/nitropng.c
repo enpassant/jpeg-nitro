@@ -895,8 +895,9 @@ static void *pool_take(size_t need, size_t *cap) {
         return p;
     }
     pthread_mutex_unlock(&g_pool_mu);
-    *cap = need;
-    return malloc(need);
+    void *p = malloc(need);
+    *cap = p ? need : 0;
+    return p;
 }
 
 static void pool_give(void *p, size_t cap) {
@@ -925,15 +926,20 @@ static int inflate_parallel(const uint8_t *d, size_t dl, const uint8_t *ztrail_b
     if ((uint64_t)N * 8 * 65536 > bits) N = (int)(bits / (8 * 65536)) + 1;   // >= 64 KB per chunk
     PChunk *ch = calloc(N, sizeof *ch);
     size_t *tcap = calloc(N, sizeof *tcap);
+    int *chain = NULL, nc = 0, cur = 0, rc = -1;
+    size_t *off = NULL, total = 0;
+    if (!ch || !tcap) goto fail;
     size_t limit = outlen + 65536;
     size_t per = outlen / N * 2 + 65536;   // symbols; grows if a chunk expands more than average
     for (int i = 0; i < N; i++) {
         ch[i].lo = bits * i / N;
         ch[i].hi = bits * (i + 1) / N;
         ch[i].t = pool_take(sizeof(Tables), &tcap[i]);
+        if (!ch[i].t) goto fail;
         if (i) {
             size_t bytes;
             ch[i].o = pool_take((per + OUT_PAD) * sizeof(uint16_t), &bytes);
+            if (!ch[i].o) goto fail;
             ch[i].cap = bytes / sizeof(uint16_t) - OUT_PAD;
         }
     }
@@ -949,8 +955,9 @@ static int inflate_parallel(const uint8_t *d, size_t dl, const uint8_t *ztrail_b
     });
     double tp2 = now_ms();
     // stitch: follow the chain of chunks from the first one
-    int *chain = malloc(N * sizeof *chain), nc = 0, cur = 0, rc = -1;
-    size_t *off = calloc(N, sizeof *off), total = 0;
+    chain = malloc(N * sizeof *chain);
+    off = calloc(N, sizeof *off);
+    if (!chain || !off) goto fail;
     for (;;) {
         if (ch[cur].err) goto fail;
         chain[nc++] = cur;
@@ -972,6 +979,7 @@ static int inflate_parallel(const uint8_t *d, size_t dl, const uint8_t *ztrail_b
     {
         // the rest in parallel, plus the Adler-32 of every chunk
         uint32_t *ad = calloc(nc, sizeof *ad);
+        if (!ad) goto fail;
         int bad = 0, *const pbad = &bad;
         nitro_parallel((size_t)nc, ^(size_t k) {
             PChunk *c = &ch[chain[k]];
@@ -997,7 +1005,7 @@ static int inflate_parallel(const uint8_t *d, size_t dl, const uint8_t *ztrail_b
         if (!bad && ai + 4 <= zlen && a == be32(ztrail_base + ai)) rc = 0;
     }
 fail:
-    for (int i = 0; i < N; i++) {
+    for (int i = 0; ch && tcap && i < N; i++) {
         pool_give(ch[i].t, tcap[i]);
         if (ch[i].o) pool_give(ch[i].o, (ch[i].cap + OUT_PAD) * sizeof(uint16_t));
     }
