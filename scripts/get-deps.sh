@@ -1,7 +1,7 @@
 #!/bin/bash
 # Downloads and builds the optional dependencies into third_party/:
-#   - libjpeg-turbo 3.1.2 (static, with SIMD): fallback decoder for nitroview,
-#     reference for the tests and benchmarks (macOS: x86_64 + arm64 in one library)
+#   - libjpeg-turbo 3.1.2 (static, with SIMD): reference for the tests and benchmarks,
+#     optional fallback decoder for nitroview (make TURBOJPEG=1; macOS: x86_64 + arm64 in one library)
 #   - nasm (needed to build libjpeg-turbo's SIMD code) and cmake (via pip), locally
 #   - stb_image.h and wuffs (only for the decoder comparison in bench/bench)
 #   - lunasvg (MIT, with its plutovg): SVG rendering in nitroview

@@ -402,8 +402,8 @@ rááll a helyes útra. Az esetek 40%-ában 1 MCU után, a leglassabb 21 MCU (87
 kimenetével, mind az 50 képen (`bench/verify`, skalár és AVX2 IDCT-vel is). A GPU-s
 konverzió legfeljebb ±1 eltérést ad (kerekítés, `--selftest`).
 Nem támogatott formátumoknál (CMYK, RGB, aritmetikai kódolás, >16384 px), sérült és félbevágott
-fájloknál a néző automatikusan a sima TurboJPEG-re vált. Az évek során letöltött ~4100 JPEG közül
-egyiknél sem.
+fájloknál a néző a rendszer dekóderére vált (ImageIO, WIC, GTK). Az évek során letöltött ~4100
+JPEG közül egyiknél sem.
 
 ### A fejlődés lépései (ms/kép, 16 szál)
 
@@ -486,7 +486,7 @@ táblázatban) alacsony minőségű előnézet, hiányoznak az utolsó menetei, 
 libjpeg-turbo a hiányzó alacsony AC-együtthatókat a szomszédos blokkokból becsüli is („block
 smoothing”, lágyabb, de elmosódott); a nitrojpeg nem, a `bench/verify` ezeket a simítás nélküli
 libjpeg-turbóval veti össze (azonos, 270, az első meneteire visszavágott tesztfájlon is). A sérült
-és félbevágott fájlokat a TurboJPEG dekódolja.
+és félbevágott fájlokat a rendszer dekódere kapja.
 
 ### nitropng
 
@@ -531,10 +531,11 @@ szűrő-visszaállítás, ahol az r. sor az (r−1). mögött halad. Ez egy 24 M
 
 Ha a dekóder hibát lát (érvénytelen Huffman-kód, túlfutó együtthatóindex, az utolsó
 MCU a bitfolyam vége után ér véget, eltér a restart markerek száma stb.), nem próbálkozik
-tovább. Ilyenkor a néző a sima TurboJPEG-re vált, ami a sérült képből is megmutatja, ami
-menthető (pl. egy félig letöltött fájl felső részét), ha az sem, akkor az Apple ImageIO-ra
-(a Wuffs csak PNG-hez kell). Ha egyik sem tudja dekódolni (ismeretlen formátum, sérült fejléc,
-üres fájl), a címsorban `CANNOT DECODE` jelenik meg, és a lapozás folytatható.
+tovább. Ilyenkor a néző a rendszer dekóderére vált (Apple ImageIO, Windowson WIC, GTK
+betöltői), ami a sérült képből is megmutatja, ami menthető (pl. egy félig letöltött fájl felső
+részét); `TURBOJPEG=1`-gyel fordítva a macOS-es néző előbb a TurboJPEG-et próbálja (ezeken kb.
+2× gyorsabb). Ha egyik sem tudja dekódolni (ismeretlen formátum, sérült fejléc, üres fájl), a
+címsorban `CANNOT DECODE` jelenik meg, és a lapozás folytatható.
 
 `make bench/robust && bench/robust samples/*`: minden mintából ~90 rontott változatot
 készít (csonkítás 0 bájttól a teljes hossz −1-ig, véletlen bájt- és bithibák, nullázott vagy
@@ -604,8 +605,8 @@ regisztrálja.
 macOS-en előfeltétel: Xcode Command Line Tools.
 
 ```
-make                 # néző; ha megvan a libjpeg-turbo, tartalék dekódernek beépíti
-make TURBOJPEG=0     # libjpeg-turbo nélkül: a többi JPEG-et az Apple ImageIO dekódolja
+make                 # néző; amit a nitrojpeg nem tud (sérült, CMYK ...), az ImageIO-hoz megy
+make TURBOJPEG=1     # ezekhez a libjpeg-turbóval (third_party/-ből), és --selftest
 make WUFFS=0         # Wuffs nélkül: PNG az Apple ImageIO-val (~1.6× lassabb)
 make SVG=0           # SVG (lunasvg) nélkül
 make CDR=0           # CorelDRAW (libcdr) nélkül
@@ -615,16 +616,17 @@ make zip / make dmg  # nitroview.zip / nitroview.dmg (Alkalmazások mappába hú
 make tools           # bench/bench, bench/verify, bench/robust (referenciának kell a libjpeg-turbo)
 ```
 
-**A libjpeg-turbo opcionális.** A dekóder (`src/nitrojpeg.c`) önállóan dekódolja a baseline
-JPEG-eket (8 bit, Huffman, 1 vagy 3 komponens, YCbCr/szürke, bármilyen mintavételezés,
-restart markerrel vagy anélkül). Ehhez csak C, pthreads, GCD és AVX2 kell.
+**A nézőnek nem kell a libjpeg-turbo.** A dekóder (`src/nitrojpeg.c`) önállóan dekódolja a
+baseline és progresszív JPEG-eket (8 bit, Huffman, 1 vagy 3 komponens, YCbCr/szürke, bármilyen
+mintavételezés, restart markerrel vagy anélkül; ~4100 letöltött JPEG-ből mindet). Ehhez csak C,
+pthreads, GCD és AVX2 / NEON kell; a libjpeg-turbo a tesztek mércéje.
 
-- **`TURBOJPEG=1`** (alapértelmezés, ha a `third_party/ljt` létezik): a CMYK, RGB,
-  16384 px-nél nagyobb és a sérült fájlokat a TurboJPEG dekódolja. A sérült képekből is
-  megmutatja, ami menthető. A `--selftest` is ebben a módban érhető el.
-- **`TURBOJPEG=0`**: ezeket a fájlokat az Apple ImageIO dekódolja (lassabban; ha az sem tudja,
-  a címsorban `CANNOT DECODE` jelenik meg, és tovább lehet lapozni). Az ép baseline képek
-  sebessége ugyanaz. Opcionális függőségek nélkül a nézőnek csak a macOS keretrendszerei kellenek.
+- **`TURBOJPEG=0`** (alapértelmezés): a maradékot (sérült és félbevágott fájlok, CMYK, RGB,
+  aritmetikai kódolás, >16384 px) az Apple ImageIO dekódolja (ha az sem tudja, a címsorban
+  `CANNOT DECODE` jelenik meg, és tovább lehet lapozni). Opcionális függőségek nélkül a nézőnek
+  csak a macOS keretrendszerei kellenek.
+- **`TURBOJPEG=1`**: ezeket a fájlokat előbb a TurboJPEG dekódolja (rajtuk kb. 2× gyorsabb az
+  ImageIO-nál), 1.2 MB-tal nagyobb; a `--selftest` csak ebben a módban érhető el.
 
 A nitrojpeg-ben a libjpeg-turbót igénylő részek `#ifdef NJ_REFERENCE` mögött vannak: a régi
 motor, ahol a libjpeg-turbo dekódolja a sávokat, a CPU-s BGRX kimenet és az egyszálas

@@ -445,8 +445,8 @@ Measured synchronisation (`bench/verify`, 512 chunks, first 256 sync points per 
 **Accuracy:** the parallel output is **bit-identical** to single-threaded libjpeg-turbo on all
 50 test images (`bench/verify`, with both the scalar and the AVX2 IDCT). The GPU colour
 conversion differs by at most ±1 (rounding, `--selftest`). Unsupported files (CMYK, RGB,
-arithmetic coding, >16384 px) and damaged or cut-off files fall back to TurboJPEG in the viewer.
-Of ~4100 JPEGs downloaded over the years none does.
+arithmetic coding, >16384 px) and damaged or cut-off files go to the system's decoder in the viewer
+(ImageIO, WIC, GTK). Of ~4100 JPEGs downloaded over the years none does.
 
 ### How it got there (ms/image, 16 threads)
 
@@ -525,7 +525,7 @@ colour each): nitrojpeg decodes what is there, as Apple ImageIO does. libjpeg-tu
 the missing low AC coefficients from the neighbouring blocks ("block smoothing", softer but
 blurred); nitrojpeg doesn't, `bench/verify` compares these with libjpeg-turbo without smoothing
 (identical, also on 270 test files cut back to their first scans). Damaged or cut-off files go to
-TurboJPEG.
+the system's decoder.
 
 ### nitropng
 
@@ -572,9 +572,10 @@ for what it became).
 
 When the decoder detects an error (invalid Huffman code, coefficient index overrun, the last
 MCU ends past the end of the data, wrong number of restart markers, …) it gives up, and the
-viewer falls back to TurboJPEG, which shows whatever is recoverable (e.g. the top part of a
-half-downloaded file), and then to Apple ImageIO (Wuffs is only used for PNG). If nothing can
-decode it (unknown format, broken header, empty file), the title shows `CANNOT DECODE` and
+viewer falls back to the system's decoder (Apple ImageIO, WIC on Windows, GTK's loaders), which
+shows whatever is recoverable (e.g. the top part of a half-downloaded file); built with
+`TURBOJPEG=1`, the macOS viewer tries TurboJPEG first (about 2× faster on such files). If nothing
+can decode it (unknown format, broken header, empty file), the title shows `CANNOT DECODE` and
 paging continues.
 
 `make bench/robust && bench/robust samples/*` creates ~90 damaged variants of every image
@@ -678,8 +679,8 @@ builds the GTK4/libadwaita viewer, and `make gnome-register` registers it for th
 Requirements on macOS: Xcode Command Line Tools.
 
 ```
-make                 # nitroview; uses libjpeg-turbo as fallback if it is in third_party/
-make TURBOJPEG=0     # no libjpeg-turbo: other JPEGs go to Apple ImageIO
+make                 # nitroview; JPEGs nitrojpeg can't decode (damaged, CMYK ...) go to ImageIO
+make TURBOJPEG=1     # with libjpeg-turbo for those (from third_party/), and --selftest
 make WUFFS=0         # no Wuffs: PNG via Apple ImageIO (~1.6x slower)
 make SVG=0           # no SVG (lunasvg)
 make CDR=0           # no CorelDRAW (libcdr)
@@ -690,14 +691,15 @@ make zip / make dmg  # nitroview.zip / nitroview.dmg (drag to Applications) for 
 make tools           # bench/bench, verify, robust, freqprobe, sustain (needs get-deps.sh)
 ```
 
-**libjpeg-turbo is optional.** nitrojpeg decodes baseline JPEGs on its own.
+**The viewer doesn't need libjpeg-turbo.** nitrojpeg decodes baseline and progressive JPEGs on
+its own (of ~4100 downloaded JPEGs all of them); libjpeg-turbo is the reference of the tests.
 
-- **`TURBOJPEG=1`** (default when `third_party/ljt` exists): CMYK, RGB, >16384 px
-  and damaged files are decoded by TurboJPEG, which also shows what is recoverable from
-  damaged images. `--selftest` is only available in this mode.
-- **`TURBOJPEG=0`**: those files are decoded by Apple ImageIO instead (slower; damaged files
-  that ImageIO can't read show `CANNOT DECODE` and paging continues). Valid baseline images are
-  exactly as fast. Without any optional dependency the viewer needs only macOS frameworks.
+- **`TURBOJPEG=0`** (default): the rest (damaged or cut-off files, CMYK, RGB, arithmetic
+  coding, >16384 px) is decoded by Apple ImageIO (damaged files that ImageIO can't read show
+  `CANNOT DECODE` and paging continues). Without any optional dependency the viewer needs only
+  macOS frameworks.
+- **`TURBOJPEG=1`**: those files are decoded by TurboJPEG first (about 2× faster than ImageIO on
+  them), 1.2 MB more; `--selftest` is only available in this mode.
 
 The parts of nitrojpeg that need libjpeg-turbo are behind `#ifdef NJ_REFERENCE`: the old
 engine where libjpeg-turbo decodes the bands, the CPU BGRX output and the single-threaded

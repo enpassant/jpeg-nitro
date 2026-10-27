@@ -1,8 +1,8 @@
 # jpeg-nitro: nitroview (fast image viewer for macOS) + nitrojpeg (parallel JPEG decoder)
 #
-#   make                 nitroview; uses libjpeg-turbo as fallback decoder if it is present
-#                        in third_party/ljt (see scripts/get-deps.sh), standalone otherwise
-#   make TURBOJPEG=0     no libjpeg-turbo: JPEGs nitrojpeg can't decode go to Apple ImageIO
+#   make                 nitroview; JPEGs nitrojpeg can't decode (damaged, CMYK ...) go to ImageIO
+#   make TURBOJPEG=1     with libjpeg-turbo (third_party/ljt, see scripts/get-deps.sh) as their
+#                        decoder before ImageIO, and --selftest
 #   make WUFFS=0         no Wuffs: PNG is decoded by Apple ImageIO (~1.8x slower)
 #   make SVG=0           no SVG support (lunasvg, from scripts/get-deps.sh)
 #   make CDR=0           no CorelDRAW support (libcdr, from scripts/get-deps.sh; needs SVG)
@@ -25,7 +25,7 @@
 #                        WINCC=path/to/x86_64-w64-mingw32-clang
 
 LJT        := third_party/ljt
-TURBOJPEG  ?= $(if $(wildcard $(LJT)/lib/libturbojpeg.a),1,0)
+TURBOJPEG  ?= 0
 CC         := clang
 AR         ?= ar
 ARCH       := $(shell uname -m)
@@ -349,13 +349,13 @@ build/nitroview.icns: packaging/icon.png
 
 # macOS app bundle (for the Finder: "Open With" / "Change All"), ad-hoc signed
 # The app is universal: the viewer is built once per architecture with portable CPU flags
-# (not -march=native: it runs on other Macs) and joined with lipo. The libjpeg-turbo fallback
-# goes into each slice whose architecture the library has (scripts/get-deps.sh builds both).
+# (not -march=native: it runs on other Macs) and joined with lipo. With TURBOJPEG=1 the
+# libjpeg-turbo fallback goes into each slice whose architecture the library has.
 MAC_ARCHS    ?= x86_64 arm64
 MAC_MIN      := -mmacosx-version-min=12.0
 APPCPU_x86_64 := -march=x86-64-v3 $(X86JCC) $(DEFS)
 APPCPU_arm64  := -mcpu=apple-m1 $(DEFS)
-ljt_has = $(filter $(1),$(shell lipo -archs $(LJT)/lib/libturbojpeg.a 2>/dev/null))
+ljt_has = $(if $(filter 1,$(TURBOJPEG)),$(filter $(1),$(shell lipo -archs $(LJT)/lib/libturbojpeg.a 2>/dev/null)))
 build/app-%/png_wuffs.o: src/png_wuffs.c src/png_wuffs.h
 	@mkdir -p $(@D)
 	$(CC) -arch $* $(MAC_MIN) -O3 $(APPCPU_$*) -w -c $< -o $@
