@@ -33,6 +33,7 @@ typedef struct {
     size_t stride;         // bytes per row, without the filter byte
     size_t raw_size;       // height * (stride + 1): size of the decoded buffer
     int has_icc;           // iCCP chunk present (colour management is up to the caller)
+    int orientation;       // EXIF orientation 1..8 from an eXIf chunk (1: none); applying it is up to the caller
     int supported;         // 1: 8-bit gray / gray+alpha / RGB / RGBA, non-interlaced: the rows as they are
     int convertible;       // 1: np_decode + np_to_bgrx can handle it (also palette, 1 / 2 / 4 / 16-bit, tRNS)
     uint32_t plte_pos, plte_n, trns_pos, trns_n;   // PLTE / tRNS chunk data in the file (0: none)

@@ -1075,6 +1075,7 @@ static Decoded *decode_file(const wchar_t *path) {
                 d->ncomp = pi.channels;
                 d->pitch[0] = pi.stride + 1;   // rows keep their filter-type byte
                 d->size = pi.raw_size;
+                d->orientation = pi.orientation;   // (eXIf chunk)
                 d->bands = ps.chunks;
                 d->mode = MODE_NITROPNG;
             } else if (buf) {
@@ -1093,6 +1094,7 @@ static Decoded *decode_file(const wchar_t *path) {
                 d->height = pi.height;
                 d->pitch[0] = pitch;
                 d->size = pitch * pi.height;
+                d->orientation = pi.orientation;   // (eXIf chunk)
                 d->bands = ps.chunks;
                 d->mode = MODE_NITROPNG;
             } else if (buf) {
@@ -2635,7 +2637,12 @@ static int header_size(const wchar_t *path, double *w, double *h) {
         *h = swap ? ji.width : ji.height;
         return 1;
     }
-    if (!np_read_info(b, n, &pi)) { *w = pi.width; *h = pi.height; return 1; }
+    if (!np_read_info(b, n, &pi)) {   // (an eXIf after the first MB: not seen here)
+        int swap = pi.orientation >= 5;
+        *w = swap ? pi.height : pi.width;
+        *h = swap ? pi.width : pi.height;
+        return 1;
+    }
     if (n >= 26 && !memcmp(b, "8BPS", 4)) {   // (ps_read_info wants the whole file)
         *h = (double)((uint32_t)b[14] << 24 | (uint32_t)b[15] << 16 | (uint32_t)b[16] << 8 | b[17]);
         *w = (double)((uint32_t)b[18] << 24 | (uint32_t)b[19] << 16 | (uint32_t)b[20] << 8 | b[21]);
