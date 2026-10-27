@@ -350,83 +350,90 @@ static int csp(const na_info *in, const Dav1dPicture *p, const Dav1dPicture *a, 
     return 0;
 }
 
-static inline float sample(const Dav1dPicture *p, int plane, int x, int y) {
+// n samples of row y from x0 into dst (outside 0..lim-1: the edge sample)
+static void load(const Dav1dPicture *p, int plane, int y, int x0, int n, int lim, float *dst) {
     const uint8_t *row = (const uint8_t *)p->data[plane] + (ptrdiff_t)y * p->stride[plane > 0];
-    return p->p.bpc > 8 ? (float)((const uint16_t *)row)[x] : (float)row[x];
+    int a = MAX(0, -x0), b = MIN(n, lim - x0);
+    if (p->p.bpc > 8)
+        for (int i = a; i < b; i++) dst[i] = ((const uint16_t *)row)[x0 + i];
+    else
+        for (int i = a; i < b; i++) dst[i] = row[x0 + i];
+    for (int i = 0; i < a; i++) dst[i] = dst[a];
+    for (int i = b; i < n; i++) dst[i] = dst[b - 1];
 }
 
-static inline uint8_t to8(float v) { return (uint8_t)(v <= 0 ? 0 : v >= 1 ? 255 : (int)(v * 255 + 0.5f)); }
+static inline uint8_t to8(float v) {
+    v = v < 0 ? 0 : v;
+    v = v > 1 ? 1 : v;
+    return (uint8_t)(int)(v * 255 + 0.5f);
+}
 
-// The w x h pixels of a decoded tile (and its alpha) from (sx, sy) -> B G R X at out.
-static void convert(const Dav1dPicture *p, const Dav1dPicture *a, const Csp *c, int sx, int sy, int w, int h, uint8_t *out,
-                    size_t pitch) {
+// The w x h pixels of a decoded tile (and its alpha) from (sx, sy) -> B G R X at out, a row at a time:
+// the samples (chroma upsampled) into float rows, then a loop the compiler vectorises. 0: done.
+static int convert(const Dav1dPicture *p, const Dav1dPicture *a, const Csp *c, int sx, int sy, int w, int h, uint8_t *out,
+                   size_t pitch) {
     int lay = p->p.layout, ssx = lay == DAV1D_PIXEL_LAYOUT_I420 || lay == DAV1D_PIXEL_LAYOUT_I422,
         ssy = lay == DAV1D_PIXEL_LAYOUT_I420, mono = lay == DAV1D_PIXEL_LAYOUT_I400;
     int cw = (p->p.w + ssx) >> ssx, ch = (p->p.h + ssy) >> ssy;
-    float g1 = 1 - c->kr - c->kb;
+    // R, G, B from (Y, Cb, Cr) (0..1, -0.5..0.5); identity: G, B, R in the planes
+    float g1 = 1 - c->kr - c->kb, m[9];
+    if (mono) {
+        const float k[9] = {1, 0, 0, 1, 0, 0, 1, 0, 0};
+        memcpy(m, k, sizeof m);
+    } else if (c->identity) {
+        const float k[9] = {0, 0, 1, 1, 0, 0, 0, 1, 0};
+        memcpy(m, k, sizeof m);
+    } else {
+        const float k[9] = {1, 0, 2 - 2 * c->kr, 1, -c->kb * (2 - 2 * c->kb) / g1, -c->kr * (2 - 2 * c->kr) / g1, 1, 2 - 2 * c->kb, 0};
+        memcpy(m, k, sizeof m);
+    }
+    float yo = c->yoff, ys = c->yscale, co = c->identity ? c->yoff : c->coff, cs = c->identity ? c->yscale : c->cscale;
+    float ao = a ? c->aoff : 0, as = a ? c->ascale : 1;
+    // the chroma samples a row needs: qa .. qa + qn - 1
+    int qa = ssx ? (sx - 1) >> 1 : sx, qn = ssx ? ((sx + w - 2) >> 1) + 2 - qa : w;
+    float *Yr = malloc(sizeof(float) * ((size_t)w * 4 + (size_t)qn * 2));
+    if (!Yr) return -1;
+    float *U = Yr + w, *V = U + w, *A = V + w, *t0 = A + w, *t1 = t0 + qn;
+    if (mono)
+        for (int i = 0; i < w; i++) U[i] = V[i] = co;
+    if (!a)
+        for (int i = 0; i < w; i++) A[i] = 1;
     for (int j = 0; j < h; j++) {
         int y = sy + j;
-        // chroma rows around this one (linear, centred: as libjpeg's "fancy" upsampling)
-        int r0 = y, r1 = y;
-        float wy = 0;
-        if (ssy) {
-            r0 = (y - 1) >> 1;
-            r1 = r0 + 1;
-            wy = y & 1 ? 0.25f : 0.75f;
-            r0 = MAX(r0, 0);
-            r1 = MIN(r1, ch - 1);
-        }
-        uint8_t *o = out + pitch * (size_t)j;
-        for (int i = 0; i < w; i++, o += 4) {
-            int x = sx + i;
-            float Y = (sample(p, 0, x, y) - c->yoff) * c->yscale, cb = 0, cr = 0;
-            if (!mono) {
-                int q0 = x, q1 = x;
-                float wx = 0;
-                if (ssx) {
-                    q0 = (x - 1) >> 1;
-                    q1 = q0 + 1;
-                    wx = x & 1 ? 0.25f : 0.75f;
-                    q0 = MAX(q0, 0);
-                    q1 = MIN(q1, cw - 1);
-                }
-                float u = (1 - wy) * ((1 - wx) * sample(p, 1, q0, r0) + wx * sample(p, 1, q1, r0)) +
-                          wy * ((1 - wx) * sample(p, 1, q0, r1) + wx * sample(p, 1, q1, r1));
-                float v = (1 - wy) * ((1 - wx) * sample(p, 2, q0, r0) + wx * sample(p, 2, q1, r0)) +
-                          wy * ((1 - wx) * sample(p, 2, q0, r1) + wx * sample(p, 2, q1, r1));
-                if (c->identity) {
-                    cb = (u - c->yoff) * c->yscale;
-                    cr = (v - c->yoff) * c->yscale;
-                } else {
-                    cb = (u - c->coff) * c->cscale;
-                    cr = (v - c->coff) * c->cscale;
-                }
-            }
-            float r, g, b;
-            if (mono) {
-                r = g = b = Y;
-            } else if (c->identity) {
-                g = Y;
-                b = cb;
-                r = cr;
+        load(p, 0, y, sx, w, p->p.w, Yr);
+        for (int pl = 1; pl <= 2 && !mono; pl++) {
+            float *d = pl == 1 ? U : V;
+            if (ssy) {   // chroma rows around this one (linear, centred: as libjpeg's "fancy" upsampling)
+                int r0 = (y - 1) >> 1, r1 = r0 + 1;
+                float wy = y & 1 ? 0.25f : 0.75f;
+                load(p, pl, MAX(r0, 0), qa, qn, cw, t0);
+                load(p, pl, MIN(r1, ch - 1), qa, qn, cw, t1);
+                for (int k = 0; k < qn; k++) t0[k] += wy * (t1[k] - t0[k]);
             } else {
-                r = Y + (2 - 2 * c->kr) * cr;
-                b = Y + (2 - 2 * c->kb) * cb;
-                g = (Y - c->kr * r - c->kb * b) / g1;
+                load(p, pl, y, qa, qn, cw, t0);
             }
-            if (a) {
-                float al = (sample(a, 0, x, y) - c->aoff) * c->ascale;
-                al = al < 0 ? 0 : al > 1 ? 1 : al;
-                r *= al;
-                g *= al;
-                b *= al;
-            }
-            o[0] = to8(b);
-            o[1] = to8(g);
-            o[2] = to8(r);
-            o[3] = 255;
+            if (ssx)
+                for (int i = 0; i < w; i++) {
+                    int x = sx + i, k = ((x - 1) >> 1) - qa;
+                    float f = x & 1 ? 0.25f : 0.75f;
+                    d[i] = t0[k] + f * (t0[k + 1] - t0[k]);
+                }
+            else
+                memcpy(d, t0, sizeof(float) * (size_t)w);
+        }
+        if (a) load(a, 0, y, sx, w, a->p.w, A);
+        uint8_t *o = out + pitch * (size_t)j;
+        for (int i = 0; i < w; i++) {
+            float Y = (Yr[i] - yo) * ys, cb = (U[i] - co) * cs, cr = (V[i] - co) * cs, al = (A[i] - ao) * as;
+            al = al < 0 ? 0 : al > 1 ? 1 : al;
+            o[4 * i + 0] = to8((m[6] * Y + m[7] * cb + m[8] * cr) * al);
+            o[4 * i + 1] = to8((m[3] * Y + m[4] * cb + m[5] * cr) * al);
+            o[4 * i + 2] = to8((m[0] * Y + m[1] * cb + m[2] * cr) * al);
+            o[4 * i + 3] = 255;
         }
     }
+    free(Yr);
+    return 0;
 }
 
 // The AV1 data of a single image in several pieces, joined (malloc'ed); NULL: out of memory.
@@ -472,7 +479,7 @@ int na_decode(const uint8_t *data, size_t len, const na_info *in, uint8_t *bgrx,
             size_t nb = (size_t)(H + band - 1) / band;
             nitro_body body = ^(size_t b) {
                 int y0 = (int)b * band, y1 = MIN(H, y0 + band);
-                convert(pp, ap, cp, cx, cy + y0, W, y1 - y0, bgrx + pitch * y0, pitch);
+                if (convert(pp, ap, cp, cx, cy + y0, W, y1 - y0, bgrx + pitch * y0, pitch)) atomic_store(pfailed, 1);
             };
             if (nthreads == 1)
                 for (size_t b = 0; b < nb; b++) body(b);
@@ -498,10 +505,9 @@ int na_decode(const uint8_t *data, size_t len, const na_info *in, uint8_t *bgrx,
         if (ok && in->alpha)
             ok = ha = !av1_picture(data + in->alpha_off[t], in->alpha_len[t], 1, in->op, &a) && a.p.w >= x1 - gx && a.p.h >= y1 - gy;
         Csp c;
-        if (ok && !csp(in, &p, in->alpha ? &a : NULL, &c))
+        if (!ok || csp(in, &p, in->alpha ? &a : NULL, &c) ||
             convert(&p, in->alpha ? &a : NULL, &c, x0 - gx, y0 - gy, x1 - x0, y1 - y0, bgrx + pitch * (size_t)(y0 - cy) + (size_t)(x0 - cx) * 4,
-                    pitch);
-        else
+                    pitch))
             atomic_store(pfailed, 1);
         dav1d_picture_unref(&p);
         if (ha) dav1d_picture_unref(&a);
