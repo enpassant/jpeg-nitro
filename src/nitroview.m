@@ -375,8 +375,8 @@ static id image_colorspace(NSData *data) {
     return result ?: srgb_space();
 }
 
-// Apple ImageIO: PNG (without Wuffs), HEIC, TIFF, WebP, GIF, BMP, PSD (composite),
-// and JPEGs nothing else could decode. Huge images are downscaled to MAX_TEX.
+// Apple ImageIO: interlaced PNG (unless Wuffs), other HEICs, JPEG-compressed TIFF, other WebPs, GIF,
+// BMP, other PSDs (composite), and JPEGs nothing else could decode. Huge images are downscaled to MAX_TEX.
 static Decoded *decode_imageio(NSData *data, Decoded *d, BufferPool *pool, size_t align, double t1) {
     CGImageSourceRef src = CGImageSourceCreateWithData((__bridge CFDataRef)data, NULL);
     if (!src || CGImageSourceGetCount(src) < 1) { if (src) CFRelease(src); return nil; }

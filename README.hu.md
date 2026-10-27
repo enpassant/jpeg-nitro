@@ -107,8 +107,8 @@ ImageIO-ban). 55 valódi PSD-n (Photoshop-munkák, térképek, építészet) az 
 eltekintve egyezik az ImageIO-val. A PNG-t a **nitropng**, a saját párhuzamos PNG-dekóderünk
 dekódolja (nem interlaced: a 8 bites szürke / RGB / RGBA úgy, ahogy van, a GPU-ra megy; a palettás,
 az 1 / 2 / 4 / 16 bites és az átlátszósági kulcsos PNG-ket párhuzamosan BGRX-re alakítja), az
-interlaced képeket a [Wuffs](https://github.com/google/wuffs), ha elérhető (`scripts/get-deps.sh`),
-vagy az Apple ImageIO. Az átlátszó képek fekete háttéren jelennek meg. 38 valódi PNG-n
+ritka interlaced képeket az Apple ImageIO, mint a többi formátumot (`make WUFFS=1`-gyel előbb a
+[Wuffs](https://github.com/google/wuffs)). Az átlátszó képek fekete háttéren jelennek meg. 38 valódi PNG-n
 (képernyőképek, szkennelések, AI-képek, felskálázott textúrák, Photoshop-exportok) a nitropng átlag
 **~43 ms/kép**, a Wuffs ~171, az ImageIO ~318 ms (lásd lent: „nitropng”). 25 palettás / 1–16 bites /
 átlátszósági kulcsos PNG-n a néző dekódolása 53 ms-ról (Wuffs) 18 ms/képre gyorsult, pixelre azonosan
@@ -651,7 +651,7 @@ macOS-en előfeltétel: Xcode Command Line Tools.
 ```
 make                 # néző; amit a nitrojpeg nem tud (sérült, CMYK ...), az ImageIO-hoz megy
 make TURBOJPEG=1     # ezekhez a libjpeg-turbóval (third_party/-ből), és --selftest
-make WUFFS=0         # Wuffs nélkül: PNG az Apple ImageIO-val (~1.6× lassabb)
+make WUFFS=1         # Wuffs az interlaced PNG-khez az ImageIO előtt (minden mást a nitropng dekódol)
 make SVG=0           # SVG (lunasvg) nélkül
 make CDR=0           # CorelDRAW (libcdr) nélkül
 make app             # nitroview.app a Finderhez: universal (Intel + Apple Silicon), macOS 12-től,

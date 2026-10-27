@@ -3,7 +3,8 @@
 #   make                 nitroview; JPEGs nitrojpeg can't decode (damaged, CMYK ...) go to ImageIO
 #   make TURBOJPEG=1     with libjpeg-turbo (third_party/ljt, see scripts/get-deps.sh) as their
 #                        decoder before ImageIO, and --selftest
-#   make WUFFS=0         no Wuffs: PNG is decoded by Apple ImageIO (~1.8x slower)
+#   make WUFFS=1         with Wuffs (third_party/wuffs.c) for interlaced PNGs before ImageIO (nitropng
+#                        decodes all others)
 #   make SVG=0           no SVG support (lunasvg, from scripts/get-deps.sh)
 #   make CDR=0           no CorelDRAW support (libcdr, from scripts/get-deps.sh; needs SVG)
 #   make MIMALLOC=0      SVG / CorelDRAW code with the system malloc, not mimalloc
@@ -93,7 +94,7 @@ FLATPAK_BUILD    := build/flatpak
 FLATPAK_REPO     := build/flatpak-repo
 FLATPAK_BUNDLE   := nitroview-gnome.flatpak
 
-WUFFS      ?= $(if $(wildcard third_party/wuffs.c),1,0)
+WUFFS      ?= 0
 LUNA       := third_party/lunasvg
 SVG        ?= $(if $(wildcard $(LUNA)/include/lunasvg.h),1,0)
 LIBCDR     := third_party/libcdr

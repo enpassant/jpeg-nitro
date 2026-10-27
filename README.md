@@ -190,9 +190,8 @@ Files saved without "Maximize Compatibility" contain only a white placeholder in
 image; the layers are not composited, so they show white (as in ImageIO). On 55 real PSDs
 (Photoshop work, maps, architecture) the result matches ImageIO except for these two points. PNG is decoded by **nitropng**, our own parallel PNG decoder
 (non-interlaced: 8-bit gray / RGB / RGBA go to the GPU as they are; palette, 1 / 2 / 4 / 16-bit and
-transparency-key PNGs are converted to BGRX in parallel), interlaced ones by
-[Wuffs](https://github.com/google/wuffs) when it is available (`scripts/get-deps.sh`) or by
-Apple ImageIO like the other formats. Transparent images are shown over black. On 38 real PNGs
+transparency-key PNGs are converted to BGRX in parallel), the rare interlaced ones by Apple
+ImageIO like the other formats (or [Wuffs](https://github.com/google/wuffs) first with `make WUFFS=1`). Transparent images are shown over black. On 38 real PNGs
 (screenshots, scans, AI images, upscaled textures, Photoshop exports) nitropng averages
 **~43 ms/image** vs ~171 ms for Wuffs and ~318 ms for ImageIO; see [nitropng](#nitropng). On 25
 palette / 1–16-bit / transparency-key PNGs the viewer's decode went from 53 (Wuffs) to 18 ms/image,
@@ -731,7 +730,7 @@ Requirements on macOS: Xcode Command Line Tools.
 ```
 make                 # nitroview; JPEGs nitrojpeg can't decode (damaged, CMYK ...) go to ImageIO
 make TURBOJPEG=1     # with libjpeg-turbo for those (from third_party/), and --selftest
-make WUFFS=0         # no Wuffs: PNG via Apple ImageIO (~1.6x slower)
+make WUFFS=1         # Wuffs for interlaced PNGs before ImageIO (nitropng decodes all others)
 make SVG=0           # no SVG (lunasvg)
 make CDR=0           # no CorelDRAW (libcdr)
 scripts/get-deps.sh  # download + build libjpeg-turbo (macOS: Intel + ARM), stb_image, Wuffs, lunasvg, libcdr into third_party/ (~1 min)
