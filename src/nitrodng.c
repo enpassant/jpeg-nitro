@@ -276,7 +276,7 @@ static int build_huff(Huff *h, const uint8_t *counts, const uint8_t *vals, int t
         h->valptr[len] = k;
         h->mincode[len] = code;
         for (int i = 0; i < counts[len - 1]; i++) {
-            if (k >= total) return -1;
+            if (k >= total || code >= 1 << len) return -1;   // (more codes than fit in len bits: damaged)
             h->vals[k] = vals[k];
             int sz = vals[k] < 16 ? vals[k] : 0, used = len + sz;
             if (len <= FAST_BITS) {   // every continuation of the code: its difference decoded if it fits
