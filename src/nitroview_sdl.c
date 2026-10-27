@@ -1356,7 +1356,6 @@ typedef struct {
     int ngrave;
     SDL_Mutex *lock;
     SDL_Condition *cv;
-    int notify;
 } Loader;
 
 static Loader L;
@@ -1609,11 +1608,10 @@ static int SDLCALL loader_run(void *arg) {
         else if (d && L.ncache < 16) { L.cache[L.ncache].index = next; L.cache[L.ncache].d = d; L.ncache++; }
         else if (d) bury_locked(d);
         else L.failed[next] = 1;
-        int notify = L.notify;
         SDL_UnlockMutex(L.lock);
         if (!stale && !d) fprintf(stderr, "cannot decode %s\n", path);
         SDL_free(path);
-        if (notify) post(EV_DECODED, stale ? -1 : next, NULL);
+        post(EV_DECODED, stale ? -1 : next, NULL);
     }
     return 0;
 }
@@ -1653,7 +1651,6 @@ typedef struct {
     int dragging;
     double drag_x, drag_y;
     double page_accum;            // Ctrl + wheel (touchpad): accumulated distance
-    double pinch;                 // touchpad pinch: the scale so far
     // window sizing
     int user_sized, fullscreen;
     double self_resize_time;      // our own resizes arrive later as events: ignored for a while
@@ -2565,7 +2562,6 @@ static void handle(const SDL_Event *e) {
         }
         break;
     case SDL_EVENT_MOUSE_WHEEL: on_wheel(&e->wheel); break;
-    case SDL_EVENT_PINCH_BEGIN: V.pinch = 1; break;
     case SDL_EVENT_PINCH_UPDATE:   // touchpad pinch: zoom around the cursor
         if (V.nfiles && (d = loader_get(V.index)) && e->pinch.scale > 0) {
             float x, y;
@@ -2948,7 +2944,6 @@ int main(int argc, char **argv) {
     V.files = fl.v;
     V.nfiles = fl.n;
     V.shown_index = -1;
-    L.notify = 1;
     if (fl.n) {
         V.lazy_dir = nargs == 1 && !strpbrk(args[0], "*?") && !is_dir(args[0]);
         go(0, 1);
