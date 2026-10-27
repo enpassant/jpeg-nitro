@@ -37,7 +37,7 @@ typedef struct {
     int found;
 } Entry;
 
-static const int type_size[13] = {0, 1, 1, 2, 4, 8, 1, 1, 2, 4, 8, 4, 8};
+static const int type_size[14] = {0, 1, 1, 2, 4, 8, 1, 1, 2, 4, 8, 4, 8, 4};   // (13: IFD, an offset)
 
 static Entry tag(const Tiff *t, uint32_t ifd, unsigned want) {
     Entry e = {0, 0, 0, 0};
@@ -48,7 +48,7 @@ static Entry tag(const Tiff *t, uint32_t ifd, unsigned want) {
         if (t16(t, p) != want) continue;
         e.type = t16(t, p + 2);
         e.count = t32(t, p + 4);
-        uint64_t sz = e.type < 13 ? (uint64_t)type_size[e.type] * e.count : 0;
+        uint64_t sz = e.type < 14 ? (uint64_t)type_size[e.type] * e.count : 0;
         if (!sz || e.count > (1u << 28)) return e;
         e.pos = sz <= 4 ? (uint32_t)(p + 8) : t32(t, p + 8);
         e.found = e.pos + sz <= t->len;
@@ -62,7 +62,7 @@ static uint32_t val(const Tiff *t, Entry e, uint32_t k) {   // BYTE / SHORT / LO
     switch (e.type) {
     case 1: case 7: return t->d[e.pos + k];
     case 3: return t16(t, e.pos + 2 * (size_t)k);
-    case 4: return t32(t, e.pos + 4 * (size_t)k);
+    case 4: case 13: return t32(t, e.pos + 4 * (size_t)k);
     default: return 0;
     }
 }

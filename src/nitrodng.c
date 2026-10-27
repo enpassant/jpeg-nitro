@@ -37,7 +37,7 @@ typedef struct {
     int found;
 } Entry;
 
-static const int type_size[13] = {0, 1, 1, 2, 4, 8, 1, 1, 2, 4, 8, 4, 8};
+static const int type_size[14] = {0, 1, 1, 2, 4, 8, 1, 1, 2, 4, 8, 4, 8, 4};   // (13: IFD, an offset)
 
 static Entry tag(const Tiff *t, uint32_t ifd, unsigned want) {
     Entry e = {0, 0, 0, 0};
@@ -49,7 +49,7 @@ static Entry tag(const Tiff *t, uint32_t ifd, unsigned want) {
         if (t16(t, p) != want) continue;
         e.type = t16(t, p + 2);
         e.count = t32(t, p + 4);
-        uint64_t size = (uint64_t)(e.type < 13 ? type_size[e.type] : 1) * e.count;
+        uint64_t size = (uint64_t)(e.type < 14 ? type_size[e.type] : 1) * e.count;
         e.pos = size <= 4 ? (uint32_t)(p + 8) : t32(t, p + 8);
         e.found = e.pos < t->len && size <= t->len - e.pos;
         return e;
