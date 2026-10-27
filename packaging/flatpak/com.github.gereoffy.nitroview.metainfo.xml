@@ -17,6 +17,11 @@
     <mediatype>image/gif</mediatype>
     <mediatype>image/bmp</mediatype>
     <mediatype>image/webp</mediatype>
+    <mediatype>image/heic</mediatype>
+    <mediatype>image/heif</mediatype>
+    <mediatype>image/avif</mediatype>
+    <mediatype>image/svg+xml</mediatype>
+    <mediatype>image/x-adobe-dng</mediatype>
   </provides>
   <content_rating type="oars-1.1"/>
 </component>

@@ -6,5 +6,5 @@ Exec=nitroview-gnome %F
 Icon=com.github.gereoffy.nitroview
 Terminal=false
 Categories=Graphics;Viewer;
-MimeType=image/jpeg;image/png;image/vnd.adobe.photoshop;image/tiff;image/gif;image/bmp;image/webp;
+MimeType=image/jpeg;image/png;image/vnd.adobe.photoshop;image/tiff;image/gif;image/bmp;image/webp;image/heic;image/heif;image/avif;image/svg+xml;image/x-adobe-dng;
 StartupNotify=true

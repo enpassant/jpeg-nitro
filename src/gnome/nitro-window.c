@@ -68,7 +68,7 @@ static gboolean supported_extension(const char *name) {
     if (!dot || !dot[1]) return FALSE;
     dot++;
     // our decoders, SVG (nitrosvg), CorelDRAW (nitrocdr) and GTK fallback loaders (see nitro-image.c)
-    static const char *const exts[] = {"jpg", "jpeg", "jpe", "jfif", "png", "psd", "psb", "heic", "heif",
+    static const char *const exts[] = {"jpg", "jpeg", "jpe", "jfif", "png", "psd", "psb", "heic", "heif", "avif",
                                        "dng", "cr2", "nef", "nrw", "arw", "raf",
                                        "tif", "tiff", "gif", "bmp", "webp", "svg",
 #ifdef NV_CDR
