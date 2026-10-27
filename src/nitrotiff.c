@@ -394,10 +394,15 @@ static void black_run(uint8_t *row, int a, int e, int black_one) {   // pixels [
     }
 }
 
+// A row has at most w + 1 changing elements (every pixel a new colour, starting with black); more:
+// damaged (zero-length runs or vertical modes that don't move). cur / ref hold w + 8 (+ 2 at once, + 3 ends).
+#define MAX_CHANGES(w) ((w) + 1)
+
 // One row of runs (MH / T.4 1D): the changing elements into cur. Returns their count or -1.
 static int row_1d(Bits *b, int w, int *cur) {
     int a = 0, color = 0, n = 0;
     while (a < w) {
+        if (n > MAX_CHANGES(w)) return -1;
         int r = run_length(b, color ? g_black : g_white);
         if (r < 0) return -1;
         a = MIN(a + r, w);
@@ -411,6 +416,7 @@ static int row_1d(Bits *b, int w, int *cur) {
 static int row_2d(Bits *b, int w, const int *ref, int nr, int *cur) {
     int a0 = -1, color = 0, n = 0, bi = 0;
     while (a0 < w) {
+        if (n > MAX_CHANGES(w)) return -1;
         bi = MAX(bi - 2, 0);   // (a vertical mode to the left may need an earlier one)
         while (bi < nr && (ref[bi] <= a0 || (bi & 1) != color)) bi++;
         int b1 = bi < nr ? ref[bi] : w, b2 = bi + 1 < nr ? ref[bi + 1] : w;
@@ -457,7 +463,7 @@ static int ccitt(const nt_info *in, const uint8_t *s, size_t sl, uint8_t *d, int
         for (size_t i = 0; i < sl; i++) rev[i] = g_rev[s[i]];
         s = rev;
     }
-    int *ref = malloc((size_t)(w + 4) * 2 * sizeof *ref), *cur = ref + w + 4, nr = 0, rc = 0;
+    int *ref = malloc((size_t)(w + 8) * 2 * sizeof *ref), *cur = ref + w + 8, nr = 0, rc = 0;
     if (!ref) {
         free(rev);
         return -1;
