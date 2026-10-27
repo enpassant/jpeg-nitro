@@ -9,12 +9,14 @@
 // Keys, mouse and window behaviour as on macOS (see README): PgDn/Space next,
 // PgUp/Backspace previous, Home/End, +/- zoom, 0 fit to screen, 1..8 zoom 100..800%,
 // W window to image, arrows pan, F/Enter full screen, P pause slideshow, Esc/Q quit,
-// [ / ] the pages of a multi-page CorelDRAW drawing.
+// [ / ] the pages of a multi-page CorelDRAW drawing, O / Shift+O open files / a folder,
+// Del / U delete (into .delete) / undo, E / Shift+E DNG exposure.
 //
-// Pipeline: file -> nitrojpeg / nitropng / nitropsd / nitroheic / nitrowebp / nitrodng / nitrotiff / nitroavif
-// (multi-threaded, into a buffer the decoder thread hands to Direct3D) -> compute shader (upsampling,
-// YCbCr->RGB, PNG rows, PSD planes) -> mipmaps -> trilinear scaled draw.
-// Anything else goes through WIC (damaged or CMYK JPEG, JPEG-compressed TIFF, GIF, BMP ...).
+// Pipeline: file -> nitrojpeg (also the JPEG inside CR2 / NEF / ARW / RAF raws) / nitropng / nitropsd /
+// nitroheic + nitrohevc / nitrowebp / nitrodng / nitrotiff / nitroavif (NV_DAV1D) (multi-threaded, into
+// a buffer the decoder thread hands to Direct3D) -> compute shader (upsampling, YCbCr->RGB, PNG rows,
+// PSD planes) -> mipmaps -> trilinear scaled draw.
+// Anything else goes through WIC (damaged or CMYK JPEG, JPEG-compressed TIFF, lossless WebP, GIF, BMP ...).
 // SVG / CorelDRAW (optional, NV_SVG / NV_CDR): nitrosvg / nitrocdr render it once in full as
 // BGRA, and the visible part again, sharp, when zoomed in (as nitroview.m does).
 // Neighbouring images are decoded ahead in the background.
@@ -2788,7 +2790,7 @@ static int do_register(void) {
     bad |= reg_str(L"Software\\Classes\\Applications\\nitroview.exe", L"FriendlyAppName", L"NitroView");
     bad |= reg_str(L"Software\\Classes\\Applications\\nitroview.exe\\shell\\open\\command", NULL, cmd);
     bad |= reg_str(L"Software\\NitroView\\Capabilities", L"ApplicationName", L"NitroView");
-    bad |= reg_str(L"Software\\NitroView\\Capabilities", L"ApplicationDescription", L"Very fast image viewer (JPEG, PNG, PSD)");
+    bad |= reg_str(L"Software\\NitroView\\Capabilities", L"ApplicationDescription", L"Very fast image viewer");
     bad |= reg_str(L"Software\\NitroView\\Capabilities", L"ApplicationIcon", icon);
     for (int i = 0; g_assoc_exts[i]; i++) {
         const wchar_t *e = g_assoc_exts[i];
@@ -2800,10 +2802,21 @@ static int do_register(void) {
     bad |= reg_str(L"Software\\RegisteredApplications", L"NitroView", L"Software\\NitroView\\Capabilities");
     SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, NULL, NULL);
     if (bad) { fprintf(stderr, "could not write the registry\n"); return 1; }
-    printf("NitroView is registered for JPEG, PNG, PSD, HEIC, AVIF, TIFF, WebP, GIF and BMP (%s).\n"
+    printf("NitroView is registered for JPEG, PNG, PSD, HEIC, AVIF, TIFF, WebP, GIF, BMP, camera raws (DNG, CR2, NEF,\n"
+           "ARW, RAF)%s (%s).\n"
            "Windows lets only you choose the default app: in the Settings page that opens now, pick NitroView\n"
            "(or right-click an image > Open with > Choose another app > NitroView, \"Always\").\n"
-           "After moving nitroview.exe, run --register again; --unregister removes all of it.\n", utf8(exe));
+           "After moving nitroview.exe, run --register again; --unregister removes all of it.\n",
+#if defined(NV_SVG) && defined(NV_CDR)
+           ", SVG and CorelDRAW",
+#elif defined(NV_SVG)
+           " and SVG",
+#elif defined(NV_CDR)
+           " and CorelDRAW",
+#else
+           "",
+#endif
+           utf8(exe));
     ShellExecuteW(NULL, L"open", L"ms-settings:defaultapps?registeredAppUser=NitroView", NULL, NULL, SW_SHOWNORMAL);
     return 0;
 }
