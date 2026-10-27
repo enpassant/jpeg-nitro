@@ -2,8 +2,9 @@
 // Copyright (c) 2026 A'rpi - part of jpeg-nitro (https://github.com/gereoffy/jpeg-nitro)
 //
 // nitro_os.h: the little the decoders need from the OS - a parallel loop, a
-// clock, the CPU count, yield. Header-only, included by nitrojpeg.c,
-// nitropng.c and nitropsd.c.
+// clock, the CPU count, yield. Header-only, included by every decoder (nitrojpeg,
+// nitropng, nitropsd, nitroheic / nitrohevc, nitrodng, nitrowebp, nitrotiff,
+// nitroavif) and the GNOME viewer's converter.
 //
 //   macOS:       Grand Central Dispatch (dispatch_apply).
 //   elsewhere:   a pthread pool, started on first use (Linux, MinGW, other POSIX).

@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 A'rpi - part of jpeg-nitro (https://github.com/gereoffy/jpeg-nitro)
-// nitroheic (macOS): HEIC photos (iPhone and others) decoded tile by tile in parallel.
+// nitroheic: HEIC photos (iPhone and others) decoded tile by tile in parallel.
 //
 // An iPhone photo is a grid of 512 x 512 tiles, each an independent HEVC still picture.
 // ImageIO decodes them one after the other (~200 ms for 12 MP on an Intel i9, ~59 ms on an
-// M1); here every worker has its own VideoToolbox session (Intel: software decoders, one
-// per core up to 8; Apple Silicon: 4 on the media engine) and takes the next tile, and the
-// result is planar Y/Cb/Cr like nitrojpeg's (colour conversion on the GPU): ~33 ms on the
-// i9, ~26 ms on the M1. Only the HEIF structure is parsed here; HEVC decoding is Apple's.
+// M1); here every worker decodes the next tile, and the result is planar Y/Cb/Cr like
+// nitrojpeg's (colour conversion on the GPU). The HEIF structure is parsed here (src/heif.h);
+// the HEVC tiles are decoded on macOS by VideoToolbox, one session per worker (Intel: software
+// decoders, one per core up to 8; Apple Silicon: 4 on the media engine; ~33 ms on the i9,
+// ~26 ms on the M1), elsewhere (and with NITROHEVC=1 on macOS) by nitrohevc, our own decoder.
 //
 // Handled: an 8-bit 4:2:0 HEVC image or grid of them (full range BT.601, as iPhones write
 // them), with rotation (irot), mirroring (imir), a crop from the top left corner (clap)

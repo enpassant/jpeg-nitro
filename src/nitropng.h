@@ -62,7 +62,7 @@ int np_to_bgrx(const uint8_t *data, size_t len, const np_info *info, const uint8
 // nthreads == 1), verifying its Adler-32. Returns 0 on success.
 int np_zlib_decompress(const uint8_t *z, size_t zlen, uint8_t *out, size_t outlen, int nthreads);
 
-// Testing / tuning: number of parallel inflate chunks (0 = 2 x threads).
+// Testing / tuning: number of parallel inflate chunks (0 = one per thread, at least 64 KB of input each).
 void np_set_chunks(int n);
 
 #ifdef __cplusplus
