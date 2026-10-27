@@ -86,13 +86,14 @@ static double now_ms(void) {
 
 static size_t align_up(size_t v, size_t a) { return (v + a - 1) / a * a; }
 
-static char *utf8(const wchar_t *w) {   // for printing (static rotating buffers)
-    static char buf[4][1024];
-    static int k;
+static char *utf8(const wchar_t *w) {   // for printing (rotating buffers, per thread: the decoder prints too)
+    static __thread char buf[4][1024];
+    static __thread int k;
     char *b = buf[k++ & 3];
-    WideCharToMultiByte(CP_UTF8, 0, w, -1, b, sizeof buf[0], NULL, NULL);
+    if (!WideCharToMultiByte(CP_UTF8, 0, w, -1, b, sizeof buf[0], NULL, NULL)) b[sizeof buf[0] - 1] = 0;   // (too long: cut)
     return b;
 }
+
 
 static const wchar_t *base_name(const wchar_t *p) {
     const wchar_t *n = p;
