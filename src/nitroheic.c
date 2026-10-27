@@ -39,9 +39,9 @@ int nh_read_info(const uint8_t *d, size_t len, nh_info *info) {
     if (!find_box(d, ms, meta.end, "pitm", &pitm) || !find_box(d, ms, meta.end, "iinf", &iinf) ||
         !find_box(d, ms, meta.end, "iloc", &iloc) || !find_box(d, ms, meta.end, "iprp", &iprp))
         goto out;
-    find_box(d, ms, meta.end, "iref", &iref);
+    if (find_box(d, ms, meta.end, "iref", &iref) && iref.end - iref.start < 4) iref.start = iref.end = 0;   // (empty: none)
     find_box(d, ms, meta.end, "idat", &h->idat);
-    if (pitm.end - pitm.start < 6) goto out;
+    if (pitm.end - pitm.start < 6 || (d[pitm.start] != 0 && pitm.end - pitm.start < 8)) goto out;   // (v1: a 32-bit id)
     uint32_t primary = d[pitm.start] == 0 ? be16(d + pitm.start + 4) : be32(d + pitm.start + 4);
     if (parse_iinf(h, &iinf) || parse_iloc(h, &iloc) || parse_iprp(h, &iprp)) goto out;
     Item *pi = item(h, primary);

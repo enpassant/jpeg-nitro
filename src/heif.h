@@ -162,6 +162,7 @@ static inline int parse_iloc(Heif *h, const Box *b) {
     size_t o = b->start, e = b->end;
     if (e - o < 8) return -1;
     int v = d[o];
+    if (v >= 2 && e - o < 10) return -1;   // (version 2: a 32-bit item count)
     o += 4;
     int osz = d[o] >> 4, lsz = d[o] & 15, bsz = d[o + 1] >> 4, isz = v >= 1 ? d[o + 1] & 15 : 0;
     o += 2;
