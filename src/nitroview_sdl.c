@@ -36,6 +36,7 @@
 #include "nitrotiff.h"
 #include "nitro_load.h"       // reading and decoding image files (shared by the viewers)
 #include "nitro_prefetch.h"   // the image cache and background decoder (shared too)
+#include "nitro_view.h"       // the zoom / fit / pan arithmetic (shared too)
 #ifdef NV_DAV1D
 #include "nitroavif.h"   // AVIF: AV1 through dav1d
 #endif
@@ -1123,9 +1124,7 @@ static float density(void) {
 }
 
 static void display_size(const Decoded *d, double *iw, double *ih) {   // after EXIF rotation
-    int swap = d->orientation >= 5;
-    *iw = swap ? d->height : d->width;
-    *ih = swap ? d->width : d->height;
+    nv_display_size(d->width, d->height, d->orientation, iw, ih);
 }
 
 static void redraw(void) { V.dirty = 1; }
@@ -1166,18 +1165,13 @@ static void max_client(double *w, double *h) {   // device pixels
 static void window_content_size(double w, double h, int upscale, double *cw, double *ch) {
     double mw, mh;
     max_client(&mw, &mh);
-    double k = MIN(mw / w, mh / h);
-    if (!upscale) k = MIN(k, 1.0);
-    *cw = MAX(k == 1 ? ceil(w) : floor(w * k), 320);
-    *ch = MAX(k == 1 ? ceil(h) : floor(h * k), 200);
+    nv_content_size(w, h, mw, mh, upscale, cw, ch);
 }
 
 static double fit_scale(const Decoded *d) {
     double iw, ih;
     display_size(d, &iw, &ih);
-    double s = MIN(V.vw / iw, V.vh / ih);
-    if (s > 1 && !V.fullscreen && !V.fit_screen) s = 1;   // small images: 100% (unless key 0)
-    return s;
+    return nv_fit_scale(iw, ih, V.vw, V.vh, V.fullscreen || V.fit_screen);   // small images: 100% (unless key 0)
 }
 static double current_scale(const Decoded *d) { return V.zoomed ? V.scale : fit_scale(d); }
 
@@ -1188,16 +1182,13 @@ static double fit_snap_scale(const Decoded *d) {
     double iw, ih, cw, ch;
     display_size(d, &iw, &ih);
     window_content_size(iw, ih, V.fit_screen, &cw, &ch);
-    double s = MIN(cw / iw, ch / ih);
-    return V.fit_screen ? s : MIN(s, 1.0);
+    return nv_fit_snap_scale(iw, ih, cw, ch, V.fit_screen);
 }
 
 static void clamp_center(const Decoded *d, double s) {
     double iw, ih;
     display_size(d, &iw, &ih);
-    double vw = V.vw / s, vh = V.vh / s;
-    V.cx = iw <= vw ? iw / 2 : MAX(vw / 2, MIN(V.cx, iw - vw / 2));
-    V.cy = ih <= vh ? ih / 2 : MAX(vh / 2, MIN(V.cy, ih - vh / 2));
+    nv_clamp_center(iw, ih, V.vw, V.vh, s, &V.cx, &V.cy);
 }
 
 static void update_title(void) {
@@ -1311,15 +1302,14 @@ static void set_scale(double ns, const Decoded *d, double ax, double ay) {
     if (fabs(ns - fit) < 1e-9 && fabs(ns - 1.0) > 1e-9) { zoom_fit(); return; }
     double iw, ih;
     display_size(d, &iw, &ih);
-    double cur = current_scale(d), cx = iw / 2, cy = ih / 2;
+    double cur = current_scale(d);
     if (V.zoomed) {
         clamp_center(d, V.scale);
-        cx = V.cx;
-        cy = V.cy;
+    } else {
+        V.cx = iw / 2;
+        V.cy = ih / 2;
     }
-    double px = cx + ax / cur, py = cy + ay / cur;   // image point under the anchor
-    V.cx = px - ax / ns;
-    V.cy = py - ay / ns;
+    nv_zoom_anchor(cur, ns, ax, ay, &V.cx, &V.cy);
     V.zoomed = 1;
     V.scale = ns;
     clamp_center(d, ns);
@@ -1330,19 +1320,8 @@ static void set_scale(double ns, const Decoded *d, double ax, double ay) {
 
 // continuous: touchpad, many small steps (no 2% snap, it would swallow them)
 static void zoom_by(double f, const Decoded *d, double ax, double ay, int continuous) {
-    double fit = fit_snap_scale(d), cur = current_scale(d), ns = cur * f;
-    for (int k = 0; k < 2; k++) {   // stop exactly at 100% and at fit when a step crosses them
-        double snap = k == 0 ? 1.0 : fit;
-        if ((cur < snap - 1e-9 && ns > snap + 1e-9) || (cur > snap + 1e-9 && ns < snap - 1e-9)) {
-            ns = snap;
-            break;
-        }
-    }
-    ns = MAX(MIN(fit, 1.0) / 4, MIN(ns, 32.0));
-    double r = round(ns);   // e.g. sqrt(2)^2 -> exactly 200%
-    if (r >= 1 && fabs(ns - r) < 1e-6 * r) ns = r;
-    if (!continuous && fabs(ns - fit) < 0.02 * fit) ns = fit;
-    set_scale(ns, d, ax, ay);
+    double fit = fit_snap_scale(d);
+    set_scale(nv_zoom_step(current_scale(d), fit, f, continuous), d, ax, ay);
 }
 
 static void pan_pixels(double dx, double dy, const Decoded *d) {

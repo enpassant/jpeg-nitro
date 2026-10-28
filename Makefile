@@ -64,7 +64,7 @@ DEC_SRC    := src/nitrojpeg.c src/nitropng.c src/nitropsd.c
 DEC_HDR    := src/nitrojpeg.h src/nitropng.h src/nitropsd.h src/nitro_os.h
 # what the four viewers share (compiled into each with its own NV_* defines)
 VIEWER_SRC := src/nitro_load.c src/nitro_prefetch.c
-VIEWER_HDR := src/nitro_load.h src/nitro_prefetch.h
+VIEWER_HDR := src/nitro_load.h src/nitro_prefetch.h src/nitro_view.h
 
 # Linux library: the decoders in one native C library (JPEG, PNG, PSD, and HEIC, DNG, WebP, TIFF).
 # Keep dedicated PIC objects so the existing benchmark/test objects stay unchanged.

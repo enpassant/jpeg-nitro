@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 #include "nitro-view.h"
 #include "nitro-image.h"
+#include "../nitro_view.h"   // the zoom / fit / pan arithmetic (shared by the viewers)
 
 #include <math.h>
 
@@ -152,10 +153,8 @@ static double fit_scale(NitroView *self) {
 
     if (width <= 0 || height <= 0 || image_width <= 0 || image_height <= 0) return 1.0;
 
-    double scale = MIN((double)width * factor / image_width,
-                       (double)height * factor / image_height);
-    if (!self->fit_screen && !self->fullscreen && scale > 1.0) scale = 1.0;
-    return scale;
+    return nv_fit_scale(image_width, image_height, (double)width * factor, (double)height * factor,
+                        self->fit_screen || self->fullscreen);
 }
 
 static double current_scale(NitroView *self) {
@@ -166,17 +165,8 @@ static void clamp_center(NitroView *self, double scale) {
     if (!has_image(self) || scale <= 0.0) return;
 
     int factor = view_scale_factor(self);
-    double image_width = image_w(self);
-    double image_height = image_h(self);
-    double visible_width = (double)gtk_widget_get_width(GTK_WIDGET(self)) * factor / scale;
-    double visible_height = (double)gtk_widget_get_height(GTK_WIDGET(self)) * factor / scale;
-
-    self->center_x = image_width <= visible_width
-        ? image_width / 2.0
-        : CLAMP(self->center_x, visible_width / 2.0, image_width - visible_width / 2.0);
-    self->center_y = image_height <= visible_height
-        ? image_height / 2.0
-        : CLAMP(self->center_y, visible_height / 2.0, image_height - visible_height / 2.0);
+    nv_clamp_center(image_w(self), image_h(self), (double)gtk_widget_get_width(GTK_WIDGET(self)) * factor,
+                    (double)gtk_widget_get_height(GTK_WIDGET(self)) * factor, scale, &self->center_x, &self->center_y);
 }
 
 static void emit_view_changed(NitroView *self) {
@@ -390,20 +380,15 @@ static void set_scale(NitroView *self, double new_scale, double x, double y) {
 
     int factor = view_scale_factor(self);
     double current = current_scale(self);
-    double image_width = image_w(self);
-    double image_height = image_h(self);
-    double center_x = self->zoomed ? self->center_x : image_width / 2.0;
-    double center_y = self->zoomed ? self->center_y : image_height / 2.0;
-
-    if (self->zoomed) clamp_center(self, current);
-
+    if (self->zoomed) {
+        clamp_center(self, current);
+    } else {
+        self->center_x = image_w(self) / 2.0;
+        self->center_y = image_h(self) / 2.0;
+    }
     double anchor_x = (x - gtk_widget_get_width(GTK_WIDGET(self)) / 2.0) * factor;
     double anchor_y = (y - gtk_widget_get_height(GTK_WIDGET(self)) / 2.0) * factor;
-    double point_x = center_x + anchor_x / current;
-    double point_y = center_y + anchor_y / current;
-
-    self->center_x = point_x - anchor_x / new_scale;
-    self->center_y = point_y - anchor_y / new_scale;
+    nv_zoom_anchor(current, new_scale, anchor_x, anchor_y, &self->center_x, &self->center_y);
     self->zoomed = TRUE;
     self->scale = new_scale;
     clamp_center(self, new_scale);
@@ -436,25 +421,7 @@ void nitro_view_zoom_by(NitroView *self, double factor, double x, double y, gboo
     if (!has_image(self) || factor <= 0.0) return;
 
     double fit = fit_snap_scale(self);
-    double current = current_scale(self);
-    double next = current * factor;
-
-    double snaps[2] = {1.0, fit};
-    for (int i = 0; i < 2; i++) {
-        double snap = snaps[i];
-        if ((current < snap - 1e-9 && next > snap + 1e-9) ||
-            (current > snap + 1e-9 && next < snap - 1e-9)) {
-            next = snap;
-            break;
-        }
-    }
-
-    next = CLAMP(next, MIN(fit, 1.0) / 4.0, 32.0);
-    double rounded = round(next);
-    if (rounded >= 1.0 && fabs(next - rounded) < 1e-6 * rounded) next = rounded;
-    if (!continuous && fit > 0.0 && fabs(next - fit) < 0.02 * fit) next = fit;
-
-    set_scale(self, next, x, y);
+    set_scale(self, nv_zoom_step(current_scale(self), fit, factor, continuous), x, y);
 }
 
 void nitro_view_toggle_actual_size(NitroView *self, double x, double y) {

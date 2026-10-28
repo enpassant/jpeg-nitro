@@ -37,6 +37,7 @@
 #include "nitrotiff.h"
 #include "nitro_load.h"       // reading and decoding image files (shared by the viewers)
 #include "nitro_prefetch.h"   // the image cache and background decoder (shared too)
+#include "nitro_view.h"       // the zoom / fit / pan arithmetic (shared too)
 #include <pthread/qos.h>
 #ifdef NV_DAV1D
 #include "nitroavif.h"    // optional AVIF decoding (dav1d)
@@ -844,13 +845,9 @@ static NSSize window_content_size(double w, double h, NSWindowStyleMask mask, NS
     NSRect vis = scr.visibleFrame;
     double bs = scr.backingScaleFactor > 0 ? scr.backingScaleFactor : 1;
     double tb = [NSWindow frameRectForContentRect:NSMakeRect(0, 0, 100, 100) styleMask:mask].size.height - 100;
-    double maxW = vis.size.width, maxH = vis.size.height - tb;
-    double pw = w / bs, ph = h / bs;   // points at 100%
-    double k = MIN(maxW / pw, maxH / ph);
-    if (!upscale) k = MIN(k, 1.0);
-    double cw = k == 1 ? ceil(pw) : floor(pw * k);
-    double ch = k == 1 ? ceil(ph) : floor(ph * k);
-    return NSMakeSize(MAX(cw, 320), MAX(ch, 200));
+    double cw, ch;   // (in points: the image's size at 100% is w / bs x h / bs points)
+    nv_content_size(w / bs, h / bs, vis.size.width, vis.size.height - tb, upscale, &cw, &ch);
+    return NSMakeSize(cw, ch);
 }
 
 // Largest window content size that fits the visible screen area.
@@ -1209,9 +1206,7 @@ static NSArray<NSString *> *dropped_paths(id<NSDraggingInfo> info);
 // --- zoom / pan --- (view size is a parameter so --zoomtest can drive it offscreen)
 
 static void display_size(Decoded *d, double *iw, double *ih) {   // after EXIF rotation
-    BOOL swap = d.orientation >= 5;
-    *iw = swap ? d.height : d.width;
-    *ih = swap ? d.width : d.height;
+    nv_display_size(d.width, d.height, d.orientation, iw, ih);
 }
 
 - (BOOL)isFullScreen { return (self.window.styleMask & NSWindowStyleMaskFullScreen) != 0; }
@@ -1219,9 +1214,8 @@ static void display_size(Decoded *d, double *iw, double *ih) {   // after EXIF r
 - (double)fitScale:(Decoded *)d view:(CGSize)ds {
     double iw, ih;
     display_size(d, &iw, &ih);
-    double s = MIN(ds.width / iw, ds.height / ih);
-    if (s > 1 && self.window && !self.isFullScreen && !_fitScreen) s = 1;   // small images: 100% (unless key 0)
-    return s;
+    // small images: 100% (unless key 0; and offscreen tests without a window)
+    return nv_fit_scale(iw, ih, ds.width, ds.height, !self.window || self.isFullScreen || _fitScreen);
 }
 - (double)fitScale:(Decoded *)d { return [self fitScale:d view:self.drawableSize]; }
 - (double)currentScale:(Decoded *)d view:(CGSize)ds { return _zoomed ? _scale : [self fitScale:d view:ds]; }
@@ -1230,9 +1224,7 @@ static void display_size(Decoded *d, double *iw, double *ih) {   // after EXIF r
 - (void)clampCenter:(Decoded *)d scale:(double)s view:(CGSize)ds {
     double iw, ih;
     display_size(d, &iw, &ih);
-    double vw = ds.width / s, vh = ds.height / s;
-    _cx = iw <= vw ? iw / 2 : MAX(vw / 2, MIN(_cx, iw - vw / 2));
-    _cy = ih <= vh ? ih / 2 : MAX(vh / 2, MIN(_cy, ih - vh / 2));
+    nv_clamp_center(iw, ih, ds.width, ds.height, s, &_cx, &_cy);
 }
 
 - (void)zoomFit {
@@ -1250,15 +1242,14 @@ static void display_size(Decoded *d, double *iw, double *ih) {   // after EXIF r
     if (fabs(ns - fit) < 1e-9 && fabs(ns - 1.0) > 1e-9) { [self zoomFit]; return; }
     double iw, ih;
     display_size(d, &iw, &ih);
-    double cur = [self currentScale:d view:ds], cx = iw / 2, cy = ih / 2;
+    double cur = [self currentScale:d view:ds];
     if (_zoomed) {
         [self clampCenter:d scale:_scale view:ds];
-        cx = _cx;
-        cy = _cy;
+    } else {
+        _cx = iw / 2;
+        _cy = ih / 2;
     }
-    double px = cx + a.x / cur, py = cy + a.y / cur;   // image point under the anchor
-    _cx = px - a.x / ns;
-    _cy = py - a.y / ns;
+    nv_zoom_anchor(cur, ns, a.x, a.y, &_cx, &_cy);
     _zoomed = YES;
     _scale = ns;
     [self clampCenter:d scale:ns view:ds];
@@ -1283,8 +1274,7 @@ static void display_size(Decoded *d, double *iw, double *ih) {   // after EXIF r
     display_size(d, &iw, &ih);
     NSSize cs = window_content_size(iw, ih, w.styleMask, w.screen, _fitScreen);
     double bs = w.backingScaleFactor > 0 ? w.backingScaleFactor : 1;
-    double s = MIN(cs.width * bs / iw, cs.height * bs / ih);
-    return _fitScreen ? s : MIN(s, 1.0);
+    return nv_fit_snap_scale(iw, ih, cs.width * bs, cs.height * bs, _fitScreen);
 }
 
 static int debug_zoom(void) {   // NV_DEBUG_ZOOM=1: log wheel / pinch events and what they did
@@ -1297,19 +1287,7 @@ static int debug_zoom(void) {   // NV_DEBUG_ZOOM=1: log wheel / pinch events and
 - (void)zoomBy:(double)f image:(Decoded *)d view:(CGSize)ds anchor:(CGPoint)a continuous:(BOOL)continuous {
     double fit = [self fitSnapScale:d view:ds];
     double cur = [self currentScale:d view:ds];
-    double ns = cur * f;
-    // stop exactly at 100% and at "fit" when a step crosses them
-    for (int k = 0; k < 2; k++) {
-        double snap = k == 0 ? 1.0 : fit;
-        if ((cur < snap - 1e-9 && ns > snap + 1e-9) || (cur > snap + 1e-9 && ns < snap - 1e-9)) {
-            ns = snap;
-            break;
-        }
-    }
-    ns = MAX(MIN(fit, 1.0) / 4, MIN(ns, 32.0));
-    double r = round(ns);                       // e.g. sqrt(2)^2 -> exactly 200%
-    if (r >= 1 && fabs(ns - r) < 1e-6 * r) ns = r;
-    if (!continuous && fabs(ns - fit) < 0.02 * fit) ns = fit;   // a step landing within 2% of fit is fit
+    double ns = nv_zoom_step(cur, fit, f, continuous);
     [self setScale:ns image:d view:ds anchor:a];
     if (debug_zoom())
         fprintf(stderr, "    zoomBy f %.4f%s: cur %.4f fit %.4f -> ns %.4f => scale %.4f %s  view %.0fx%.0f\n", f,
