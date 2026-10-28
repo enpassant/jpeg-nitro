@@ -51,15 +51,16 @@ int main(int argc, char **argv) {
         }
         size_t fixed[] = {8, 20, 33, 40, 60, n - 1, n - 4, n - 12, n - 13, n - 16};
         for (size_t k = 0; k < sizeof fixed / sizeof *fixed; k++) {
+            if (fixed[k] > n) continue;
             memcpy(d, o, fixed[k]); snprintf(what, sizeof what, "truncated @%zu", fixed[k]); run(name, what, d, fixed[k]);
         }
         int flips[] = {1, 1, 1, 10, 100, 1000};
-        for (size_t k = 0; k < sizeof flips / sizeof *flips; k++) {
+        for (size_t k = 0; k < sizeof flips / sizeof *flips && n > 100; k++) {
             memcpy(d, o, n);
             for (int i = 0; i < flips[k]; i++) d[100 + rnd() % (n - 100)] = (uint8_t)rnd();
             snprintf(what, sizeof what, "%d random bytes", flips[k]); run(name, what, d, n);
         }
-        for (int k = 0; k < 6; k++) {
+        for (int k = 0; k < 6 && n > 100; k++) {
             memcpy(d, o, n);
             size_t p = 100 + rnd() % (n - 100);
             d[p] ^= (uint8_t)(1 << (rnd() % 8));
@@ -71,7 +72,7 @@ int main(int argc, char **argv) {
             memset(d + p, k ? 0xFF : 0x00, m);
             snprintf(what, sizeof what, "%zuK of 0x%02X", m / 1024, k ? 0xFF : 0); run(name, what, d, n);
         }
-        for (int k = 0; k < 20; k++) {   // IHDR / header damage (size, type, depth)
+        for (int k = 0; k < 20 && n >= 29; k++) {   // IHDR / header damage (size, type, depth)
             memcpy(d, o, n);
             d[16 + rnd() % 13] = (uint8_t)rnd();
             snprintf(what, sizeof what, "IHDR damage #%d", k); run(name, what, d, n);
