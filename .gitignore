@@ -22,6 +22,7 @@
 /bench/rgbverify
 /bench/bgrxverify
 /bench/*.exe
+/examples/nitroconvert
 *.o
 *.dSYM/
 

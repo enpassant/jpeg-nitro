@@ -628,6 +628,16 @@ ThreadSanitizer is ellenőrizte (ép és sérült fájlokon).
 
 ### A dekóderek más rendszeren (Linux, MinGW)
 
+**Mind egy könyvtárban.** A `make lib` a `build/libnitro.a`-t készíti el: a fenti dekóderek, a nitroheic, a nitrowebp,
+a nitrotiff (dav1d-vel a nitroavif) és a `src/nitro_load.c/.h`, a nézők közös útja a fájltól a dekódolt
+képig: az `nv_read_image()` azt olvassa be, ami kell (egy PSD összevont képét, egy nyers kamerafájl beágyazott
+JPEG-jét), az `nv_decode()` felismeri a formátumot és a megfelelő dekóderrel egy pufferbe dekódol, az
+`NvImage` leírja, mi van benne (YUV-síkok, egy PSD síkjai, B G R X pixelek vagy egy PNG sorai, az EXIF
+orientáció, az ICC-profil). A `src/nitro_convert.c/.h` (`nc_yuv_to_rgb()`, `nc_psd_to_rgb()`) a síkokból
+RGB-t csinál, párhuzamosan, annak, akinek nincs rá GPU-shadere. Az `examples/nitroconvert.c`
+(`make examples/nitroconvert`) az egész száz sorban: bármilyen, a könyvtár által dekódolt képből 24 bites BMP,
+az orientációt alkalmazva.
+
 A dekóderek nem függnek a macOS-től: amit a rendszerből használnak, az a `src/nitro_os.h`-ban
 van — párhuzamos ciklus (macOS-en Grand Central Dispatch, máshol egy kis pthreads-es
 szálkészlet), óra és a processzormagok száma. A ciklusmagok clang-blokkok (`^(size_t i) {…}`),
@@ -730,6 +740,9 @@ A `-march=native` miatt a bináris a fordító gép CPU-jára optimalizált.
 - `src/gnome/`: GTK4/libadwaita néző GNOME/Linuxra; `packaging/gnome/`: asztali integráció
 - `src/nitroview_sdl.c`: az SDL3 + OpenGL néző Linuxra (Wayland / X11)
 - `src/libnitro.map`: a Linux megosztott könyvtár exportált API-ja
+- `src/nitro_load.c/.h`: fájl -> dekódolt kép a fenti dekóderekkel (a könyvtár arca, ezt használják a nézők);
+  `src/nitro_convert.c/.h`: a síkjaiból RGB; `examples/nitroconvert.c`: példaprogram a könyvtárra, bármilyen
+  kép -> BMP; `src/nitro_prefetch.c/.h`, `src/nitro_view.h`: a nézők közös előtöltője és zoom-számításai
 - `src/shaders.metal`: a néző GPU-shaderei (színkonverzió, kirajzolás), fordításkor beágyazva
 - `scripts/get-deps.sh`: az opcionális függőségek letöltése és fordítása
 - `bench/bench.m`: dekóder-benchmark (macOS, az összes dekóder), `bench/nbench.c`: hordozható

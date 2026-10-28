@@ -707,6 +707,16 @@ keep their work buffers for the next image; `nj_free_buffers()` / `np_free_buffe
 `ps_read_info()`, then `ps_decode()` writes the planes (R, G, B or gray, then transparency if
 `info.alpha`) one after the other.
 
+**All of them as one library.** `make lib` builds `build/libnitro.a`: the decoders above, nitroheic, nitrowebp,
+nitrotiff (nitroavif with dav1d) and `src/nitro_load.c/.h`, the viewers' common path from a file to a
+decoded image: `nv_read_image()` reads what is needed (a PSD's merged image, a camera raw's embedded
+JPEG), `nv_decode()` recognises the format and decodes with the right decoder into one buffer, an
+`NvImage` describing what is in it (YUV planes, a PSD's planes, B G R X pixels or a PNG's rows, the EXIF
+orientation, the ICC profile). `src/nitro_convert.c/.h` (`nc_yuv_to_rgb()`, `nc_psd_to_rgb()`) makes
+RGB of the planes, in parallel, for whoever has no GPU shader for them.
+`examples/nitroconvert.c` (`make examples/nitroconvert`) is the whole thing in a hundred lines: any
+image the library decodes to a 24-bit BMP, with its orientation applied.
+
 **Other systems (Linux, MinGW).** The decoders don't depend on macOS: all they need from the OS
 is in `src/nitro_os.h` — a parallel loop (Grand Central Dispatch on macOS, a small pthread
 pool elsewhere), a clock and the CPU count. The loop bodies are clang blocks (`^(size_t i) {…}`),
@@ -814,6 +824,10 @@ symlink). The measurements above were made on 50 private photos that are not in 
   structure, shared with nitroheic
 - `src/nitrotiff.c/.h`: TIFF decoder (strips / tiles in parallel); `bench/bgrxverify.m`: its and nitropng's BGRX output against ImageIO
 - `src/nitro_os.h`: what the decoders need from the OS (parallel loop, clock, CPU count)
+- `src/nitro_load.c/.h`: file -> decoded image with the decoders above (the library's face, what the viewers
+  use); `src/nitro_convert.c/.h`: its planes -> RGB; `examples/nitroconvert.c`: an example program on the
+  library, any image -> BMP; `src/nitro_prefetch.c/.h`, `src/nitro_view.h`: the viewers' shared prefetching
+  loader and zoom arithmetic
 - `src/png_wuffs.c/.h`: optional Wuffs PNG decoding for the viewer (interlaced PNGs, which nitropng skips)
 - `bench/pngbench.m`, `bench/pngsplit.c`: PNG decoder comparison and time split,
   `bench/pngverify.c`: nitropng byte-exactness vs zlib, `bench/pngrobust.c`: damaged PNGs (ASan),

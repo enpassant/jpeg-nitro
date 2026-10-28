@@ -20,6 +20,8 @@
 #                        dav1d) and nitro_load (file -> decoded image) as one static library. The viewers
 #                        link it (built again per target: the app's architectures, Windows, the portable
 #                        Linux build); any other program can too, with nitro_os.h's blocks runtime
+#   make examples/nitroconvert
+#                        the example program on the library: any image it decodes -> a 24-bit BMP
 #   make linux-lib       Linux: build/lib/libnitro.so (exports: src/libnitro.map) and a PIC libnitro.a
 #   make gnome           GNOME/libadwaita viewer: nitroview-gnome (the decoders linked in statically)
 #   make sdl             SDL3 + OpenGL viewer for Linux: nitroview-sdl (SDL3 from scripts/get-deps.sh;
@@ -465,6 +467,12 @@ bench/rgbverify: bench/rgbverify.c build/libnitro.a | ljt
 	$(CC) $(CFLAGS) -I$(LJT)/include -Isrc bench/rgbverify.c build/libnitro.a $(LJT)/lib/libturbojpeg.a \
 	  $(LDQUIET) $(THREADLIBS) -o $@
 
+# the example program on the library (examples/nitroconvert.c): any image it decodes -> a 24-bit BMP
+EXAMPLE_LIBS := $(if $(filter 1,$(DAV1D)),$(DAV1D_LIB)) $(THREADLIBS) \
+                $(if $(filter Darwin,$(UNAME_S)),-framework CoreFoundation -framework VideoToolbox -framework CoreMedia -framework CoreVideo,-lm)
+examples/nitroconvert: examples/nitroconvert.c build/libnitro.a
+	$(CC) $(CFLAGS) -Isrc $^ $(EXAMPLE_LIBS) $(LDQUIET) -o $@
+
 bench/verify: bench/verify.c build/nitrojpeg_ref.o | ljt
 	$(CC) $(REF_CFLAGS) -w $^ $(REF_LIBS) $(THREADLIBS) -o $@
 
@@ -509,11 +517,11 @@ bench/sustain: bench/sustain.c build/libnitro.a
 	$(CC) -O2 -Isrc $^ -o $@
 
 tools: bench/bench bench/verify bench/robust bench/freqprobe bench/sustain bench/pngbench bench/pngsplit bench/pngverify bench/pngrobust bench/psdverify bench/psdrobust bench/bgrxverify \
-       bench/nbench bench/rgbverify
+       bench/nbench bench/rgbverify examples/nitroconvert
 
 # Linux (or any clang + pthreads system): the tools without macOS APIs; verify and robust
 # only once scripts/get-deps.sh has built libjpeg-turbo
-LINUX_TOOLS := bench/nbench bench/pngverify bench/psdverify bench/pngrobust bench/psdrobust \
+LINUX_TOOLS := bench/nbench bench/pngverify bench/psdverify bench/pngrobust bench/psdrobust examples/nitroconvert \
                $(if $(wildcard $(LJT)/lib/libturbojpeg.a),bench/verify bench/robust bench/rgbverify)
 linux: linux-lib $(LINUX_TOOLS)
 	@echo "built $(LIB_SHARED) $(LIB_STATIC) $(LINUX_TOOLS)$(if $(wildcard $(LJT)/lib/libturbojpeg.a),, (verify / robust: run scripts/get-deps.sh first))"
