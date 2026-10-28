@@ -2334,6 +2334,20 @@ static void usage(void) {
         "  Esc                     leave full screen / quit                Q   quit\n");
 }
 
+#ifdef __AVX2__
+// Built for AVX2 (WINARCH x86-64-v3, the default): on an older CPU (AMD FX, Intel before Haswell) the
+// first AVX2 instruction would end the program silently. This runs before wmain, built for plain
+// x86-64, and says so instead.
+__attribute__((constructor(101), target("arch=x86-64"))) static void need_avx2(void) {   // (101: before C++ constructors)
+    __builtin_cpu_init();
+    if (__builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma")) return;
+    MessageBoxW(NULL, L"This nitroview.exe needs a CPU with AVX2 (Intel Haswell / AMD Ryzen or newer).\n"
+                      L"Use the build for older processors (x86-64-v2) instead.",
+                L"nitroview", MB_OK | MB_ICONERROR);
+    ExitProcess(1);
+}
+#endif
+
 int wmain(int argc, wchar_t **argv) {
     int full = 0, bench = 0, selftest = 0, help = 0, newwin = 0;
     double slide_ms = 0;

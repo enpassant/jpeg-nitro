@@ -742,7 +742,9 @@ ThreadSanitizer with four threads decoding at once). Tested on Linux (see
 **Windows:** `make windows WINCC=…/llvm-mingw/bin/x86_64-w64-mingw32-clang` cross-compiles
 `nitroview.exe` (the viewer, with its icon), `bench/nbench.exe` and `bench/psdverify.exe` with [llvm-mingw](https://github.com/mstorsjo/llvm-mingw)
 (clang + MinGW-w64; also works in MSYS2's CLANG64): static, only system DLLs, AVX2
-(`WINARCH=x86-64-v2` without). AVIF in the viewer needs dav1d built for Windows first:
+(`WINARCH=x86-64-v2` without: for AMD FX, Intel before Haswell; the AVX2 build tells so on such a CPU
+instead of quitting silently; delete `build/win/*.a` when switching, the SVG / CorelDRAW libraries are
+built for it too). AVIF in the viewer needs dav1d built for Windows first:
 `WINCC=… scripts/get-deps.sh` (the same compiler). `nbench.exe` runs on Windows Server with the same results;
 wildcards (`*.jpg`) are expanded by the program, directories work as arguments too.
 

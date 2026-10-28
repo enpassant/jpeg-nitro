@@ -664,7 +664,9 @@ robusztussági tesztek, ThreadSanitizer négy egyszerre dekódoló szállal). Li
 [llvm-mingw](https://github.com/mstorsjo/llvm-mingw)-vel (clang + MinGW-w64; az MSYS2 CLANG64
 környezetében is megy) lefordítja a `nitroview.exe`-t (a nézőt, ikonnal), a `bench/nbench.exe`-t és a
 `bench/psdverify.exe`-t: statikusan,
-csak rendszer-DLL-ekkel, AVX2-vel (`WINARCH=x86-64-v2`: anélkül). A nézőben az AVIF-hez előbb a
+csak rendszer-DLL-ekkel, AVX2-vel (`WINARCH=x86-64-v2`: anélkül, AMD FX-re, a Haswell előtti Intelekre;
+az AVX2-es build ilyen processzoron ezt kiírja, nem csak csendben kilép; váltáskor a `build/win/*.a`
+törlendő, az SVG / CorelDRAW könyvtárak is erre fordulnak). A nézőben az AVIF-hez előbb a
 dav1d-t kell Windowsra lefordítani: `WINCC=… scripts/get-deps.sh` (ugyanazzal a fordítóval). Az `nbench.exe` Windows Serveren
 is fut; a `*.jpg`-t maga a program bontja ki, és könyvtárnevet is elfogad.
 
