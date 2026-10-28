@@ -38,6 +38,8 @@
         nv_is_image_name;
         nv_ext_list;
         nv_image_exts;
+        nc_yuv_to_rgb;
+        nc_psd_to_rgb;
     local:
         *;
 };

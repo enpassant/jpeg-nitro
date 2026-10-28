@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 A'rpi - part of jpeg-nitro (https://github.com/gereoffy/jpeg-nitro)
-// nitro-convert: decoded planes -> RGB, multi-threaded. See nitro-convert.h.
-#include "nitro-convert.h"
-#include "../nitro_os.h"
+// nitro_convert: decoded planes -> RGB, multi-threaded. See nitro_convert.h.
+#include "nitro_convert.h"
+#include "nitro_os.h"
 
 #include <stdlib.h>
 #include <string.h>

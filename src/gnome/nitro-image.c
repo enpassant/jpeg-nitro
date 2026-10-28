@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: MIT
 #include "nitro-image.h"
-#include "nitro-convert.h"
 
 #include <gtk/gtk.h>   // GTK_CHECK_VERSION
 
-#include "../nitro_load.h"   // reading and decoding with our decoders (shared by the viewers)
+#include "../nitro_load.h"      // reading and decoding with our decoders (the library)
+#include "../nitro_convert.h"   // their planes -> RGB (the library too)
 #include "../nitrojpeg.h"    // nj_set_max_workers
 #ifdef NV_SVG
 #include "../nitrosvg.h"   // optional SVG rendering (lunasvg)

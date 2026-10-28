@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 A'rpi - part of jpeg-nitro (https://github.com/gereoffy/jpeg-nitro)
-// The GNOME viewer's JPEG -> RGB conversion (src/gnome/nitro-convert.c) must give exactly
+// The library's JPEG -> RGB conversion (src/nitro_convert.c, the GNOME viewer's) must give exactly
 // libjpeg-turbo's RGB output: nitrojpeg planes + nc_yuv_to_rgb vs tj3Decompress8(TJPF_RGB).
 //   rgbverify files.jpg...
-#include "../src/gnome/nitro-convert.h"
+#include "../src/nitro_convert.h"
 #include "../src/nitrojpeg.h"
 #include "../src/nitro_os.h"
 #include <turbojpeg.h>

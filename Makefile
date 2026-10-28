@@ -69,9 +69,9 @@ FRAMEWORKS := -framework Cocoa -framework Metal -framework MetalKit -framework Q
 # portable Linux build, build/win/ for Windows, build/lib/ as PIC for the Linux shared library. With
 # dav1d (DAV1D=1) nitroavif is in it, compiled with -DNV_DAV1D; libdav1d.a is linked beside it.
 LIB_SRC    := src/nitrojpeg.c src/nitropng.c src/nitropsd.c src/nitroheic.c src/nitrohevc.c src/nitrodng.c src/nitrowebp.c \
-              src/nitrotiff.c src/nitro_load.c
+              src/nitrotiff.c src/nitro_load.c src/nitro_convert.c
 LIB_HDR    := src/nitrojpeg.h src/nitropng.h src/nitropsd.h src/nitroheic.h src/nitrohevc.h src/nitrodng.h src/nitrowebp.h \
-              src/nitrotiff.h src/nitroavif.h src/nitro_load.h src/nitro_os.h src/heif.h src/tiff.h
+              src/nitrotiff.h src/nitroavif.h src/nitro_load.h src/nitro_convert.h src/nitro_os.h src/heif.h src/tiff.h
 LIB_AVIF    = $(if $(filter 1,$(DAV1D)),src/nitroavif.c)
 LIB_DEFS    = $(if $(filter 1,$(DAV1D)),-DNV_DAV1D -I$(DAV1D_DIR)/include)
 LIB_WARN   := -Wall -Wextra -Wno-unused-parameter
@@ -97,10 +97,9 @@ GNOME_LIBS      = $(shell pkg-config --libs $(GNOME_PKGS) 2>/dev/null)
 GNOME_DIR      := src/gnome
 GNOME_RES      := build/gnome/nitroview-resources.c
 GNOME_SRC      := $(GNOME_DIR)/main.c $(GNOME_DIR)/nitro-window.c $(GNOME_DIR)/nitro-view.c $(GNOME_DIR)/nitro-image.c \
-                  $(GNOME_DIR)/nitro-convert.c $(GNOME_DIR)/nitro-loader.c $(VIEWER_SRC) $(GNOME_RES)
-GNOME_HDR      := $(GNOME_DIR)/nitro-window.h $(GNOME_DIR)/nitro-view.h $(GNOME_DIR)/nitro-image.h $(GNOME_DIR)/nitro-convert.h \
-                  $(GNOME_DIR)/nitro-loader.h \
-                  src/nitro_os.h $(VIEWER_HDR)
+                  $(GNOME_DIR)/nitro-loader.c $(VIEWER_SRC) $(GNOME_RES)
+GNOME_HDR      := $(GNOME_DIR)/nitro-window.h $(GNOME_DIR)/nitro-view.h $(GNOME_DIR)/nitro-image.h $(GNOME_DIR)/nitro-loader.h \
+                  $(LIB_HDR) $(VIEWER_HDR)
 GNOME_BIN      := nitroview-gnome
 GNOME_APP_ID   := com.github.gereoffy.nitroview
 GNOME_DESKTOP  := build/gnome/$(GNOME_APP_ID).desktop
@@ -461,9 +460,9 @@ bench/bench: bench/bench.m build/nitrojpeg_ref.o | deps
 	$(CC) $(REF_CFLAGS) -w -fobjc-arc $^ $(REF_LIBS) -framework Foundation -framework ImageIO \
 	  -framework CoreGraphics -framework VideoToolbox -framework CoreMedia -framework CoreVideo -o $@
 
-# the GNOME viewer's JPEG -> RGB conversion vs libjpeg-turbo (no GTK needed)
-bench/rgbverify: bench/rgbverify.c src/gnome/nitro-convert.c src/gnome/nitro-convert.h build/libnitro.a | ljt
-	$(CC) $(CFLAGS) -I$(LJT)/include -Isrc bench/rgbverify.c src/gnome/nitro-convert.c build/libnitro.a $(LJT)/lib/libturbojpeg.a \
+# the library's JPEG -> RGB conversion (nitro_convert, the GNOME viewer's) vs libjpeg-turbo
+bench/rgbverify: bench/rgbverify.c build/libnitro.a | ljt
+	$(CC) $(CFLAGS) -I$(LJT)/include -Isrc bench/rgbverify.c build/libnitro.a $(LJT)/lib/libturbojpeg.a \
 	  $(LDQUIET) $(THREADLIBS) -o $@
 
 bench/verify: bench/verify.c build/nitrojpeg_ref.o | ljt

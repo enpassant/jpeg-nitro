@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 A'rpi - part of jpeg-nitro (https://github.com/gereoffy/jpeg-nitro)
 //
-// nitro-convert: decoded planes -> RGB pixels for the GNOME viewer. Multi-threaded
-// (src/nitro_os.h), plain C without GTK, so it can be tested on its own.
+// nitro_convert: decoded planes (nitro_load's NvImage) -> RGB pixels, for whoever shows the image
+// without a GPU shader: the GNOME viewer, other programs on the library. Multi-threaded
+// (nitro_os.h), plain C.
 #pragma once
 #include <stddef.h>
 #include <stdint.h>
 
-#include "../nitro_load.h"
+#include "nitro_load.h"
 
 #ifdef __cplusplus
 extern "C" {
