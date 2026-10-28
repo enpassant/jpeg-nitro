@@ -2,6 +2,7 @@
 // Copyright (c) 2026 A'rpi - part of jpeg-nitro (https://github.com/gereoffy/jpeg-nitro)
 // nitropng: multi-threaded single-image PNG decoding. See nitropng.h.
 #include "nitropng.h"
+#include "tiff.h"   // eXIf: the Orientation tag
 
 #include "nitro_os.h"   // parallel loop, clock, CPU count
 #include <stdio.h>
@@ -20,24 +21,6 @@ static inline uint32_t be32(const uint8_t *p) { return (uint32_t)p[0] << 24 | (u
 
 // ---------------------------------------------------------------------------
 // PNG container
-
-// The Orientation tag (0x112) of an Exif block (TIFF structure, as in eXIf): 1..8, 1 if none.
-static int exif_orientation(const uint8_t *p, size_t n) {
-    if (n < 8 || p[0] != p[1] || (p[0] != 'I' && p[0] != 'M')) return 1;
-    int le = p[0] == 'I';
-#define G16(q) (le ? (uint32_t)(q)[0] | (uint32_t)(q)[1] << 8 : (uint32_t)(q)[0] << 8 | (uint32_t)(q)[1])
-    uint32_t ifd = le ? (uint32_t)p[4] | (uint32_t)p[5] << 8 | (uint32_t)p[6] << 16 | (uint32_t)p[7] << 24 : be32(p + 4);
-    if (G16(p + 2) != 42 || ifd > n - 2) return 1;
-    uint32_t count = G16(p + ifd);
-    for (uint32_t i = 0; i < count && ifd + 2 + 12 * (size_t)(i + 1) <= n; i++) {
-        const uint8_t *e = p + ifd + 2 + 12 * (size_t)i;
-        if (G16(e) != 0x112) continue;
-        uint32_t o = G16(e + 8);
-        return G16(e + 2) == 3 && o >= 1 && o <= 8 ? (int)o : 1;
-    }
-#undef G16
-    return 1;
-}
 
 int np_read_info(const uint8_t *d, size_t len, np_info *fi) {
     memset(fi, 0, sizeof *fi);
@@ -61,7 +44,7 @@ int np_read_info(const uint8_t *d, size_t len, np_info *fi) {
         if (n > len - i - 12) break;
         if (!memcmp(d + i + 4, "IEND", 4)) break;
         if (!memcmp(d + i + 4, "IDAT", 4)) image = 1;
-        if (!memcmp(d + i + 4, "eXIf", 4)) fi->orientation = exif_orientation(d + i + 8, n);
+        if (!memcmp(d + i + 4, "eXIf", 4)) fi->orientation = tiff_orientation(d + i + 8, n);
         if (!image && !memcmp(d + i + 4, "iCCP", 4)) fi->has_icc = 1;
         if (!image && !memcmp(d + i + 4, "PLTE", 4)) { fi->plte_pos = (uint32_t)(i + 8); fi->plte_n = n / 3; }
         if (!image && !memcmp(d + i + 4, "tRNS", 4)) { fi->trns_pos = (uint32_t)(i + 8); fi->trns_n = n; }

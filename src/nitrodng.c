@@ -3,6 +3,7 @@
 // nitrodng: see nitrodng.h
 #include "nitrodng.h"
 #include "nitro_os.h"   // parallel loop (GCD on macOS, a thread pool elsewhere)
+#include "tiff.h"       // the TIFF directory (shared with nitrotiff, nitrojpeg ...)
 
 #include <math.h>
 #include <stdatomic.h>
@@ -13,80 +14,10 @@
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 
 // ---------------------------------------------------------------------------
-// TIFF
-
-typedef struct {
-    const uint8_t *d;
-    size_t len;
-    int le;
-} Tiff;
-
-static uint32_t t16(const Tiff *t, size_t o) {
-    if (o + 2 > t->len) return 0;
-    const uint8_t *p = t->d + o;
-    return t->le ? (uint32_t)p[0] | (uint32_t)p[1] << 8 : (uint32_t)p[0] << 8 | p[1];
-}
-
-static uint32_t t32(const Tiff *t, size_t o) {
-    if (o + 4 > t->len) return 0;
-    return t->le ? t16(t, o) | t16(t, o + 2) << 16 : t16(t, o) << 16 | t16(t, o + 2);
-}
-
-typedef struct {
-    uint32_t type, count, pos;   // pos: where the value(s) are
-    int found;
-} Entry;
-
-static const int type_size[14] = {0, 1, 1, 2, 4, 8, 1, 1, 2, 4, 8, 4, 8, 4};   // (13: IFD, an offset)
-
-static Entry tag(const Tiff *t, uint32_t ifd, unsigned want) {
-    Entry e = {0, 0, 0, 0};
-    if (!ifd || ifd + 2 > t->len) return e;
-    uint32_t n = t16(t, ifd);
-    if (n > (t->len - ifd - 2) / 12) return e;
-    for (uint32_t i = 0; i < n; i++) {
-        size_t p = ifd + 2 + 12 * (size_t)i;
-        if (t16(t, p) != want) continue;
-        e.type = t16(t, p + 2);
-        e.count = t32(t, p + 4);
-        uint64_t size = (uint64_t)(e.type < 14 ? type_size[e.type] : 1) * e.count;
-        e.pos = size <= 4 ? (uint32_t)(p + 8) : t32(t, p + 8);
-        e.found = e.pos < t->len && size <= t->len - e.pos;
-        return e;
-    }
-    return e;
-}
-
-// the k-th value of an entry as a number (integers and rationals)
-static double val(const Tiff *t, Entry e, uint32_t k) {
-    if (!e.found || k >= e.count) return 0;
-    switch (e.type) {
-    case 1: case 7: return t->d[e.pos + k];
-    case 6: return (int8_t)t->d[e.pos + k];
-    case 3: return t16(t, e.pos + 2 * k);
-    case 8: return (int16_t)t16(t, e.pos + 2 * k);
-    case 4: return t32(t, e.pos + 4 * k);
-    case 9: return (int32_t)t32(t, e.pos + 4 * k);
-    case 5: {
-        uint32_t den = t32(t, e.pos + 8 * k + 4);
-        return den ? (double)t32(t, e.pos + 8 * k) / den : 0;
-    }
-    case 10: {
-        int32_t den = (int32_t)t32(t, e.pos + 8 * k + 4);
-        return den ? (double)(int32_t)t32(t, e.pos + 8 * k) / den : 0;
-    }
-    case 11: {
-        uint32_t u = t32(t, e.pos + 4 * k);
-        float f;
-        memcpy(&f, &u, 4);
-        return f;
-    }
-    default: return 0;
-    }
-}
+// TIFF (tiff.h)
 
 static int ival(const Tiff *t, Entry e, uint32_t k) {   // as an int (absurd values clamped)
-    double v = val(t, e, k);
+    double v = tiff_val(t, e, k);
     return v < -1e9 ? -1000000000 : v > 1e9 ? 1000000000 : (int)v;
 }
 
@@ -115,25 +46,25 @@ int ndng_read_info(const uint8_t *data, size_t len, ndng_info *info) {
     if (!tag(&t, ifd0, 0xC612).found) return -1;   // DNGVersion: a DNG
     // the raw image: the directory (IFD0 or a SubIFD) with NewSubfileType 0
     uint32_t raw = 0;
-    if (!tag(&t, ifd0, 0xFE).found || val(&t, tag(&t, ifd0, 0xFE), 0) == 0) raw = ifd0;
+    if (!tag(&t, ifd0, 0xFE).found || tiff_val(&t, tag(&t, ifd0, 0xFE), 0) == 0) raw = ifd0;
     Entry sub = tag(&t, ifd0, 0x14A);
     for (uint32_t i = 0; !raw && i < sub.count && i < 16; i++) {
         uint32_t s = sub.count == 1 ? (sub.type == 4 || sub.type == 13 ? t32(&t, sub.pos) : 0) : t32(&t, sub.pos + 4 * i);
-        if (s && val(&t, tag(&t, s, 0xFE), 0) == 0) raw = s;
+        if (s && tiff_val(&t, tag(&t, s, 0xFE), 0) == 0) raw = s;
     }
     if (!raw) return -1;
     info->raw_w = ival(&t, tag(&t, raw, 0x100), 0);
     info->raw_h = ival(&t, tag(&t, raw, 0x101), 0);
     info->compression = ival(&t, tag(&t, raw, 0x103), 0);
     info->bps = ival(&t, tag(&t, raw, 0x102), 0);
-    if (val(&t, tag(&t, raw, 0x106), 0) != 32803 || val(&t, tag(&t, raw, 0x115), 0) > 1) return -1;   // CFA, 1 sample
-    if (tag(&t, raw, 0x153).found && val(&t, tag(&t, raw, 0x153), 0) != 1) return -1;              // unsigned ints
+    if (tiff_val(&t, tag(&t, raw, 0x106), 0) != 32803 || tiff_val(&t, tag(&t, raw, 0x115), 0) > 1) return -1;   // CFA, 1 sample
+    if (tag(&t, raw, 0x153).found && tiff_val(&t, tag(&t, raw, 0x153), 0) != 1) return -1;              // unsigned ints
     if (info->compression != 1 && info->compression != 7) return -1;
     if (info->compression == 1 && info->bps != 8 && info->bps != 16) return -1;
     if (info->raw_w < 16 || info->raw_h < 16 || info->raw_w > 65535 || info->raw_h > 65535) return -1;
     // 2x2 CFA
     Entry dim = tag(&t, raw, 0x828D), pat = tag(&t, raw, 0x828E);
-    if (!pat.found || pat.count != 4 || (dim.found && (val(&t, dim, 0) != 2 || val(&t, dim, 1) != 2))) return -1;
+    if (!pat.found || pat.count != 4 || (dim.found && (tiff_val(&t, dim, 0) != 2 || tiff_val(&t, dim, 1) != 2))) return -1;
     int seen[3] = {0};
     for (int i = 0; i < 4; i++) {
         info->cfa[i] = ival(&t, pat, i);
@@ -167,13 +98,13 @@ int ndng_read_info(const uint8_t *data, size_t len, ndng_info *info) {
     int br = blr.found ? ival(&t, blr, 0) : 1, bc = blr.found ? ival(&t, blr, 1) : 1;
     for (int i = 0; i < 4; i++) {
         int k = br == 2 && bc == 2 ? i : br == 1 && bc == 2 ? (i & 1) : br == 2 && bc == 1 ? (i >> 1) : 0;
-        info->black[i] = bl.found ? (float)val(&t, bl, (uint32_t)k) : 0;
+        info->black[i] = bl.found ? (float)tiff_val(&t, bl, (uint32_t)k) : 0;
     }
     Entry dh = tag(&t, raw, 0xC61B), dv = tag(&t, raw, 0xC61C);
     if (dh.found) { info->delta_h[0] = dh.type; info->delta_h[1] = dh.count; info->delta_h[2] = dh.pos; }
     if (dv.found) { info->delta_v[0] = dv.type; info->delta_v[1] = dv.count; info->delta_v[2] = dv.pos; }
     Entry wl = tag(&t, raw, 0xC61D);
-    info->white = wl.found ? (float)val(&t, wl, 0) : (float)((1 << (info->bps > 16 ? 16 : info->bps)) - 1);
+    info->white = wl.found ? (float)tiff_val(&t, wl, 0) : (float)((1 << (info->bps > 16 ? 16 : info->bps)) - 1);
     Entry lt = tag(&t, raw, 0xC618);
     if (lt.found && lt.type == 3 && lt.count >= 2) {
         info->lin = data + lt.pos;
@@ -200,12 +131,12 @@ int ndng_read_info(const uint8_t *data, size_t len, ndng_info *info) {
     info->height = info->crop[3];
     // colour: white balance, the colour matrix of D65 (else the first one), exposure, orientation
     Entry n = tag(&t, ifd0, 0xC628);
-    for (int c = 0; c < 3; c++) info->neutral[c] = n.found && n.count == 3 && val(&t, n, (uint32_t)c) > 0 ? (float)val(&t, n, (uint32_t)c) : 1;
+    for (int c = 0; c < 3; c++) info->neutral[c] = n.found && n.count == 3 && tiff_val(&t, n, (uint32_t)c) > 0 ? (float)tiff_val(&t, n, (uint32_t)c) : 1;
     Entry cm1 = tag(&t, ifd0, 0xC621), cm2 = tag(&t, ifd0, 0xC622);
-    Entry cm = cm2.found && cm2.count == 9 && val(&t, tag(&t, ifd0, 0xC65B), 0) == 21 ? cm2 : cm1;
+    Entry cm = cm2.found && cm2.count == 9 && tiff_val(&t, tag(&t, ifd0, 0xC65B), 0) == 21 ? cm2 : cm1;
     if (!cm.found || cm.count != 9) return -1;
-    for (int i = 0; i < 9; i++) info->cam_xyz[i] = (float)val(&t, cm, (uint32_t)i);
-    info->exposure = (float)val(&t, tag(&t, ifd0, 0xC62A), 0);
+    for (int i = 0; i < 9; i++) info->cam_xyz[i] = (float)tiff_val(&t, cm, (uint32_t)i);
+    info->exposure = (float)tiff_val(&t, tag(&t, ifd0, 0xC62A), 0);
     int o = ival(&t, tag(&t, ifd0, 0x112), 0);
     info->orientation = o >= 1 && o <= 8 ? o : 1;
     return 0;
@@ -934,7 +865,7 @@ int ndng_decode(const uint8_t *data, size_t len, const ndng_info *in, uint8_t *b
     run((size_t)in->ntiles, par ? 1 : nthreads, ^(size_t i) {
         Entry eo = {pin->tile_off_type, (uint32_t)pin->ntiles, pin->tile_off_pos, 1};
         Entry ec = {pin->tile_cnt_type, (uint32_t)pin->ntiles, pin->tile_cnt_pos, 1};
-        uint64_t off = (uint64_t)val(pt, eo, (uint32_t)i), cnt = (uint64_t)val(pt, ec, (uint32_t)i);
+        uint64_t off = (uint64_t)tiff_val(pt, eo, (uint32_t)i), cnt = (uint64_t)tiff_val(pt, ec, (uint32_t)i);
         if (off >= len || cnt > len - off) {
             atomic_store(pf, 1);
             return;
@@ -1029,16 +960,16 @@ int ndng_decode(const uint8_t *data, size_t len, const ndng_info *in, uint8_t *b
     if (in->lin) {
         uint16_t *lintab = (uint16_t *)(bv + ah);
         lin_n = MIN(in->lin_n, 65536);
-        for (int i = 0; i < lin_n; i++) lintab[i] = (uint16_t)val(&t, (Entry){3, (uint32_t)in->lin_n, (uint32_t)(in->lin - data), 1}, (uint32_t)i);
+        for (int i = 0; i < lin_n; i++) lintab[i] = (uint16_t)tiff_val(&t, (Entry){3, (uint32_t)in->lin_n, (uint32_t)(in->lin - data), 1}, (uint32_t)i);
         lin = lintab;
     }
     if (in->delta_h[1]) {
         Entry e = {in->delta_h[0], in->delta_h[1], in->delta_h[2], 1};
-        for (int i = 0; i < aw && (uint32_t)i < e.count; i++) bh[i] = (float)val(&t, e, (uint32_t)i);
+        for (int i = 0; i < aw && (uint32_t)i < e.count; i++) bh[i] = (float)tiff_val(&t, e, (uint32_t)i);
     }
     if (in->delta_v[1]) {
         Entry e = {in->delta_v[0], in->delta_v[1], in->delta_v[2], 1};
-        for (int i = 0; i < ah && (uint32_t)i < e.count; i++) bv[i] = (float)val(&t, e, (uint32_t)i);
+        for (int i = 0; i < ah && (uint32_t)i < e.count; i++) bv[i] = (float)tiff_val(&t, e, (uint32_t)i);
     }
     Dev dev = {raw, (size_t)rw, ax, ay, aw, ah, lin, lin_n, bh, bv, {0}, {0}};
     memcpy(dev.black, black, sizeof black);

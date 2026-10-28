@@ -4,6 +4,7 @@
 #include "nitrotiff.h"
 #include "nitropng.h"   // np_zlib_decompress: Deflate
 #include "nitro_os.h"   // parallel loop (GCD on macOS, a thread pool elsewhere)
+#include "tiff.h"       // the TIFF directory (shared with nitrodng, nitrojpeg ...)
 
 #include <pthread.h>
 #include <stdlib.h>
@@ -13,66 +14,12 @@
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 
 // ---------------------------------------------------------------------------
-// TIFF structure
+// TIFF structure (tiff.h)
 
-typedef struct {
-    const uint8_t *d;
-    size_t len;
-    int le;
-} Tiff;
-
-static uint32_t t16(const Tiff *t, size_t o) {
-    if (o + 2 > t->len) return 0;
-    const uint8_t *p = t->d + o;
-    return t->le ? (uint32_t)p[0] | (uint32_t)p[1] << 8 : (uint32_t)p[0] << 8 | p[1];
-}
-
-static uint32_t t32(const Tiff *t, size_t o) {
-    if (o + 4 > t->len) return 0;
-    return t->le ? t16(t, o) | t16(t, o + 2) << 16 : t16(t, o) << 16 | t16(t, o + 2);
-}
-
-typedef struct {
-    uint32_t type, count, pos;   // pos: where the value(s) are
-    int found;
-} Entry;
-
-static const int type_size[14] = {0, 1, 1, 2, 4, 8, 1, 1, 2, 4, 8, 4, 8, 4};   // (13: IFD, an offset)
-
-static Entry tag(const Tiff *t, uint32_t ifd, unsigned want) {
-    Entry e = {0, 0, 0, 0};
-    uint32_t n = t16(t, ifd);
-    for (uint32_t i = 0; i < n; i++) {
-        size_t p = ifd + 2 + 12 * (size_t)i;
-        if (p + 12 > t->len) break;
-        if (t16(t, p) != want) continue;
-        e.type = t16(t, p + 2);
-        e.count = t32(t, p + 4);
-        uint64_t sz = e.type < 14 ? (uint64_t)type_size[e.type] * e.count : 0;
-        if (!sz || e.count > (1u << 28)) return e;
-        e.pos = sz <= 4 ? (uint32_t)(p + 8) : t32(t, p + 8);
-        e.found = e.pos + sz <= t->len;
-        return e;
-    }
-    return e;
-}
-
-static uint32_t val(const Tiff *t, Entry e, uint32_t k) {   // BYTE / SHORT / LONG
-    if (!e.found || k >= e.count) return 0;
-    switch (e.type) {
-    case 1: case 7: return t->d[e.pos + k];
-    case 3: return t16(t, e.pos + 2 * (size_t)k);
-    case 4: case 13: return t32(t, e.pos + 4 * (size_t)k);
-    default: return 0;
-    }
-}
-
-static uint32_t get(const Tiff *t, uint32_t ifd, unsigned want, uint32_t def) {
+static uint32_t get(const Tiff *t, uint32_t ifd, unsigned want, uint32_t def) {   // the first value, or def
     Entry e = tag(t, ifd, want);
-    return e.found && e.count ? val(t, e, 0) : def;
+    return e.found && e.count ? tiff_u32(t, e, 0) : def;
 }
-
-static uint32_t next_ifd(const Tiff *t, uint32_t ifd) { return t32(t, ifd + 2 + 12 * (size_t)t16(t, ifd)); }
 
 int nt_read_info(const uint8_t *data, size_t len, nt_info *in) {
     memset(in, 0, sizeof *in);
@@ -81,7 +28,7 @@ int nt_read_info(const uint8_t *data, size_t len, nt_info *in) {
     if (t16(&t, 2) != 42) return -1;
     uint32_t ifd = t32(&t, 4);
     if (!ifd || ifd + 2 > len || tag(&t, ifd, 50706).found) return -1;   // (a DNG: nitrodng's)
-    for (int k = 0; k < 8 && ifd && ifd + 2 <= len && (get(&t, ifd, 254, 0) & 1); k++) ifd = next_ifd(&t, ifd);   // (a preview first)
+    for (int k = 0; k < 8 && ifd && ifd + 2 <= len && (get(&t, ifd, 254, 0) & 1); k++) ifd = tiff_next_ifd(&t, ifd);   // (a preview first)
     if (!ifd || ifd + 2 > len) return -1;
     int w = (int)get(&t, ifd, 256, 0), h = (int)get(&t, ifd, 257, 0);
     if (w <= 0 || h <= 0 || w > 1 << 20 || h > 1 << 20) return -1;
@@ -97,9 +44,9 @@ int nt_read_info(const uint8_t *data, size_t len, nt_info *in) {
     }
     int spp = (int)get(&t, ifd, 277, 1), comp = (int)get(&t, ifd, 259, 1);
     Entry bs = tag(&t, ifd, 258);
-    int bps = bs.found ? (int)val(&t, bs, 0) : 1;
+    int bps = bs.found ? (int)tiff_u32(&t, bs, 0) : 1;
     for (uint32_t k = 1; bs.found && k < bs.count && k < (uint32_t)spp; k++)
-        if ((int)val(&t, bs, k) != bps) return -1;   // (mixed sample sizes)
+        if ((int)tiff_u32(&t, bs, k) != bps) return -1;   // (mixed sample sizes)
     int phot = (int)get(&t, ifd, 262, spp >= 3 ? 2 : 1);
     int color = phot == 2 ? 3 : phot == 5 ? 4 : 1;
     if (spp < color || spp > 8) return -1;
@@ -173,16 +120,10 @@ int nt_read_info(const uint8_t *data, size_t len, nt_info *in) {
 }
 
 int nt_dir_size(const uint8_t *dir, size_t n, int le, int *width, int *height, int *orientation) {
-    Tiff t = {dir, n, le};
-    uint32_t count = t16(&t, 0);
-    int w = 0, h = 0, o = 1;
-    for (uint32_t i = 0; i < count && 2 + 12 * (size_t)i + 12 <= n; i++) {
-        size_t p = 2 + 12 * (size_t)i;
-        uint32_t id = t16(&t, p), type = t16(&t, p + 2), v = type == 3 ? t16(&t, p + 8) : type == 4 ? t32(&t, p + 8) : 0;
-        if (id == 256) w = (int)v;
-        else if (id == 257) h = (int)v;
-        else if (id == 274 && v >= 1 && v <= 8) o = (int)v;
-    }
+    Tiff t = {dir, n, le};   // (the directory itself: at 0)
+    int w = (int)get(&t, 0, 256, 0), h = (int)get(&t, 0, 257, 0);
+    uint32_t v = get(&t, 0, 274, 1);
+    int o = v >= 1 && v <= 8 ? (int)v : 1;
     if (w <= 0 || h <= 0) return -1;
     *width = w;
     *height = h;

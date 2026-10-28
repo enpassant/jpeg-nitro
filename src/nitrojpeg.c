@@ -9,6 +9,7 @@
 // output is bit-identical to libjpeg / libjpeg-turbo. This software is based
 // in part on the work of the Independent JPEG Group.
 #include "nitrojpeg.h"
+#include "tiff.h"   // the TIFF directory: camera raw files, EXIF (shared with nitrotiff, nitrodng ...)
 
 #include "nitro_os.h"   // parallel loop, clock, CPU count
 #include <pthread.h>
@@ -215,28 +216,6 @@ static const uint8_t kNatural[80] = {
     30, 37, 44, 51, 58, 59, 52, 45, 38, 31, 39, 46, 53, 60, 61, 54, 47, 55, 62, 63,
     63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63};
 
-static int parse_exif_orientation(const uint8_t *p, size_t n) {
-    if (n < 14 || memcmp(p, "Exif\0\0", 6)) return 1;
-    p += 6; n -= 6;
-    int le = p[0] == 'I';
-#define RD16(q) (le ? (unsigned)(q)[0] | (unsigned)(q)[1] << 8 : be16(q))
-#define RD32(q) (le ? (uint32_t)RD16(q) | (uint32_t)RD16((q) + 2) << 16 : (uint32_t)RD16(q) << 16 | RD16((q) + 2))
-    uint32_t ifd = RD32(p + 4);
-    if (ifd + 2 > n) return 1;
-    unsigned cnt = RD16(p + ifd);
-    for (unsigned i = 0; i < cnt; i++) {
-        size_t e = ifd + 2 + 12 * i;
-        if (e + 12 > n) break;
-        if (RD16(p + e) == 0x0112) {
-            unsigned o = RD16(p + e + 8);
-            return o >= 1 && o <= 8 ? (int)o : 1;
-        }
-    }
-#undef RD16
-#undef RD32
-    return 1;
-}
-
 #ifdef NJ_REFERENCE
 static int hdr_append(Jpeg *j, const uint8_t *p, size_t n) {   // never fails: only the old engine needs it
     if (j->hdr_len + n > sizeof j->hdr) { j->hdr_overflow = 1; return 0; }
@@ -333,7 +312,7 @@ static int parse(const uint8_t *d, size_t len, Jpeg *j) {
             if (sl >= 5 && !memcmp(seg, "JFIF\0", 5)) jfif = 1;
             break;
         case 0xE1:
-            if (fi->orientation == 1) fi->orientation = parse_exif_orientation(seg, sl);
+            if (fi->orientation == 1) fi->orientation = tiff_orientation(seg, sl);   // (an APP1 Exif segment)
             break;
         case 0xEE:
             if (sl >= 12 && !memcmp(seg, "Adobe", 5)) adobe = seg[11];
@@ -414,39 +393,15 @@ static int parse(const uint8_t *d, size_t len, Jpeg *j) {
     }
 }
 
-typedef struct {
-    const uint8_t *d;
-    size_t len;
-    int le;
-} Tiff;
-
-static uint32_t tiff16(const Tiff *t, size_t o) {
-    if (o > t->len - 2) return 0;
-    const uint8_t *p = t->d + o;
-    return t->le ? (uint32_t)p[0] | (uint32_t)p[1] << 8 : (uint32_t)p[0] << 8 | p[1];
-}
-
-static uint32_t tiff32(const Tiff *t, size_t o) {
-    if (o > t->len - 4) return 0;
-    return t->le ? tiff16(t, o) | tiff16(t, o + 2) << 16 : tiff16(t, o) << 16 | tiff16(t, o + 2);
-}
-
 // The first value (SHORT or LONG) of a tag in a TIFF directory, 0 if the tag is missing; *count
 // (if wanted) its number of values, *where the offset of its value(s).
 static uint32_t tiff_tag(const Tiff *t, uint32_t ifd, unsigned want, uint32_t *count, uint32_t *where) {
-    if (ifd < 8 || ifd > t->len - 2) return 0;
-    uint32_t n = tiff16(t, ifd);
-    if (n > (t->len - ifd - 2) / 12) return 0;
-    for (uint32_t i = 0; i < n; i++) {
-        size_t e = ifd + 2 + 12 * (size_t)i;
-        if (tiff16(t, e) != want) continue;
-        uint32_t type = tiff16(t, e + 2), c = tiff32(t, e + 4);
-        size_t vo = (type == 3 ? 2u : 4u) * (size_t)c <= 4 ? e + 8 : tiff32(t, e + 8);   // (inline or an offset)
-        if (count) *count = c;
-        if (where) *where = (uint32_t)vo;
-        return type == 3 ? tiff16(t, vo) : tiff32(t, vo);
-    }
-    return 0;
+    if (ifd < 8) return 0;
+    Entry e = tag(t, ifd, want);
+    if (!e.found) return 0;
+    if (count) *count = e.count;
+    if (where) *where = e.pos;
+    return tiff_u32(t, e, 0);
 }
 
 // The JPEG (JPEGInterchangeFormat / Length) of a directory: the bigger one wins
@@ -471,8 +426,8 @@ int nj_find_embedded(const uint8_t *data, size_t len, size_t *offset, size_t *si
     }
     if (len < 16 || !(data[0] == data[1] && (data[0] == 'I' || data[0] == 'M'))) return -1;
     Tiff t = {data, len, data[0] == 'I'};
-    if (tiff16(&t, 2) != 42) return -1;
-    uint32_t ifd0 = tiff32(&t, 4);
+    if (t16(&t, 2) != 42) return -1;
+    uint32_t ifd0 = t32(&t, 4);
     uint32_t off = 0, cnt = 0;
     if (data[8] == 'C' && data[9] == 'R') {
         // Canon CR2: the JPEG is IFD0's strip (StripOffsets / StripByteCounts)
@@ -488,9 +443,8 @@ int nj_find_embedded(const uint8_t *data, size_t len, size_t *offset, size_t *si
             tiff_jpeg(&t, ifd, &off, &cnt);
             uint32_t n = 0, where = 0;
             if (tiff_tag(&t, ifd, 0x14A, &n, &where))   // SubIFDs
-                for (uint32_t i = 0; i < n && i < 8; i++) tiff_jpeg(&t, tiff32(&t, where + 4 * (size_t)i), &off, &cnt);
-            uint32_t entries = tiff16(&t, ifd);
-            ifd = ifd < len - 2 ? tiff32(&t, ifd + 2 + 12 * (size_t)entries) : 0;   // the next directory
+                for (uint32_t i = 0; i < n && i < 8; i++) tiff_jpeg(&t, t32(&t, where + 4 * (size_t)i), &off, &cnt);
+            ifd = tiff_next_ifd(&t, ifd);
         }
         if (!off || cnt < 4) return -1;   // (off may lie beyond a header-only len)
     }

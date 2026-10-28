@@ -2,6 +2,7 @@
 // Copyright (c) 2026 A'rpi - part of jpeg-nitro (https://github.com/gereoffy/jpeg-nitro)
 // nitrowebp: see nitrowebp.h
 #include "nitrowebp.h"
+#include "tiff.h"   // EXIF: the Orientation tag
 #include "nitro_os.h"
 
 #include <stdatomic.h>
@@ -485,30 +486,6 @@ static const uint8_t pcat6[12] = {254, 254, 243, 230, 196, 177, 153, 140, 133, 1
 
 static uint32_t le32(const uint8_t *p) { return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24; }
 
-static int exif_orientation(const uint8_t *e, size_t n) {   // IFD0 of the EXIF chunk (a TIFF)
-    if (n >= 6 && !memcmp(e, "Exif\0\0", 6)) {
-        e += 6;
-        n -= 6;
-    }
-    if (n < 8 || !((e[0] == 'I' && e[1] == 'I') || (e[0] == 'M' && e[1] == 'M'))) return 1;
-    int le = e[0] == 'I';
-    #define U16(o) (le ? (uint32_t)e[o] | (uint32_t)e[(o) + 1] << 8 : (uint32_t)e[o] << 8 | e[(o) + 1])
-    #define U32(o) (le ? U16(o) | U16((o) + 2) << 16 : U16(o) << 16 | U16((o) + 2))
-    uint32_t ifd = U32(4);
-    if (ifd > n - 2) return 1;
-    uint32_t cnt = U16(ifd);
-    for (uint32_t i = 0; i < cnt && ifd + 2 + 12 * (size_t)i + 12 <= n; i++) {
-        size_t p = ifd + 2 + 12 * (size_t)i;
-        if (U16(p) == 0x112) {
-            uint32_t o = U16(p + 8);
-            return o >= 1 && o <= 8 ? (int)o : 1;
-        }
-    }
-    #undef U16
-    #undef U32
-    return 1;
-}
-
 int nw_read_info(const uint8_t *d, size_t len, nw_info *in) {
     memset(in, 0, sizeof *in);
     in->orientation = 1;
@@ -531,18 +508,18 @@ int nw_read_info(const uint8_t *d, size_t len, nw_info *in) {
             in->icc = c;
             in->icc_len = n;
         } else if (!memcmp(d + p, "EXIF", 4)) {
-            in->orientation = exif_orientation(c, n);
+            in->orientation = tiff_orientation(c, n);
         }
         p += 8 + n + (n & 1);
     }
     if (unsupported || !in->vp8 || in->vp8_len < 10) return -1;
     const uint8_t *v = in->vp8;
-    uint32_t tag = v[0] | v[1] << 8 | v[2] << 16;
-    if ((tag & 1) || ((tag >> 1) & 7) > 3 || !((tag >> 4) & 1)) return -1;   // a shown key frame
+    uint32_t ftag = v[0] | v[1] << 8 | v[2] << 16;   // the frame tag
+    if ((ftag & 1) || ((ftag >> 1) & 7) > 3 || !((ftag >> 4) & 1)) return -1;   // a shown key frame
     if (v[3] != 0x9d || v[4] != 0x01 || v[5] != 0x2a) return -1;
     in->width = (v[6] | v[7] << 8) & 0x3fff;
     in->height = (v[8] | v[9] << 8) & 0x3fff;
-    if (!in->width || !in->height || 10 + (size_t)(tag >> 5) > in->vp8_len) return -1;
+    if (!in->width || !in->height || 10 + (size_t)(ftag >> 5) > in->vp8_len) return -1;
     in->plane_w[0] = in->width;
     in->plane_h[0] = in->height;
     in->plane_w[1] = in->plane_w[2] = (in->width + 1) / 2;

@@ -61,7 +61,7 @@ ASAN       := -O1 -g $(PORTFLAGS) -fsanitize=address,undefined -fno-omit-frame-p
 FRAMEWORKS := -framework Cocoa -framework Metal -framework MetalKit -framework QuartzCore -framework UniformTypeIdentifiers \
               -framework VideoToolbox -framework CoreMedia -framework CoreVideo
 DEC_SRC    := src/nitrojpeg.c src/nitropng.c src/nitropsd.c
-DEC_HDR    := src/nitrojpeg.h src/nitropng.h src/nitropsd.h src/nitro_os.h
+DEC_HDR    := src/nitrojpeg.h src/nitropng.h src/nitropsd.h src/nitro_os.h src/tiff.h
 # what the four viewers share (compiled into each with its own NV_* defines)
 VIEWER_SRC := src/nitro_load.c src/nitro_prefetch.c
 VIEWER_HDR := src/nitro_load.h src/nitro_prefetch.h src/nitro_view.h
@@ -155,12 +155,12 @@ all: linux
 endif
 
 # production decoder: no dependencies
-build/nitrojpeg.o: src/nitrojpeg.c src/nitrojpeg.h src/nitro_os.h
+build/nitrojpeg.o: src/nitrojpeg.c src/nitrojpeg.h src/nitro_os.h src/tiff.h
 	@mkdir -p build
 	$(CC) $(CFLAGS) -c $< -o $@
 
 # reference build: + old libjpeg-turbo engine and BGRX output (tests, benchmarks)
-build/nitrojpeg_ref.o: src/nitrojpeg.c src/nitrojpeg.h src/nitro_os.h | ljt
+build/nitrojpeg_ref.o: src/nitrojpeg.c src/nitrojpeg.h src/nitro_os.h  src/tiff.h| ljt
 	@mkdir -p build
 	$(CC) $(REF_CFLAGS) -c $< -o $@
 
@@ -173,28 +173,28 @@ build/nitroheic.o: src/nitroheic.c src/nitroheic.h src/nitrohevc.h src/heif.h   
 build/nitrohevc.o: src/nitrohevc.c src/nitrohevc.h
 	@mkdir -p build
 	$(CC) $(CFLAGS) -c $< -o $@
-build/nitrodng.o: src/nitrodng.c src/nitrodng.h src/nitro_os.h
+build/nitrodng.o: src/nitrodng.c src/nitrodng.h src/nitro_os.h src/tiff.h
 	@mkdir -p build
 	$(CC) $(CFLAGS) -c $< -o $@
-build/nitrowebp.o: src/nitrowebp.c src/nitrowebp.h src/nitro_os.h
+build/nitrowebp.o: src/nitrowebp.c src/nitrowebp.h src/nitro_os.h src/tiff.h
 	@mkdir -p build
 	$(CC) $(CFLAGS) -c $< -o $@
-build/nitrotiff.o: src/nitrotiff.c src/nitrotiff.h src/nitropng.h src/nitro_os.h
+build/nitrotiff.o: src/nitrotiff.c src/nitrotiff.h src/nitropng.h src/nitro_os.h src/tiff.h
 	@mkdir -p build
 	$(CC) $(CFLAGS) -c $< -o $@
 build/nitroavif.o: src/nitroavif.c src/nitroavif.h src/heif.h src/nitro_os.h
 	@mkdir -p build
 	$(CC) $(CFLAGS) -I$(DAV1D_DIR)/include -c $< -o $@
 
-build/nitropng.o: src/nitropng.c src/nitropng.h src/nitro_os.h
+build/nitropng.o: src/nitropng.c src/nitropng.h src/nitro_os.h src/tiff.h
 	@mkdir -p build
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(LIBDIR)/nitrojpeg.o: src/nitrojpeg.c src/nitrojpeg.h src/nitro_os.h
+$(LIBDIR)/nitrojpeg.o: src/nitrojpeg.c src/nitrojpeg.h src/nitro_os.h src/tiff.h
 	@mkdir -p $(LIBDIR)
 	$(CC) $(LIB_CFLAGS) -c $< -o $@
 
-$(LIBDIR)/nitropng.o: src/nitropng.c src/nitropng.h src/nitro_os.h
+$(LIBDIR)/nitropng.o: src/nitropng.c src/nitropng.h src/nitro_os.h src/tiff.h
 	@mkdir -p $(LIBDIR)
 	$(CC) $(LIB_CFLAGS) -c $< -o $@
 
@@ -210,15 +210,15 @@ $(LIBDIR)/nitrohevc.o: src/nitrohevc.c src/nitrohevc.h src/nitro_os.h
 	@mkdir -p $(LIBDIR)
 	$(CC) $(LIB_CFLAGS) -c $< -o $@
 
-$(LIBDIR)/nitrodng.o: src/nitrodng.c src/nitrodng.h src/nitro_os.h
+$(LIBDIR)/nitrodng.o: src/nitrodng.c src/nitrodng.h src/nitro_os.h src/tiff.h
 	@mkdir -p $(LIBDIR)
 	$(CC) $(LIB_CFLAGS) -c $< -o $@
 
-$(LIBDIR)/nitrowebp.o: src/nitrowebp.c src/nitrowebp.h src/nitro_os.h
+$(LIBDIR)/nitrowebp.o: src/nitrowebp.c src/nitrowebp.h src/nitro_os.h src/tiff.h
 	@mkdir -p $(LIBDIR)
 	$(CC) $(LIB_CFLAGS) -c $< -o $@
 
-$(LIBDIR)/nitrotiff.o: src/nitrotiff.c src/nitrotiff.h src/nitropng.h src/nitro_os.h
+$(LIBDIR)/nitrotiff.o: src/nitrotiff.c src/nitrotiff.h src/nitropng.h src/nitro_os.h src/tiff.h
 	@mkdir -p $(LIBDIR)
 	$(CC) $(LIB_CFLAGS) -c $< -o $@
 
