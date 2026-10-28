@@ -53,6 +53,22 @@ int main(int argc, char **argv) {
     }
     int w = img.width, h = img.height;
 
+    // what the decoder says about it
+    static const char *const kinds[] = {"YUV planes", "BGRX pixels", "PNG rows", "PSD planes"};
+    static const char *const orientations[] = {"?", "normal", "mirrored", "rotated 180", "flipped", "transposed",
+                                               "rotated 90 cw", "transversed", "rotated 90 ccw"};
+    printf("%s: %s", argv[1], img.mode >= 0 ? "nitrojpeg" : nv_mode_name(img.mode));
+    if (img.mode >= 0) printf(" (%s)", nv_mode_name(img.mode));   // (a JPEG: how nitrojpeg parallelised it)
+    printf(", %dx%d, orientation %d (%s), %s", w, h, img.orientation, orientations[img.orientation], kinds[img.kind]);
+    if (img.kind == NV_YUV) {
+        printf(", %d component%s", img.ncomp, img.ncomp > 1 ? "s" : "");
+        for (int c = 0; c < img.ncomp; c++) printf("%s%dx%d", c ? " " : " sampled ", img.h[c], img.v[c]);
+        if (img.limited) printf(", limited range");
+    } else if (img.kind == NV_PNG) printf(", %d channel%s", img.ncomp, img.ncomp > 1 ? "s" : "");
+    else if (img.kind == NV_PLANAR) printf(", %d colour plane%s%s", img.ncomp, img.ncomp > 1 ? "s" : "", img.hasa ? " + alpha" : "");
+    if (img.icc) printf(", ICC profile %zu bytes", img.icc_len);
+    printf("\n");
+
     // the pixels as RGB, 3 bytes each (transparency over black, as the library's own conversions do)
     size_t stride = (size_t)w * 3;
     uint8_t *rgb = malloc(stride * (size_t)h);
@@ -106,6 +122,6 @@ int main(int argc, char **argv) {
         fwrite(line, 1, row, f);
     }
     if (fclose(f)) { fprintf(stderr, "%s: write error\n", argv[2]); return 1; }
-    printf("%s: %dx%d (%s%s) -> %s %dx%d\n", argv[1], w, h, nv_mode_name(img.mode), img.orientation > 1 ? ", oriented" : "", argv[2], ow, oh);
+    printf("-> %s: %dx%d, 24-bit BMP\n", argv[2], ow, oh);
     return 0;
 }
