@@ -25,6 +25,8 @@
         nt_read_info;
         nt_decode;
         nt_dir_size;
+        na_read_info;
+        na_decode;
         nv_read_file;
         nv_read_psd_merged;
         nv_read_raw_jpeg;
