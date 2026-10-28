@@ -49,6 +49,8 @@ int main(int argc, char **argv) {
     int rc = nv_decode(data, &len, raw_orientation, raw_read, &dec, &img, &buf, &cap);
     if (rc) {
         fprintf(stderr, "%s: %s\n", argv[1], rc < 0 ? "out of memory" : img.error ? img.error : "not an image the library decodes");
+        free(buf);
+        free(data);
         return 1;
     }
     int w = img.width, h = img.height;
@@ -121,6 +123,8 @@ int main(int argc, char **argv) {
         }
         fwrite(line, 1, row, f);
     }
+    free(line);
+    free(rgb);
     if (fclose(f)) { fprintf(stderr, "%s: write error\n", argv[2]); return 1; }
     printf("-> %s: %dx%d, 24-bit BMP\n", argv[2], ow, oh);
     return 0;
