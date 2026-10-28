@@ -118,46 +118,30 @@ static void convert(const Comp *comps, int nc, int W, int H, int limited, uint8_
     });
 }
 
-void nc_jpeg_to_rgb(const nj_info *fi, uint8_t *const planes[3], const size_t pitch[3], uint8_t *dst, size_t stride) {
-    const int W = fi->width, H = fi->height;
+void nc_yuv_to_rgb(const NvImage *img, const uint8_t *buf, uint8_t *dst, size_t stride) {
+    const int W = img->width, H = img->height;
     Comp comps[3];
-    for (int k = 0; k < fi->ncomp; k++) {
+    for (int k = 0; k < img->ncomp; k++) {
         Comp *c = &comps[k];
-        c->p = planes[k];
-        c->pitch = pitch[k];
-        c->cw = (W * fi->h[k] + fi->hmax - 1) / fi->hmax;
-        c->ch = (H * fi->v[k] + fi->vmax - 1) / fi->vmax;
-        c->h = fi->h[k];
-        c->hmax = fi->hmax;
-        c->v = fi->v[k];
-        c->vmax = fi->vmax;
-        c->hr = fi->hmax % fi->h[k] ? 0 : fi->hmax / fi->h[k];   // (h 2 of hmax 3: replication)
-        c->vr = fi->vmax % fi->v[k] ? 0 : fi->vmax / fi->v[k];
+        c->p = buf + img->offset[k];
+        c->pitch = img->pitch[k];
+        c->cw = (W * img->h[k] + img->hmax - 1) / img->hmax;
+        c->ch = (H * img->v[k] + img->vmax - 1) / img->vmax;
+        c->h = img->h[k];
+        c->hmax = img->hmax;
+        c->v = img->v[k];
+        c->vmax = img->vmax;
+        c->hr = img->hmax % img->h[k] ? 0 : img->hmax / img->h[k];   // (h 2 of hmax 3: replication)
+        c->vr = img->vmax % img->v[k] ? 0 : img->vmax / img->v[k];
     }
-    convert(comps, fi->ncomp, W, H, 0, dst, stride);
+    convert(comps, img->ncomp, W, H, img->limited, dst, stride);
 }
 
-void nc_yuv420_to_rgb(int width, int height, uint8_t *const planes[3], const size_t pitch[3], int limited, uint8_t *dst,
-                      size_t stride) {
-    Comp comps[3];
-    for (int k = 0; k < 3; k++) {
-        Comp *c = &comps[k];
-        c->p = planes[k];
-        c->pitch = pitch[k];
-        c->cw = k ? (width + 1) / 2 : width;
-        c->ch = k ? (height + 1) / 2 : height;
-        c->hr = c->vr = k ? 2 : 1;
-        c->h = c->v = 1;
-        c->hmax = c->vmax = c->hr;
-    }
-    convert(comps, 3, width, height, limited, dst, stride);
-}
-
-void nc_psd_to_rgb(const ps_info *si, const uint8_t *planes, uint8_t *dst, size_t stride) {
-    const int W = si->width, H = si->height;
-    const size_t ps = si->plane_size;
-    const uint8_t *p0 = planes, *p1 = si->ncolor == 3 ? planes + ps : planes, *p2 = si->ncolor == 3 ? planes + 2 * ps : planes;
-    const uint8_t *pa = si->alpha ? planes + ps * (size_t)si->ncolor : NULL;
+void nc_psd_to_rgb(const NvImage *img, const uint8_t *buf, uint8_t *dst, size_t stride) {
+    const int W = img->width, H = img->height;
+    const size_t ps = (size_t)W * H;   // (ps_info.plane_size)
+    const uint8_t *p0 = buf, *p1 = buf + img->offset[1], *p2 = buf + img->offset[2];
+    const uint8_t *pa = img->hasa ? buf + ps * (size_t)img->ncomp : NULL;
     size_t bands = (size_t)nitro_ncpu() * 4;
     if (bands > (size_t)H) bands = (size_t)H;
     nitro_parallel(bands, ^(size_t b) {

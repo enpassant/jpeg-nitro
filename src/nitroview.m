@@ -171,49 +171,25 @@ typedef enum { KIND_YUV = 0, KIND_BGRA = 1, KIND_PNG = 2, KIND_PLANAR = 3 } Kind
 static size_t align_up(size_t v, size_t a) { return (v + a - 1) / a * a; }
 
 
-// The file's bytes (nitro_load: the whole file, a PSD's merged image, a camera raw's JPEG), nil if unreadable.
+#ifdef NV_TURBOJPEG
+// The whole file (nitro_load), nil if unreadable.
 static NSData *read_file(NSString *path) {
     size_t n = 0;
     uint8_t *p = nv_read_file(path.fileSystemRepresentation, &n);
     return p ? [NSData dataWithBytesNoCopy:p length:n freeWhenDone:YES] : nil;
 }
-static NSData *read_psd_merged(NSString *path) {
-    size_t n = 0;
-    uint8_t *p = nv_read_psd_merged(path.fileSystemRepresentation, &n);
-    return p ? [NSData dataWithBytesNoCopy:p length:n freeWhenDone:YES] : nil;
-}
-static NSData *read_raw_jpeg(NSString *path, int *orientation) {
-    size_t n = 0;
-    uint8_t *p = nv_read_raw_jpeg(path.fileSystemRepresentation, &n, orientation);
-    return p ? [NSData dataWithBytesNoCopy:p length:n freeWhenDone:YES] : nil;
-}
+#endif
 
 // Decode one file into a Metal buffer. Runs on the decoder thread.
-enum { MODE_TURBOJPEG = -1, MODE_WUFFS = -2, MODE_IMAGEIO = -3, MODE_NITROPNG = -4, MODE_NITROPSD = -5, MODE_SVG = -6, MODE_CDR = -7,
-       MODE_NITROHEIC = -8, MODE_NITRODNG = -9, MODE_NITROWEBP = -10, MODE_NITROTIFF = -11, MODE_NITROAVIF = -12 };
+enum { MODE_TURBOJPEG = -1, MODE_WUFFS = -2, MODE_IMAGEIO = -3, MODE_SVG = NV_MODE_SVG, MODE_CDR = NV_MODE_CDR,
+       MODE_NITROHEIC = NV_MODE_NITROHEIC, MODE_NITRODNG = NV_MODE_NITRODNG, MODE_NITROWEBP = NV_MODE_NITROWEBP,
+       MODE_NITROTIFF = NV_MODE_NITROTIFF, MODE_NITROAVIF = NV_MODE_NITROAVIF };   // (the rest: nitro_load.h)
 static int g_nthreads = 0;   // -j
 static _Atomic int g_dng_ev3;   // DNG exposure correction in 1/3 EV (keys E / Shift+E)
 
 static const char *mode_name(int m) {
-    switch (m) {
-    case 3: return "prog";
-    case 2: return "split";
-    case 1: return "RST";
-    case 0: return "single";
-    case MODE_TURBOJPEG: return "tj";
-    case MODE_WUFFS: return "wuffs";
-    case MODE_IMAGEIO: return "imageio";
-    case MODE_NITROPNG: return "nitropng";
-    case MODE_NITROPSD: return "nitropsd";
-    case MODE_NITROHEIC: return "nitroheic";
-    case MODE_NITRODNG: return "nitrodng";
-    case MODE_NITROWEBP: return "nitrowebp";
-    case MODE_NITROTIFF: return "nitrotiff";
-    case MODE_NITROAVIF: return "nitroavif";
-    case MODE_SVG: return "svg";
-    case MODE_CDR: return "cdr";
-    default: return "?";
-    }
+    const char *n = nv_mode_name(m);
+    return n ? n : m == MODE_TURBOJPEG ? "tj" : m == MODE_WUFFS ? "wuffs" : m == MODE_IMAGEIO ? "imageio" : "?";
 }
 
 // Fills d as a BGRA image in a fresh pool buffer.
@@ -473,273 +449,130 @@ static Decoded *decode_turbojpeg(const uint8_t *bytes, size_t len, Decoded *d, B
 }
 #endif
 
-static BOOL is_png(const uint8_t *b, size_t n) { return n >= 8 && !memcmp(b, "\x89PNG\r\n\x1a\n", 8); }
 
+// The pool buffers nv_decode works in, found again by their contents pointer.
+@interface DecodeBuffers : NSObject
+- (instancetype)initWithPool:(BufferPool *)pool;
+- (id<MTLBuffer>)take:(const uint8_t *)p;   // the buffer whose contents is p, out of the list (nil: none)
+- (void)putAll;                              // the rest back to the pool
+@end
+@implementation DecodeBuffers {
+    BufferPool *_pool;
+    NSMutableArray<id<MTLBuffer>> *_bufs;
+}
+- (instancetype)initWithPool:(BufferPool *)pool {
+    if (!(self = [super init])) return nil;
+    _pool = pool;
+    _bufs = [NSMutableArray array];
+    return self;
+}
+- (id<MTLBuffer>)take:(const uint8_t *)p {
+    for (NSUInteger i = 0; i < _bufs.count; i++)
+        if (_bufs[i].contents == p) {
+            id<MTLBuffer> b = _bufs[i];
+            [_bufs removeObjectAtIndex:i];
+            return b;
+        }
+    return nil;
+}
+- (void)putAll {
+    for (id<MTLBuffer> b in _bufs) [_pool put:b];
+    [_bufs removeAllObjects];
+}
+static uint8_t *pool_get(size_t len, size_t *cap, void *ctx) {
+    DecodeBuffers *b = (__bridge DecodeBuffers *)ctx;
+    id<MTLBuffer> m = [b->_pool get:len];
+    if (!m) return NULL;
+    [b->_bufs addObject:m];
+    *cap = m.length;
+    return m.contents;
+}
+static void pool_put(uint8_t *p, size_t cap, void *ctx) {
+    DecodeBuffers *b = (__bridge DecodeBuffers *)ctx;
+    id<MTLBuffer> m = [b take:p];
+    if (m) [b->_pool put:m];
+}
+@end
+
+// Decode one file into a Metal buffer: nitro_load's decoders, else (interlaced PNG, CMYK JPEG,
+// GIF, BMP ...) Wuffs / TurboJPEG when built in, and ImageIO. Runs on the decoder thread.
 static Decoded *decode_file(NSString *path, BufferPool *pool, size_t align) {
     double t0 = now_ms();
-    NSData *data = nil;
-    NSString *ext = path.pathExtension.lowercaseString;
-    if ([ext isEqualToString:@"psd"] || [ext isEqualToString:@"psb"]) {
-        data = read_psd_merged(path);
-        ps_info pi;   // only if nitropsd can decode it; ImageIO gets the whole file
-        if (data && (ps_read_info(data.bytes, data.length, &pi) || !pi.supported || pi.width > MAX_TEX || pi.height > MAX_TEX))
-            data = nil;
-    }
-    // a camera raw (CR2, NEF ...) shows its full-size JPEG (nitrojpeg finds it): only that is read
-    int raw_orientation = 0, orient = 0;
-    int raw_read = 0;
-    if (!data && (data = read_raw_jpeg(path, &orient))) {
-        raw_orientation = orient;   // (0: the JPEG's own, RAF)
-        raw_read = 1;
-    }
-    if (!data) data = read_file(path);
-    if (!data) return nil;
-    ndng_info di;   // a DNG: its raw image developed by nitrodng (else its largest preview below)
-    if (!raw_read && !ndng_read_info(data.bytes, data.length, &di) && di.width <= MAX_TEX && di.height <= MAX_TEX) {
-        double t1 = now_ms();
-        Decoded *d = [Decoded new];
-        d.read_ms = t1 - t0;
-        id<MTLBuffer> buf = bgra_buffer(d, di.width, di.height, pool, align);
-        d.ev3 = atomic_load(&g_dng_ev3);
-        di.ev = d.ev3 / 3.0f;
-        if (buf && !ndng_decode(data.bytes, data.length, &di, buf.contents, d.pitch[0], g_nthreads)) {
-            d.orientation = di.orientation;
-            d.colorSpace = srgb_space();
-            bgra_done(d, buf, MODE_NITRODNG, t1);
-            return d;
-        }
-        if (buf) [pool put:buf];
-    }
-    size_t eoff, esize;
-    if (!raw_read && !nj_find_embedded(data.bytes, data.length, &eoff, &esize, &orient) && eoff < data.length &&
-        esize <= data.length - eoff) {   // (a raw file with another extension: read whole)
-        data = [data subdataWithRange:NSMakeRange(eoff, esize)];
-        raw_orientation = orient;
-    }
+    size_t len = 0, cap = 0;
+    int raw_orientation, raw_read;
+    uint8_t *bytes = nv_read_image(path.fileSystemRepresentation, &len, MAX_TEX, &raw_orientation, &raw_read), *px = NULL;
+    if (!bytes) return nil;
     double t1 = now_ms();
     Decoded *d = [Decoded new];
     d.read_ms = t1 - t0;
-    const uint8_t *bytes = data.bytes;
-    size_t len = data.length;
+    NSString *ext = path.pathExtension.lowercaseString;
+    (void)ext;
 #ifdef NV_SVG
-    if ([ext isEqualToString:@"svg"]) return decode_svg(data, d, pool, align, t1);
+    if ([ext isEqualToString:@"svg"])
+        return decode_svg([NSData dataWithBytesNoCopy:bytes length:len freeWhenDone:YES], d, pool, align, t1);
 #endif
 #ifdef NV_CDR
-    if ([ext isEqualToString:@"cdr"] || [ext isEqualToString:@"cmx"]) return decode_cdr(data, d, pool, align, t1);
+    if ([ext isEqualToString:@"cdr"] || [ext isEqualToString:@"cmx"])
+        return decode_cdr([NSData dataWithBytesNoCopy:bytes length:len freeWhenDone:YES], d, pool, align, t1);
 #endif
-    nt_info ti;   // TIFF: nitrotiff (strips / tiles in parallel; uncompressed: straight from the file)
-    if (len >= 8 && bytes[0] == bytes[1] && (bytes[0] == 'I' || bytes[0] == 'M') && !nt_read_info(bytes, len, &ti) &&
-        ti.width <= MAX_TEX && ti.height <= MAX_TEX) {
-        id<MTLBuffer> buf = bgra_buffer(d, ti.width, ti.height, pool, align);
-        if (buf && !nt_decode(bytes, len, &ti, buf.contents, d.pitch[0], g_nthreads)) {
-            d.orientation = ti.orientation;
-            d.colorSpace = icc_space(ti.photometric == 2 ? ti.icc : NULL, ti.icc_len);   // (scanners: Adobe RGB ...)
-            bgra_done(d, buf, MODE_NITROTIFF, t1);
-            return d;
+    DecodeBuffers *bufs = [[DecodeBuffers alloc] initWithPool:pool];
+    NvDecoder dec = {pool_get, pool_put, (__bridge void *)bufs, align, MAX_TEX, g_nthreads, atomic_load(&g_dng_ev3)};
+    NvImage img;
+    int rc = nv_decode(bytes, &len, raw_orientation, raw_read, &dec, &img, &px, &cap);
+    NSData *data = [NSData dataWithBytesNoCopy:bytes length:len freeWhenDone:YES];   // (a camera raw: its JPEG, moved to the start)
+    if (rc == 0) {
+        id<MTLBuffer> buf = [bufs take:px];
+        [bufs putAll];
+        d.kind = (Kind)img.kind;
+        d.width = img.width;
+        d.height = img.height;
+        d.ncomp = img.ncomp;
+        d.orientation = img.orientation;
+        d.h1 = img.h[1];
+        d.v1 = img.v[1];
+        d.hmax = img.hmax;
+        d.vmax = img.vmax;
+        d.hasa = img.hasa;
+        d.limited = img.limited;
+        memcpy(d.pw, img.pw, sizeof img.pw);
+        memcpy(d.ph, img.ph, sizeof img.ph);
+        memcpy(d.offset, img.offset, sizeof img.offset);
+        memcpy(d.pitch, img.pitch, sizeof img.pitch);
+        d.mode = img.mode;
+        d.bands = img.bands;
+        d.ev3 = img.ev3;
+        switch (img.mode) {   // the colour space the pixel values are in (the display layer is tagged with it)
+        case MODE_NITRODNG: d.colorSpace = srgb_space(); break;
+        case MODE_NITROTIFF: case MODE_NITROHEIC: case MODE_NITROAVIF: case MODE_NITROWEBP:
+            d.colorSpace = icc_space(img.icc, img.icc_len);   // (scanners: Adobe RGB ...)
+            break;
+        default: d.colorSpace = image_colorspace(data);   // PNG, PSD, JPEG: ImageIO reads the profile
         }
-        if (buf) [pool put:buf];
+        if (buf.storageMode == MTLStorageModeManaged) [buf didModifyRange:NSMakeRange(0, img.size)];
+        d.buffer = buf;
+        d.decode_ms = now_ms() - t1;
+        return d;
     }
-    nh_info hi;   // HEIC (iPhone ...): its tiles decoded in parallel by nitroheic (VideoToolbox)
-    if (!nh_read_info(bytes, len, &hi) && hi.plane_w[0] <= MAX_TEX && hi.plane_h[0] <= MAX_TEX) {
-        size_t total = 0;
-        for (int c = 0; c < 3; c++) {
-            d.pitch[c] = align_up((size_t)hi.plane_w[c], align);
-            d.offset[c] = total;
-            total = align_up(total + d.pitch[c] * hi.plane_h[c], align);
-            d.pw[c] = hi.plane_w[c];
-            d.ph[c] = hi.plane_h[c];
-        }
-        id<MTLBuffer> buf = [pool get:total];
-        if (buf) {
-            uint8_t *base = buf.contents;
-            uint8_t *planes[3] = {base + d.offset[0], base + d.offset[1], base + d.offset[2]};
-            if (!nh_decode_planes(bytes, len, &hi, planes, d.pitch, g_nthreads)) {
-                if (buf.storageMode == MTLStorageModeManaged) [buf didModifyRange:NSMakeRange(0, total)];
-                d.buffer = buf;
-                d.kind = KIND_YUV;   // (full range BT.601 4:2:0, as a JPEG)
-                d.width = hi.width;
-                d.height = hi.height;
-                d.ncomp = 3;
-                d.h1 = 1; d.v1 = 1;
-                d.hmax = 2; d.vmax = 2;
-                d.orientation = hi.orientation;
-                d.colorSpace = icc_space(hi.icc, hi.icc_len);
-                d.mode = MODE_NITROHEIC;
-                d.bands = hi.ntiles;
-                d.decode_ms = now_ms() - t1;
-                return d;
-            }
-            [pool put:buf];
-        }
-    }
-#ifdef NV_DAV1D
-    na_info ai;   // AVIF: AV1 through dav1d, our colour conversion (in parallel): ~3x faster than ImageIO
-    if (len >= 12 && !memcmp(bytes + 4, "ftyp", 4) && !na_read_info(bytes, len, &ai) && ai.width <= MAX_TEX &&
-        ai.height <= MAX_TEX) {
-        id<MTLBuffer> buf = bgra_buffer(d, ai.width, ai.height, pool, align);
-        if (buf && !na_decode(bytes, len, &ai, buf.contents, d.pitch[0], g_nthreads)) {
-            d.orientation = ai.orientation;
-            d.colorSpace = icc_space(ai.icc, ai.icc_len);
-            d.bands = ai.ntiles;
-            bgra_done(d, buf, MODE_NITROAVIF, t1);
-            return d;
-        }
-        if (buf) [pool put:buf];
-    }
-#endif
-    nw_info wi;   // lossy WebP: nitrowebp (the tokens parsed on one thread, the rows reconstructed on another)
-    if (!nw_read_info(bytes, len, &wi) && wi.plane_w[0] <= MAX_TEX && wi.plane_h[0] <= MAX_TEX) {
-        size_t total = 0;
-        for (int c = 0; c < 3; c++) {
-            d.pitch[c] = align_up((size_t)wi.plane_w[c], align);
-            d.offset[c] = total;
-            total = align_up(total + d.pitch[c] * wi.plane_h[c], align);
-            d.pw[c] = wi.plane_w[c];
-            d.ph[c] = wi.plane_h[c];
-        }
-        id<MTLBuffer> buf = [pool get:total];
-        if (buf) {
-            uint8_t *base = buf.contents;
-            uint8_t *planes[3] = {base + d.offset[0], base + d.offset[1], base + d.offset[2]};
-            if (!nw_decode_planes(bytes, len, &wi, planes, d.pitch, g_nthreads)) {
-                if (buf.storageMode == MTLStorageModeManaged) [buf didModifyRange:NSMakeRange(0, total)];
-                d.buffer = buf;
-                d.kind = KIND_YUV;   // (limited range BT.601 4:2:0)
-                d.limited = 1;
-                d.width = wi.width;
-                d.height = wi.height;
-                d.ncomp = 3;
-                d.h1 = 1; d.v1 = 1;
-                d.hmax = 2; d.vmax = 2;
-                d.orientation = wi.orientation;
-                d.colorSpace = icc_space(wi.icc, wi.icc_len);
-                d.mode = MODE_NITROWEBP;
-                d.bands = 1;
-                d.decode_ms = now_ms() - t1;
-                return d;
-            }
-            [pool put:buf];
-        }
-    }
+    [bufs putAll];
+    if (rc < 0) return nil;
+    d.orientation = img.orientation;      // (a JPEG's, a camera raw's: known from the header)
     d.colorSpace = image_colorspace(data);   // tags the display layer (ICC profile or sRGB)
-    if (is_png(bytes, len)) {
-        // nitropng (parallel): 8-bit gray / gray+alpha / RGB / RGBA, non-interlaced: the rows to the GPU
-        np_info pi;
-        if (!np_read_info(bytes, len, &pi) && pi.supported && pi.width <= MAX_TEX && pi.height <= MAX_TEX) {
-            id<MTLBuffer> buf = [pool get:pi.raw_size];
-            np_stats ps;
-            if (buf && !np_decode(bytes, len, &pi, buf.contents, g_nthreads, &ps)) {
-                CGImageSourceRef src = CGImageSourceCreateWithData((__bridge CFDataRef)data, NULL);
-                d.orientation = src ? imageio_orientation(src) : 1;   // eXIf chunk
-                if (src) CFRelease(src);
-                d.kind = KIND_PNG;
-                d.width = pi.width;
-                d.height = pi.height;
-                d.ncomp = pi.channels;
-                d.pitch[0] = pi.stride + 1;   // rows keep their filter-type byte
-                d.bands = ps.chunks;
-                if (buf.storageMode == MTLStorageModeManaged) [buf didModifyRange:NSMakeRange(0, pi.raw_size)];
-                d.buffer = buf;
-                d.mode = MODE_NITROPNG;
-                d.decode_ms = now_ms() - t1;
-                return d;
-            }
-            if (buf) [pool put:buf];
-        } else if (!np_read_info(bytes, len, &pi) && pi.convertible && pi.width <= MAX_TEX && pi.height <= MAX_TEX) {
-            // palette, 1 / 2 / 4 / 16-bit, a transparency key: the rows decoded, then made BGRX (in parallel)
-            uint8_t *raw = malloc(pi.raw_size);
-            id<MTLBuffer> buf = raw ? bgra_buffer(d, pi.width, pi.height, pool, align) : nil;
-            np_stats ps;
-            if (buf && !np_decode(bytes, len, &pi, raw, g_nthreads, &ps) &&
-                !np_to_bgrx(bytes, len, &pi, raw, buf.contents, d.pitch[0], g_nthreads)) {
-                free(raw);
-                CGImageSourceRef src = CGImageSourceCreateWithData((__bridge CFDataRef)data, NULL);
-                d.orientation = src ? imageio_orientation(src) : 1;   // eXIf chunk
-                if (src) CFRelease(src);
-                d.bands = ps.chunks;
-                bgra_done(d, buf, MODE_NITROPNG, t1);
-                return d;
-            }
-            free(raw);
-            if (buf) [pool put:buf];
-        }
 #ifdef NV_WUFFS
-        int w, h;
-        if (!nv_png_size(bytes, len, &w, &h) && w <= MAX_TEX && h <= MAX_TEX) {
-            id<MTLBuffer> buf = bgra_buffer(d, w, h, pool, align);
-            if (buf && !nv_png_decode_bgra(bytes, len, buf.contents, d.pitch[0], w, h)) {
-                CGImageSourceRef src = CGImageSourceCreateWithData((__bridge CFDataRef)data, NULL);
-                d.orientation = src ? imageio_orientation(src) : 1;   // eXIf chunk (header only)
-                if (src) CFRelease(src);
-                bgra_done(d, buf, MODE_WUFFS, t1);
-                return d;
-            }
-            if (buf) [pool put:buf];
-        }
-#endif
-        return decode_imageio(data, d, pool, align, t1);
-    }
-    if (len >= 4 && !memcmp(bytes, "8BPS", 4)) {
-        // nitropsd (parallel): merged image of 8-bit RGB / grayscale PSD and PSB
-        ps_info pi;
-        if (!ps_read_info(bytes, len, &pi) && pi.supported && pi.width <= MAX_TEX && pi.height <= MAX_TEX) {
-            size_t P = (size_t)(pi.ncolor + pi.alpha);
-            id<MTLBuffer> buf = [pool get:pi.plane_size * P];
-            ps_stats ps;
-            if (buf && !ps_decode(bytes, len, &pi, buf.contents, g_nthreads, &ps)) {
-                d.kind = KIND_PLANAR;
-                d.width = pi.width;
-                d.height = pi.height;
-                d.ncomp = pi.ncolor;
-                d.hasa = pi.alpha;
-                d.pitch[0] = (size_t)pi.width;
-                for (int c = 0; c < 3; c++) d.offset[c] = pi.ncolor == 3 ? c * pi.plane_size : 0;
-                d.bands = 1;
-                if (buf.storageMode == MTLStorageModeManaged) [buf didModifyRange:NSMakeRange(0, pi.plane_size * P)];
-                d.buffer = buf;
-                d.mode = MODE_NITROPSD;
-                d.decode_ms = now_ms() - t1;
-                return d;
-            }
-            if (buf) [pool put:buf];
-        }
-        return decode_imageio(data, d, pool, align, t1);   // 16-bit, CMYK, Lab ... (no ZIP support there)
-    }
-    nj_info fi;
-    int ok = !nj_read_info(bytes, len, &fi);
-    d.orientation = raw_orientation ? raw_orientation : ok ? fi.orientation : 1;
-    if (ok && fi.supported && fi.width <= MAX_TEX && fi.height <= MAX_TEX) {
-        size_t total = 0;
-        for (int c = 0; c < fi.ncomp; c++) {
-            d.pitch[c] = align_up((size_t)fi.plane_w[c], align);
-            d.offset[c] = total;
-            total = align_up(total + d.pitch[c] * fi.plane_h[c], align);
-            d.pw[c] = fi.plane_w[c];
-            d.ph[c] = fi.plane_h[c];
-        }
-        id<MTLBuffer> buf = [pool get:total];
-        if (!buf) return nil;
-        uint8_t *base = buf.contents;
-        uint8_t *planes[3] = {base + d.offset[0], base + d.offset[1], base + d.offset[2]};
-        nj_stats st;
-        if (!nj_decode_planes(bytes, len, &fi, planes, d.pitch, 0, &st)) {
-            if (buf.storageMode == MTLStorageModeManaged) [buf didModifyRange:NSMakeRange(0, total)];
-            d.buffer = buf;
-            d.kind = KIND_YUV;
-            d.width = fi.width;
-            d.height = fi.height;
-            d.ncomp = fi.ncomp;
-            d.h1 = fi.ncomp > 1 ? fi.h[1] : 1; d.v1 = fi.ncomp > 1 ? fi.v[1] : 1;
-            d.hmax = fi.hmax; d.vmax = fi.vmax;
-            d.mode = st.mode;
-            d.bands = st.bands;
-            d.decode_ms = now_ms() - t1;
+    int w, h;   // an interlaced PNG: Wuffs
+    if (len >= 8 && !memcmp(bytes, "\x89PNG\r\n\x1a\n", 8) && !nv_png_size(bytes, len, &w, &h) && w <= MAX_TEX && h <= MAX_TEX) {
+        id<MTLBuffer> buf = bgra_buffer(d, w, h, pool, align);
+        if (buf && !nv_png_decode_bgra(bytes, len, buf.contents, d.pitch[0], w, h)) {
+            CGImageSourceRef src = CGImageSourceCreateWithData((__bridge CFDataRef)data, NULL);
+            d.orientation = src ? imageio_orientation(src) : 1;   // eXIf chunk (header only)
+            if (src) CFRelease(src);
+            bgra_done(d, buf, MODE_WUFFS, t1);
             return d;
         }
-        [pool put:buf];
+        if (buf) [pool put:buf];
     }
+#endif
 #ifdef NV_TURBOJPEG
-    {   // fallback: TurboJPEG (progressive, CMYK, RGB, huge images, damaged files)
+    if (len >= 3 && bytes[0] == 0xFF && bytes[1] == 0xD8) {   // TurboJPEG (progressive, CMYK, RGB, huge images, damaged files)
         Decoded *t = decode_turbojpeg(bytes, len, d, pool, align, t1);
         if (t) return t;
     }
@@ -2346,50 +2179,18 @@ static int run_zoomtest(NSArray<NSString *> *files, GPU *gpu) {
 }
 
 // Image size after EXIF rotation, from the file header only (no decoding).
+
+// The image's size (after its EXIF orientation) from the file's header: our decoders' formats
+// (nitro_load), else (GIF, BMP ...) ImageIO reads just the header.
 static BOOL header_size(NSString *path, double *w, double *h) {
-    FILE *f = fopen(path.fileSystemRepresentation, "rb");
-    if (!f) return NO;
-    size_t cap = 1 << 20;   // headers (EXIF, previews, tables) practically always fit
-    uint8_t *buf = malloc(cap);
-    size_t n = fread(buf, 1, cap, f);
-    fclose(f);
-    ndng_info di;   // a DNG: its developed raw image
-    if (!ndng_read_info(buf, n, &di)) {
-        free(buf);
-        BOOL swap = di.orientation >= 5;
-        *w = swap ? di.height : di.width;
-        *h = swap ? di.width : di.height;
-        return YES;
-    }
-    nj_info fi;
-    size_t eoff, esize;
-    int raw_orientation = 0;   // camera raw (CR2, NEF ...): the header of its JPEG
-    int raw = !nj_find_embedded(buf, n, &eoff, &esize, &raw_orientation);
-    if (raw && (eoff >= n || n - eoff < 65536)) {   // the JPEG's header lies beyond what was read: read it
-        FILE *g = fopen(path.fileSystemRepresentation, "rb");
-        n = g && !fseeko(g, (off_t)eoff, SEEK_SET) ? fread(buf, 1, 65536, g) : 0;
-        if (g) fclose(g);
-        eoff = 0;
-    }
-    int ok = raw ? !nj_read_info(buf + eoff, n - eoff, &fi) && fi.width > 0 && fi.height > 0
-                 : !nj_read_info(buf, n, &fi) && fi.width > 0 && fi.height > 0;
-    if (raw && ok && raw_orientation) fi.orientation = raw_orientation;   // (RAF: the JPEG's own)
-    free(buf);
-    if (!ok && n == cap) {   // unusually large header: try the whole file
-        NSData *all = read_file(path);
-        ok = all && !nj_read_info(all.bytes, all.length, &fi) && fi.width > 0 && fi.height > 0;
-    }
-    int ow = fi.width, oh = fi.height, orient = fi.orientation;
-    if (!ok) {   // PNG, HEIC, TIFF ...: ImageIO reads just the header
-        CGImageSourceRef src = CGImageSourceCreateWithURL((__bridge CFURLRef)[NSURL fileURLWithPath:path], NULL);
-        if (!src) return NO;
-        NSDictionary *p = CFBridgingRelease(CGImageSourceCopyPropertiesAtIndex(src, 0, NULL));
-        CFRelease(src);
-        ow = [p[(id)kCGImagePropertyPixelWidth] intValue];
-        oh = [p[(id)kCGImagePropertyPixelHeight] intValue];
-        orient = [p[(id)kCGImagePropertyOrientation] intValue];
-        if (ow <= 0 || oh <= 0) return NO;
-    }
+    if (nv_header_size(path.fileSystemRepresentation, w, h)) return YES;
+    CGImageSourceRef src = CGImageSourceCreateWithURL((__bridge CFURLRef)[NSURL fileURLWithPath:path], NULL);
+    if (!src) return NO;
+    NSDictionary *p = CFBridgingRelease(CGImageSourceCopyPropertiesAtIndex(src, 0, NULL));
+    CFRelease(src);
+    int ow = [p[(id)kCGImagePropertyPixelWidth] intValue], oh = [p[(id)kCGImagePropertyPixelHeight] intValue];
+    int orient = [p[(id)kCGImagePropertyOrientation] intValue];
+    if (ow <= 0 || oh <= 0) return NO;
     BOOL swap = orient >= 5;
     *w = swap ? oh : ow;
     *h = swap ? ow : oh;

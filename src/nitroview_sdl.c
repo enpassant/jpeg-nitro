@@ -206,7 +206,7 @@ static int gl_load(void) {
 // decoded image
 
 typedef enum { KIND_YUV = 0, KIND_BGRA = 1, KIND_PNG = 2, KIND_PLANAR = 3 } Kind;
-enum { MODE_STB = -3, MODE_NITROPNG = -4, MODE_NITROPSD = -5, MODE_SVG = -6, MODE_CDR = -7, MODE_NITROHEVC = -8, MODE_NITRODNG = -9, MODE_NITROWEBP = -10, MODE_NITROTIFF = -11, MODE_NITROAVIF = -12 };
+enum { MODE_STB = -3, MODE_SVG = NV_MODE_SVG, MODE_CDR = NV_MODE_CDR, MODE_NITRODNG = NV_MODE_NITRODNG };   // (the rest: nitro_load.h)
 
 #ifdef NV_VECTOR
 // A loaded vector document (SVG, CorelDRAW), shared by the images of its pages and the background
@@ -262,23 +262,8 @@ static SDL_AtomicInt g_serial;
 static unsigned next_serial(void) { return (unsigned)SDL_AddAtomicInt(&g_serial, 1) + 1; }
 
 static const char *mode_name(int m) {
-    switch (m) {
-    case 3: return "prog";
-    case 2: return "split";
-    case 1: return "RST";
-    case 0: return "single";
-    case MODE_STB: return "stb";
-    case MODE_NITROPNG: return "nitropng";
-    case MODE_NITROPSD: return "nitropsd";
-    case MODE_NITROHEVC: return "nitrohevc";
-    case MODE_NITRODNG: return "nitrodng";
-    case MODE_NITROWEBP: return "nitrowebp";
-    case MODE_NITROTIFF: return "nitrotiff";
-    case MODE_NITROAVIF: return "nitroavif";
-    case MODE_SVG: return "svg";
-    case MODE_CDR: return "cdr";
-    default: return "?";
-    }
+    const char *n = nv_mode_name(m);
+    return n ? n : m == MODE_STB ? "stb" : "?";
 }
 
 // Host buffers the decoders write into: 50-100 MB each, reused (page faults are expensive).
@@ -320,21 +305,6 @@ static void buf_put(uint8_t *p, size_t cap) {
 
 // ---------------------------------------------------------------------------
 // files
-
-static int read_all(SDL_IOStream *f, void *buf, size_t n) {
-    size_t got = 0;
-    while (got < n) {
-        size_t r = SDL_ReadIO(f, (uint8_t *)buf + got, n - got);
-        if (!r) return -1;
-        got += r;
-    }
-    return 0;
-}
-
-static int pread_all(SDL_IOStream *f, void *buf, size_t n, uint64_t off) {
-    if (SDL_SeekIO(f, (Sint64)off, SDL_IO_SEEK_SET) < 0) return -1;
-    return read_all(f, buf, n);
-}
 
 
 typedef struct { char **v; int n, cap; } FileList;
@@ -872,11 +842,6 @@ static uint8_t *decode_stb(const uint8_t *bytes, size_t len, Decoded *d, size_t 
 }
 
 
-static int is_psd_name(const char *p) {
-    static const char *const e[] = {"psd", "psb", NULL};
-    return nv_has_ext(p, e);
-}
-
 #ifdef NV_VECTOR
 #ifdef NV_SVG
 static int svg_render(void *doc, int page, uint8_t *bgra, int w, int h, size_t pitch, double scale, double x0, double y0) {
@@ -962,74 +927,26 @@ static uint8_t *decode_vector_page(VectorDoc *v, int page, Decoded *d, size_t *c
 }
 #endif
 
-// planes of w x h at 64-byte aligned pitches, one after the other: the offsets, the total size
-static size_t plane_layout(Decoded *d, int n, const int *pw, const int *ph) {
-    size_t total = 0;
-    for (int c = 0; c < n; c++) {
-        d->pitch[c] = align_up((size_t)pw[c], 64);
-        d->offset[c] = total;
-        total = align_up(total + d->pitch[c] * ph[c], 64);
-        d->pw[c] = pw[c];
-        d->ph[c] = ph[c];
-    }
-    return total;
-}
 
-// Decodes one file into host memory. NULL: cannot be decoded.
+static uint8_t *pool_get(size_t len, size_t *cap, void *ctx) { return buf_get(len, cap); }
+static void pool_put(uint8_t *p, size_t cap, void *ctx) { buf_put(p, cap); }
+
+// Decodes one file into host memory (nitro_load's decoders, else stb_image). NULL: cannot be decoded.
 static Decoded *decode_file(const char *path) {
     double t0 = now_ms();
-    size_t len = 0;
-    uint8_t *data = NULL;
-    if (is_psd_name(path)) {
-        data = nv_read_psd_merged(path, &len);
-        ps_info pi;
-        if (data && (ps_read_info(data, len, &pi) || !pi.supported || pi.width > g_max_tex || pi.height > g_max_tex)) {
-            free(data);   // stb_image gets the whole file
-            data = NULL;
-        }
-    }
-    // a camera raw (CR2, NEF ...) shows its full-size JPEG (nitrojpeg finds it): only that is read
-    int raw_orientation = 0, orient = 0, raw_read = 0;
-    if (!data && (data = nv_read_raw_jpeg(path, &len, &orient))) {
-        raw_orientation = orient;   // (0: the JPEG's own, RAF)
-        raw_read = 1;
-    }
-    if (!data) data = nv_read_file(path, &len);
+    size_t len = 0, cap = 0;
+    int raw_orientation, raw_read;
+    uint8_t *data = nv_read_image(path, &len, g_max_tex, &raw_orientation, &raw_read), *buf = NULL;
     if (!data) return NULL;
     double t1 = now_ms();
     Decoded *d = calloc(1, sizeof *d);
-    if (d) d->serial = next_serial();
+    if (!d) {
+        free(data);
+        return NULL;
+    }
+    d->serial = next_serial();
     d->read_ms = t1 - t0;
     d->orientation = 1;
-    uint8_t *buf = NULL;
-    size_t cap = 0;
-    size_t eoff, esize;
-    ndng_info di;   // a DNG: its raw image developed by nitrodng (else its largest preview below)
-    if (!raw_read && !ndng_read_info(data, len, &di) && di.width <= g_max_tex && di.height <= g_max_tex) {
-        size_t pitch = (size_t)di.width * 4;
-        buf = buf_get(pitch * di.height, &cap);
-        d->ev3 = SDL_GetAtomicInt(&g_dng_ev3);
-        di.ev = d->ev3 / 3.0f;
-        if (buf && !ndng_decode(data, len, &di, buf, pitch, g_nthreads)) {
-            d->kind = KIND_BGRA;
-            d->width = di.width;
-            d->height = di.height;
-            d->pitch[0] = pitch;
-            d->size = pitch * di.height;
-            d->bands = 1;
-            d->orientation = di.orientation;
-            d->mode = MODE_NITRODNG;
-            goto decoded;
-        }
-        if (buf) buf_put(buf, cap);
-        buf = NULL;
-    }
-    if (!raw_read && !nj_find_embedded(data, len, &eoff, &esize, &orient) && eoff < len && esize <= len - eoff) {
-        memmove(data, data + eoff, esize);   // (a raw file with another extension: read whole)
-        memset(data + esize, 0, 64);         // (the zero padding nv_read_file leaves after the data)
-        len = esize;
-        raw_orientation = orient;
-    }
 #ifdef NV_VECTOR
     VectorDoc *vec = load_vector(path, data, len);
     if (vec) {
@@ -1037,178 +954,33 @@ static Decoded *decode_file(const char *path) {
         vec_unref(vec);   // (d keeps its own reference)
     } else
 #endif
-    if (len >= 8 && !memcmp(data, "\x89PNG\r\n\x1a\n", 8)) {
-        np_info pi;   // nitropng: 8-bit gray / gray+alpha / RGB / RGBA, non-interlaced: the rows to the GPU
-        if (!np_read_info(data, len, &pi) && pi.supported && pi.width <= g_max_tex && pi.height <= g_max_tex) {
-            buf = buf_get(pi.raw_size, &cap);
-            np_stats ps;
-            if (buf && !np_decode(data, len, &pi, buf, g_nthreads, &ps)) {
-                d->kind = KIND_PNG;
-                d->width = pi.width;
-                d->height = pi.height;
-                d->ncomp = pi.channels;
-                d->pitch[0] = pi.stride + 1;   // rows keep their filter-type byte
-                d->size = pi.raw_size;
-                d->orientation = pi.orientation;   // (eXIf chunk)
-                d->bands = ps.chunks;
-                d->mode = MODE_NITROPNG;
-            } else if (buf) {
-                buf_put(buf, cap);
-                buf = NULL;
-            }
-        } else if (!np_read_info(data, len, &pi) && pi.convertible && pi.width <= g_max_tex && pi.height <= g_max_tex) {
-            // palette, 1 / 2 / 4 / 16-bit, a transparency key: the rows decoded, then made BGRX (in parallel)
-            size_t rcap, pitch = (size_t)pi.width * 4;
-            uint8_t *raw = buf_get(pi.raw_size, &rcap);
-            buf = raw ? buf_get(pitch * pi.height, &cap) : NULL;
-            np_stats ps;
-            if (buf && !np_decode(data, len, &pi, raw, g_nthreads, &ps) && !np_to_bgrx(data, len, &pi, raw, buf, pitch, g_nthreads)) {
-                d->kind = KIND_BGRA;
-                d->width = pi.width;
-                d->height = pi.height;
-                d->pitch[0] = pitch;
-                d->size = pitch * pi.height;
-                d->orientation = pi.orientation;   // (eXIf chunk)
-                d->bands = ps.chunks;
-                d->mode = MODE_NITROPNG;
-            } else if (buf) {
-                buf_put(buf, cap);
-                buf = NULL;
-            }
-            buf_put(raw, rcap);
-        }
-    } else if (len >= 4 && !memcmp(data, "8BPS", 4)) {
-        ps_info pi;   // nitropsd: merged image of 8-bit RGB / grayscale PSD and PSB
-        if (!ps_read_info(data, len, &pi) && pi.supported && pi.width <= g_max_tex && pi.height <= g_max_tex) {
-            size_t P = (size_t)(pi.ncolor + pi.alpha);
-            buf = buf_get(pi.plane_size * P, &cap);
-            ps_stats ps;
-            if (buf && !ps_decode(data, len, &pi, buf, g_nthreads, &ps)) {
-                d->kind = KIND_PLANAR;
-                d->width = pi.width;
-                d->height = pi.height;
-                d->ncomp = pi.ncolor;
-                d->hasa = pi.alpha;
-                d->size = pi.plane_size * P;
-                d->bands = 1;
-                d->mode = MODE_NITROPSD;
-            } else if (buf) {
-                buf_put(buf, cap);
-                buf = NULL;
-            }
-        }
-    } else if (len >= 3 && data[0] == 0xFF && data[1] == 0xD8) {
-        nj_info fi;
-        int ok = !nj_read_info(data, len, &fi);
-        if (ok) d->orientation = raw_orientation ? raw_orientation : fi.orientation;
-        if (ok && fi.supported && fi.width <= g_max_tex && fi.height <= g_max_tex) {
-            size_t total = plane_layout(d, fi.ncomp, fi.plane_w, fi.plane_h);
-            buf = buf_get(total, &cap);
-            uint8_t *planes[3] = {buf + d->offset[0], buf + d->offset[1], buf + d->offset[2]};
-            nj_stats st;
-            if (buf && !nj_decode_planes(data, len, &fi, planes, d->pitch, 0, &st)) {
-                d->kind = KIND_YUV;
-                d->width = fi.width;
-                d->height = fi.height;
-                d->ncomp = fi.ncomp;
-                d->h1 = fi.ncomp > 1 ? fi.h[1] : 1;
-                d->v1 = fi.ncomp > 1 ? fi.v[1] : 1;
-                d->hmax = fi.hmax;
-                d->vmax = fi.vmax;
-                d->size = total;
-                d->mode = st.mode;
-                d->bands = st.bands;
-            } else if (buf) {
-                buf_put(buf, cap);
-                buf = NULL;
-            }
-        }
-    } else if (len >= 12 && !memcmp(data + 4, "ftyp", 4)) {
-        nh_info hi;   // HEIC: its HEVC tiles decoded in parallel by our own decoder (nitroheic + nitrohevc)
-        if (!nh_read_info(data, len, &hi) && hi.plane_w[0] <= g_max_tex && hi.plane_h[0] <= g_max_tex) {
-            size_t total = plane_layout(d, 3, hi.plane_w, hi.plane_h);
-            buf = buf_get(total, &cap);
-            uint8_t *planes[3] = {buf + d->offset[0], buf + d->offset[1], buf + d->offset[2]};
-            if (buf && !nh_decode_planes(data, len, &hi, planes, d->pitch, 0)) {
-                d->kind = KIND_YUV;   // (full range BT.601 4:2:0, as a JPEG; the ICC profile is not used)
-                d->width = hi.width;
-                d->height = hi.height;
-                d->ncomp = 3;
-                d->h1 = d->v1 = 1;
-                d->hmax = d->vmax = 2;
-                d->orientation = hi.orientation;
-                d->size = total;
-                d->mode = MODE_NITROHEVC;
-                d->bands = hi.ntiles;
-            } else if (buf) {
-                buf_put(buf, cap);
-                buf = NULL;
-            }
-        }
-#ifdef NV_DAV1D
-        na_info ai;   // AVIF: AV1 through dav1d, our colour conversion (in parallel)
-        if (!buf && !na_read_info(data, len, &ai) && ai.width <= g_max_tex && ai.height <= g_max_tex) {
-            size_t pitch = (size_t)ai.width * 4;
-            buf = buf_get(pitch * ai.height, &cap);
-            if (buf && !na_decode(data, len, &ai, buf, pitch, g_nthreads)) {
-                d->kind = KIND_BGRA;
-                d->width = ai.width;
-                d->height = ai.height;
-                d->pitch[0] = pitch;
-                d->size = pitch * ai.height;
-                d->orientation = ai.orientation;
-                d->mode = MODE_NITROAVIF;
-                d->bands = ai.ntiles;
-            } else if (buf) {
-                buf_put(buf, cap);
-                buf = NULL;
-            }
-        }
-#endif
-    } else if (len >= 12 && !memcmp(data, "RIFF", 4) && !memcmp(data + 8, "WEBP", 4)) {
-        nw_info wi;   // lossy WebP: nitrowebp (the tokens parsed on one thread, the rows reconstructed on another)
-        if (!nw_read_info(data, len, &wi) && wi.plane_w[0] <= g_max_tex && wi.plane_h[0] <= g_max_tex) {
-            size_t total = plane_layout(d, 3, wi.plane_w, wi.plane_h);
-            buf = buf_get(total, &cap);
-            uint8_t *planes[3] = {buf + d->offset[0], buf + d->offset[1], buf + d->offset[2]};
-            if (buf && !nw_decode_planes(data, len, &wi, planes, d->pitch, g_nthreads)) {
-                d->kind = KIND_YUV;   // (limited range BT.601 4:2:0; the ICC profile is not used)
-                d->limited = 1;
-                d->width = wi.width;
-                d->height = wi.height;
-                d->ncomp = 3;
-                d->h1 = d->v1 = 1;
-                d->hmax = d->vmax = 2;
-                d->orientation = wi.orientation;
-                d->size = total;
-                d->mode = MODE_NITROWEBP;
-                d->bands = 1;
-            } else if (buf) {
-                buf_put(buf, cap);
-                buf = NULL;
-            }
-        }
-    } else if (len >= 8 && data[0] == data[1] && (data[0] == 'I' || data[0] == 'M')) {
-        nt_info ti;   // TIFF: nitrotiff (strips / tiles in parallel; uncompressed: straight from the file)
-        if (!nt_read_info(data, len, &ti) && ti.width <= g_max_tex && ti.height <= g_max_tex) {
-            size_t pitch = (size_t)ti.width * 4;
-            buf = buf_get(pitch * ti.height, &cap);
-            if (buf && !nt_decode(data, len, &ti, buf, pitch, g_nthreads)) {
-                d->kind = KIND_BGRA;
-                d->width = ti.width;
-                d->height = ti.height;
-                d->pitch[0] = pitch;
-                d->size = pitch * ti.height;
-                d->orientation = ti.orientation;
-                d->mode = MODE_NITROTIFF;
-                d->bands = 1;
-            } else if (buf) {
-                buf_put(buf, cap);
-                buf = NULL;
-            }
+    {
+        NvDecoder dec = {pool_get, pool_put, NULL, 64, g_max_tex, g_nthreads, SDL_GetAtomicInt(&g_dng_ev3)};
+        NvImage img;
+        if (!nv_decode(data, &len, raw_orientation, raw_read, &dec, &img, &buf, &cap)) {
+            d->kind = (Kind)img.kind;
+            d->width = img.width;
+            d->height = img.height;
+            d->ncomp = img.ncomp;
+            d->orientation = img.orientation;
+            d->h1 = img.h[1];
+            d->v1 = img.v[1];
+            d->hmax = img.hmax;
+            d->vmax = img.vmax;
+            d->hasa = img.hasa;
+            d->limited = img.limited;
+            memcpy(d->pw, img.pw, sizeof d->pw);
+            memcpy(d->ph, img.ph, sizeof d->ph);
+            memcpy(d->offset, img.offset, sizeof d->offset);
+            memcpy(d->pitch, img.pitch, sizeof d->pitch);
+            d->size = img.size;
+            d->mode = img.mode;
+            d->bands = img.bands;
+            d->ev3 = img.ev3;
+        } else {
+            d->orientation = img.orientation;   // (a JPEG's, a camera raw's: known from the header)
         }
     }
-decoded:
     if (!buf) buf = decode_stb(data, len, d, &cap);   // everything else, and what the own decoders could not handle
     free(data);
     if (!buf) { free(d); return NULL; }
@@ -2466,68 +2238,6 @@ static void handle(const SDL_Event *e) {
     }
 }
 
-// Image size from the file header (first MB), for the first window size.
-static int header_size(const char *path, double *w, double *h) {
-    SDL_IOStream *f = SDL_IOFromFile(path, "rb");
-    if (!f) return 0;
-    static uint8_t b[(1 << 20) + 64];   // (camera raw: Nikon's SubIFD directories are ~270 KB in)
-    size_t n = SDL_ReadIO(f, b, 1 << 20);
-    memset(b + n, 0, 64);
-    ndng_info di;   // a DNG: its developed raw image
-    nw_info wi;     // WebP (its VP8 chunk may go on beyond what was read)
-    nj_info ji;
-    np_info pi;
-    size_t eoff, esize;
-    int raw_orientation, ok = 0, o = 1;
-    if (!ndng_read_info(b, n, &di)) {
-        *w = di.width; *h = di.height; o = di.orientation; ok = 1;
-    } else if (!nw_read_info(b, n, &wi)) {
-        *w = wi.width; *h = wi.height; o = wi.orientation; ok = 1;
-    } else if (!nj_find_embedded(b, n, &eoff, &esize, &raw_orientation)) {   // camera raw (CR2, NEF ...): its JPEG's header
-        static uint8_t jb[65536 + 64];
-        const uint8_t *jp = b + eoff;
-        size_t jn = eoff < n ? n - eoff : 0;
-        if (jn < 65536) {   // the JPEG's header lies beyond what was read: read it
-            jn = pread_all(f, jb, 65536, eoff) ? 0 : 65536;
-            memset(jb + jn, 0, 64);
-            jp = jb;
-        }
-        if (!nj_read_info(jp, jn, &ji)) {
-            *w = ji.width; *h = ji.height; o = raw_orientation ? raw_orientation : ji.orientation; ok = 1;   // (RAF: the JPEG's own)
-        }
-    }
-    if (!ok && n >= 8 && b[0] == b[1] && (b[0] == 'I' || b[0] == 'M')) {   // TIFF: from its directory (Photoshop's is at the end)
-        int le = b[0] == 'I', tw, th, to;
-        uint32_t dir = le ? (uint32_t)b[4] | b[5] << 8 | b[6] << 16 | (uint32_t)b[7] << 24
-                          : (uint32_t)b[4] << 24 | (uint32_t)b[5] << 16 | b[6] << 8 | b[7];
-        static uint8_t db[65536];
-        size_t got = 0;
-        if (dir + 2 <= n) {
-            got = MIN(n - dir, sizeof db);
-            memcpy(db, b + dir, got);
-        } else if (SDL_SeekIO(f, dir, SDL_IO_SEEK_SET) >= 0) {
-            got = SDL_ReadIO(f, db, sizeof db);
-        }
-        if (!nt_dir_size(db, got, le, &tw, &th, &to)) {
-            *w = tw; *h = th; o = to; ok = 1;
-        }
-    }
-    if (!ok && n >= 3 && b[0] == 0xFF && b[1] == 0xD8 && !nj_read_info(b, n, &ji)) {
-        *w = ji.width; *h = ji.height; o = ji.orientation; ok = 1;
-    }
-    if (!ok && !np_read_info(b, n, &pi)) {   // (an eXIf after the first MB: not seen here)
-        *w = pi.width; *h = pi.height; o = pi.orientation; ok = 1;
-    }
-    if (!ok && n >= 26 && !memcmp(b, "8BPS", 4)) {   // (ps_read_info wants the whole file)
-        *h = (double)((uint32_t)b[14] << 24 | (uint32_t)b[15] << 16 | (uint32_t)b[16] << 8 | b[17]);
-        *w = (double)((uint32_t)b[18] << 24 | (uint32_t)b[19] << 16 | (uint32_t)b[20] << 8 | b[21]);
-        ok = *w > 0 && *h > 0;
-    }
-    SDL_CloseIO(f);
-    if (ok && o >= 5) { double t = *w; *w = *h; *h = t; }
-    return ok;
-}
-
 static void set_icon(void) {
     int w, h, n;
     uint8_t *px = stbi_load_from_memory(icon_png, (int)icon_png_len, &w, &h, &n, 4);
@@ -2555,7 +2265,7 @@ static int create_window(const char *first, int hidden) {
     const char *drv = SDL_GetCurrentVideoDriver();   // (Retina, a scaled Wayland output: device pixels per window
     if (k > 0 && drv && (!strcmp(drv, "cocoa") || !strcmp(drv, "wayland"))) g_density = k;   // unit; X11: pixels)
     double w, h, cw, ch;
-    if (first && header_size(first, &w, &h)) {
+    if (first && nv_header_size(first, &w, &h)) {   // (the image's size from the file header: the window's size)
         window_content_size(w, h, 0, &cw, &ch);
     } else {
         max_client(&cw, &ch);

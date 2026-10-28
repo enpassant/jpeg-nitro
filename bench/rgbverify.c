@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 A'rpi - part of jpeg-nitro (https://github.com/gereoffy/jpeg-nitro)
 // The GNOME viewer's JPEG -> RGB conversion (src/gnome/nitro-convert.c) must give exactly
-// libjpeg-turbo's RGB output: nitrojpeg planes + nc_jpeg_to_rgb vs tj3Decompress8(TJPF_RGB).
+// libjpeg-turbo's RGB output: nitrojpeg planes + nc_yuv_to_rgb vs tj3Decompress8(TJPF_RGB).
 //   rgbverify files.jpg...
 #include "../src/gnome/nitro-convert.h"
+#include "../src/nitrojpeg.h"
 #include "../src/nitro_os.h"
 #include <turbojpeg.h>
 #include <stdio.h>
@@ -26,15 +27,28 @@ int main(int argc, char **argv) {
         memset(d + len, 0, 64);
         nj_info fi;
         if (nj_read_info(d, (size_t)len, &fi) || !fi.supported) { free(d); continue; }
-        size_t pitch[3], off[3], tot = 0;
-        for (int c = 0; c < fi.ncomp; c++) { pitch[c] = (size_t)fi.plane_w[c]; off[c] = tot; tot += pitch[c] * fi.plane_h[c]; }
+        NvImage img = {0};   // (as nv_decode would describe the planes)
+        size_t tot = 0;
+        img.kind = NV_YUV;
+        img.width = fi.width;
+        img.height = fi.height;
+        img.ncomp = fi.ncomp;
+        img.hmax = fi.hmax;
+        img.vmax = fi.vmax;
+        for (int c = 0; c < fi.ncomp; c++) {
+            img.h[c] = fi.h[c];
+            img.v[c] = fi.v[c];
+            img.pitch[c] = (size_t)fi.plane_w[c];
+            img.offset[c] = tot;
+            tot += img.pitch[c] * fi.plane_h[c];
+        }
         unsigned char *pl = malloc(tot), *planes[3] = {NULL, NULL, NULL};
-        for (int c = 0; c < fi.ncomp; c++) planes[c] = pl + off[c];
-        if (nj_decode_planes(d, (size_t)len, &fi, planes, pitch, 0, NULL)) { free(pl); free(d); continue; }
+        for (int c = 0; c < fi.ncomp; c++) planes[c] = pl + img.offset[c];
+        if (nj_decode_planes(d, (size_t)len, &fi, planes, img.pitch, 0, NULL)) { free(pl); free(d); continue; }
         size_t sz = (size_t)fi.width * fi.height * 3;
         unsigned char *A = malloc(sz), *B = malloc(sz);
         double t0 = nitro_now_ms();
-        nc_jpeg_to_rgb(&fi, planes, pitch, A, (size_t)fi.width * 3);
+        nc_yuv_to_rgb(&img, pl, A, (size_t)fi.width * 3);
         tconv += nitro_now_ms() - t0;
         mp += fi.width * (double)fi.height / 1e6;
         tjhandle h = tj3Init(TJINIT_DECOMPRESS);

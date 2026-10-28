@@ -7,27 +7,23 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "../nitrojpeg.h"
-#include "../nitropsd.h"
+#include "../nitro_load.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-// JPEG planes from nj_decode_planes -> RGB, 3 bytes per pixel, rows 'stride' bytes apart.
-// Chroma upsampling and YCbCr->RGB as libjpeg(-turbo) does it ("fancy" upsampling for
-// 4:2:2, 4:2:0 and 4:4:0, replication for other factors, the same integer arithmetic):
-// the output is identical to libjpeg-turbo's RGB output.
-void nc_jpeg_to_rgb(const nj_info *fi, uint8_t *const planes[3], const size_t pitch[3], uint8_t *dst, size_t stride);
+// An NV_YUV image (nitro_load.h: a JPEG's planes from nj_decode_planes, any sampling; HEIC's and
+// WebP's 4:2:0) in buf -> RGB, 3 bytes per pixel, rows 'stride' bytes apart. Chroma upsampling
+// and YCbCr->RGB as libjpeg(-turbo) does it ("fancy" upsampling for 4:2:2, 4:2:0 and 4:4:0,
+// replication for other factors, the same integer arithmetic): the output is identical to
+// libjpeg-turbo's RGB output. Limited range (img->limited: WebP) is scaled to full, BT.601.
+void nc_yuv_to_rgb(const NvImage *img, const uint8_t *buf, uint8_t *dst, size_t stride);
 
-// 4:2:0 planes (HEIC: full range, limited 0; WebP: limited range, limited 1) -> RGB, BT.601,
-// upsampled as above.
-void nc_yuv420_to_rgb(int width, int height, uint8_t *const planes[3], const size_t pitch[3], int limited, uint8_t *dst,
-                      size_t stride);
-
-// PSD planes from ps_decode -> RGB. Merged transparency (Photoshop stores the colour matted
-// with white) is shown over black, as the macOS and Windows viewers do.
-void nc_psd_to_rgb(const ps_info *si, const uint8_t *planes, uint8_t *dst, size_t stride);
+// An NV_PLANAR image (a PSD's planes from ps_decode) in buf -> RGB. Merged transparency
+// (Photoshop stores the colour matted with white) is shown over black, as the macOS and
+// Windows viewers do.
+void nc_psd_to_rgb(const NvImage *img, const uint8_t *buf, uint8_t *dst, size_t stride);
 
 #ifdef __cplusplus
 }
