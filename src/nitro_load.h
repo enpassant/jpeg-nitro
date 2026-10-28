@@ -107,7 +107,7 @@ int nv_decode(uint8_t *data, size_t *len, int raw_orientation, int raw_read, con
 
 // The image's size (after its EXIF orientation) from the file's header (its first MB), without
 // decoding: for the first window's size. 0 if it is not known (the platform's decoder may tell).
-int nv_header_size(const char *path, double *w, double *h);
+int nv_image_size_from_file(const char *path, double *w, double *h);
 
 #ifdef __cplusplus
 }

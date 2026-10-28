@@ -32,7 +32,7 @@
         nv_read_raw_jpeg;
         nv_read_image;
         nv_decode;
-        nv_header_size;
+        nv_image_size_from_file;
         nv_mode_name;
         nv_has_ext;
         nv_is_image_name;

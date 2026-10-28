@@ -2080,8 +2080,8 @@ static int run_zoomtest(NSArray<NSString *> *files, GPU *gpu) {
 
 // The image's size (after its EXIF orientation) from the file's header: our decoders' formats
 // (nitro_load), else (GIF, BMP ...) ImageIO reads just the header.
-static BOOL header_size(NSString *path, double *w, double *h) {
-    if (nv_header_size(path.fileSystemRepresentation, w, h)) return YES;
+static BOOL image_size_from_file(NSString *path, double *w, double *h) {
+    if (nv_image_size_from_file(path.fileSystemRepresentation, w, h)) return YES;
     CGImageSourceRef src = CGImageSourceCreateWithURL((__bridge CFURLRef)[NSURL fileURLWithPath:path], NULL);
     if (!src) return NO;
     NSDictionary *p = CFBridgingRelease(CGImageSourceCopyPropertiesAtIndex(src, 0, NULL));
@@ -2102,7 +2102,7 @@ static NSRect initial_frame(NSString *first, NSWindowStyleMask mask) {
     NSRect vis = scr.visibleFrame;
     double tb = [NSWindow frameRectForContentRect:NSMakeRect(0, 0, 100, 100) styleMask:mask].size.height - 100;
     double maxH = vis.size.height - tb, w, h;
-    NSSize cs = header_size(first, &w, &h) ? window_content_size(w, h, mask, scr, NO)
+    NSSize cs = image_size_from_file(first, &w, &h) ? window_content_size(w, h, mask, scr, NO)
                                            : NSMakeSize(floor(vis.size.width * 0.84), floor(maxH * 0.84));
     return NSMakeRect(vis.origin.x + floor((vis.size.width - cs.width) / 2),
                       vis.origin.y + floor((maxH - cs.height) / 2), cs.width, cs.height);

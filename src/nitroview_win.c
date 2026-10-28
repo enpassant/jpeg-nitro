@@ -2076,7 +2076,7 @@ static int create_window(const wchar_t *first) {
     double w, h;
     SIZE cs;
     char *u = first ? utf8_dup(first) : NULL;   // (the image's size from the file header: the window's size)
-    if (u && nv_header_size(u, &w, &h)) cs = window_content_size(w, h, 0);
+    if (u && nv_image_size_from_file(u, &w, &h)) cs = window_content_size(w, h, 0);
     else { SIZE mx = max_client(); cs.cx = mx.cx * 84 / 100; cs.cy = mx.cy * 84 / 100; }
     free(u);
     RECT wa = work_area();

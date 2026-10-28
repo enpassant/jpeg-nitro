@@ -2048,7 +2048,7 @@ static int create_window(const char *first, int hidden) {
     const char *drv = SDL_GetCurrentVideoDriver();   // (Retina, a scaled Wayland output: device pixels per window
     if (k > 0 && drv && (!strcmp(drv, "cocoa") || !strcmp(drv, "wayland"))) g_density = k;   // unit; X11: pixels)
     double w, h, cw, ch;
-    if (first && nv_header_size(first, &w, &h)) {   // (the image's size from the file header: the window's size)
+    if (first && nv_image_size_from_file(first, &w, &h)) {   // (the image's size from the file header: the window's size)
         window_content_size(w, h, 0, &cw, &ch);
     } else {
         max_client(&cw, &ch);

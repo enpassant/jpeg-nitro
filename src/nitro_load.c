@@ -547,7 +547,7 @@ int nv_decode(uint8_t *data, size_t *len, int raw_orientation, int raw_read, con
 // ---------------------------------------------------------------------------
 // the size from the header
 
-int nv_header_size(const char *path, double *w, double *h) {
+int nv_image_size_from_file(const char *path, double *w, double *h) {
     FILE *f = open_rb(path);
     if (!f) return 0;
     uint8_t *b = malloc((1 << 20) + PAD);   // (camera raw: Nikon's SubIFD directories are ~270 KB in)
