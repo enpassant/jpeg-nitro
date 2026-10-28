@@ -35,6 +35,7 @@
 #include "nitrodng.h"
 #include "nitrowebp.h"
 #include "nitrotiff.h"
+#include "nitro_load.h"   // reading image files, the image extensions (shared by the viewers)
 #ifdef NV_DAV1D
 #include "nitroavif.h"    // optional AVIF decoding (dav1d)
 #endif
@@ -169,108 +170,22 @@ typedef enum { KIND_YUV = 0, KIND_BGRA = 1, KIND_PNG = 2, KIND_PLANAR = 3 } Kind
 
 static size_t align_up(size_t v, size_t a) { return (v + a - 1) / a * a; }
 
+
+// The file's bytes (nitro_load: the whole file, a PSD's merged image, a camera raw's JPEG), nil if unreadable.
 static NSData *read_file(NSString *path) {
-    int fd = open(path.fileSystemRepresentation, O_RDONLY);
-    if (fd < 0) return nil;
-    struct stat st;
-    fstat(fd, &st);
-    NSMutableData *d = [NSMutableData dataWithLength:(NSUInteger)st.st_size];
-    size_t got = 0;
-    while (got < (size_t)st.st_size) {
-        ssize_t r = read(fd, (uint8_t *)d.mutableBytes + got, (size_t)st.st_size - got);
-        if (r <= 0) break;
-        got += (size_t)r;
-    }
-    close(fd);
-    return got == (size_t)st.st_size ? d : nil;
+    size_t n = 0;
+    uint8_t *p = nv_read_file(path.fileSystemRepresentation, &n);
+    return p ? [NSData dataWithBytesNoCopy:p length:n freeWhenDone:YES] : nil;
 }
-
-// Camera raw files (CR2, NEF ...): reads only the start (the TIFF directories) and the
-// full-size JPEG nitrojpeg finds there, not the raw data (most of the 10-30 MB). nil if there
-// is no such JPEG (the caller reads it all).
-static NSData *read_raw_jpeg(NSString *path, int *orientation) {
-    int fd = open(path.fileSystemRepresentation, O_RDONLY);
-    if (fd < 0) return nil;
-    NSData *out = nil;
-    struct stat st;
-    size_t cap = 1 << 20;   // (Nikon puts the SubIFD directories after the maker notes: ~270 KB in)
-    uint8_t *hdr = malloc(cap);
-    ssize_t n = hdr && !fstat(fd, &st) ? pread(fd, hdr, cap, 0) : -1;
-    size_t off, len;
-    if (n > 0 && !nj_find_embedded(hdr, (size_t)n, &off, &len, orientation) && off < (size_t)st.st_size &&
-        len <= (size_t)st.st_size - off) {
-        NSMutableData *d = [NSMutableData dataWithLength:len];
-        size_t got = 0;
-        while (got < len) {
-            ssize_t r = pread(fd, (uint8_t *)d.mutableBytes + got, len - got, (off_t)(off + got));
-            if (r <= 0) break;
-            got += (size_t)r;
-        }
-        if (got == len) out = d;
-    }
-    free(hdr);
-    close(fd);
-    return out;
-}
-
-// PSD/PSB: reads only what the merged image needs. Big PSDs are mostly layer
-// data (~80% of the file); the merged image is at the end. Builds a slim PSD in
-// memory: header + colour mode data + image resources (ICC profile) + an empty
-// layer section that keeps the layer count's sign (merged transparency) + the
-// merged image data. Returns nil if the file is not a sane PSD (caller reads it all).
 static NSData *read_psd_merged(NSString *path) {
-    int fd = open(path.fileSystemRepresentation, O_RDONLY);
-    if (fd < 0) return nil;
-    NSMutableData *out = nil;
-    struct stat st;
-    uint8_t h[26], b[8];
-    if (fstat(fd, &st) || pread(fd, h, 26, 0) != 26 || memcmp(h, "8BPS", 4)) goto done;
-    {
-        uint64_t size = (uint64_t)st.st_size;
-        int psb = h[5] == 2;
-        size_t L = psb ? 8 : 4;
-        uint64_t pos = 26;
-        for (int k = 0; k < 2; k++) {   // colour mode data, image resources
-            if (pread(fd, b, 4, (off_t)pos) != 4) goto done;
-            uint32_t l = (uint32_t)b[0] << 24 | (uint32_t)b[1] << 16 | (uint32_t)b[2] << 8 | b[3];
-            pos += 4 + (uint64_t)l;
-            if (pos > size) goto done;
-        }
-        uint64_t head = pos;   // bytes kept as they are
-        if (pread(fd, b, L, (off_t)pos) != (ssize_t)L) goto done;
-        uint64_t lm = 0;
-        for (size_t i = 0; i < L; i++) lm = lm << 8 | b[i];
-        uint64_t x = pos + L + lm;   // merged image data (compression field first)
-        if (lm > size || x + 2 > size) goto done;
-        int16_t count = 0;
-        if (lm >= L + 2) {
-            uint8_t c[10];
-            if (pread(fd, c, L + 2, (off_t)(pos + L)) != (ssize_t)(L + 2)) goto done;
-            uint64_t li = 0;
-            for (size_t i = 0; i < L; i++) li = li << 8 | c[i];
-            if (li >= 2) count = (int16_t)(c[L] << 8 | c[L + 1]);
-        }
-        uint64_t merged = size - x;
-        out = [NSMutableData dataWithLength:(NSUInteger)(head + L + L + 2 + merged)];
-        uint8_t *o = out.mutableBytes;
-        if (pread(fd, o, (size_t)head, 0) != (ssize_t)head) { out = nil; goto done; }
-        uint8_t *q = o + head;
-        uint64_t slim = L + 2;   // layer and mask section: layer info (length 2) + layer count
-        for (size_t i = 0; i < L; i++) q[i] = (uint8_t)(slim >> (8 * (L - 1 - i)));
-        for (size_t i = 0; i < L; i++) q[L + i] = (uint8_t)(2 >> (8 * (L - 1 - i)));
-        q[2 * L] = (uint8_t)((uint16_t)count >> 8);
-        q[2 * L + 1] = (uint8_t)count;
-        uint8_t *m = q + 2 * L + 2;
-        size_t got = 0;
-        while (got < merged) {
-            ssize_t r = pread(fd, m + got, (size_t)(merged - got), (off_t)(x + got));
-            if (r <= 0) { out = nil; goto done; }
-            got += (size_t)r;
-        }
-    }
-done:
-    close(fd);
-    return out;
+    size_t n = 0;
+    uint8_t *p = nv_read_psd_merged(path.fileSystemRepresentation, &n);
+    return p ? [NSData dataWithBytesNoCopy:p length:n freeWhenDone:YES] : nil;
+}
+static NSData *read_raw_jpeg(NSString *path, int *orientation) {
+    size_t n = 0;
+    uint8_t *p = nv_read_raw_jpeg(path.fileSystemRepresentation, &n, orientation);
+    return p ? [NSData dataWithBytesNoCopy:p length:n freeWhenDone:YES] : nil;
 }
 
 // Decode one file into a Metal buffer. Runs on the decoder thread.
@@ -572,10 +487,8 @@ static Decoded *decode_file(NSString *path, BufferPool *pool, size_t align) {
     }
     // a camera raw (CR2, NEF ...) shows its full-size JPEG (nitrojpeg finds it): only that is read
     int raw_orientation = 0, orient = 0;
-    static NSSet *raw_exts;
-    if (!raw_exts) raw_exts = [NSSet setWithArray:@[@"cr2", @"nef", @"nrw", @"arw", @"raf"]];
     int raw_read = 0;
-    if (!data && [raw_exts containsObject:ext] && (data = read_raw_jpeg(path, &orient))) {
+    if (!data && (data = read_raw_jpeg(path, &orient))) {
         raw_orientation = orient;   // (0: the JPEG's own, RAF)
         raw_read = 1;
     }
@@ -2129,21 +2042,8 @@ static NSArray<NSString *> *collect_files(NSArray<NSString *> *args) {
         if (![fm fileExistsAtPath:a isDirectory:&dir]) { fprintf(stderr, "no such file: %s\n", a.UTF8String); continue; }
         if (!dir) { [out addObject:a]; continue; }
         NSArray *items = [[fm contentsOfDirectoryAtPath:a error:nil] sortedArrayUsingSelector:@selector(localizedStandardCompare:)];
-        for (NSString *f in items) {
-            NSString *ext = f.pathExtension.lowercaseString;
-            static NSSet *exts;
-            if (!exts) exts = [NSSet setWithArray:@[@"jpg", @"jpeg", @"jpe", @"png", @"heic", @"heif", @"avif", @"tif", @"tiff",
-                                                    @"webp", @"gif", @"bmp", @"psd", @"psb", @"cr2", @"nef", @"nrw", @"arw", @"raf", @"dng",
-#ifdef NV_SVG
-                                                    @"svg",
-#endif
-#ifdef NV_CDR
-                                                    @"cdr", @"cmx",
-#endif
-                                                    ]];
-            if ([exts containsObject:ext])
-                [out addObject:[a stringByAppendingPathComponent:f]];
-        }
+        for (NSString *f in items)
+            if (nv_is_image_name(f.UTF8String)) [out addObject:[a stringByAppendingPathComponent:f]];
     }
     return out;
 }

@@ -3,6 +3,7 @@
 #include "nitro-image.h"
 #include "nitro-loader.h"
 #include "nitro-view.h"
+#include "../nitro_load.h"   // the image extensions (shared by the viewers)
 
 #include <math.h>
 #include <string.h>
@@ -64,20 +65,9 @@ static void page(NitroWindow *self, gint delta);
 static void size_window(NitroWindow *self, gboolean fill);
 
 static gboolean supported_extension(const char *name) {
-    const char *dot = name ? strrchr(name, '.') : NULL;
-    if (!dot || !dot[1]) return FALSE;
-    dot++;
-    // our decoders, SVG (nitrosvg), CorelDRAW (nitrocdr) and GTK fallback loaders (see nitro-image.c)
-    static const char *const exts[] = {"jpg", "jpeg", "jpe", "jfif", "png", "psd", "psb", "heic", "heif", "avif",
-                                       "dng", "cr2", "nef", "nrw", "arw", "raf",
-                                       "tif", "tiff", "gif", "bmp", "webp", "svg",
-#ifdef NV_CDR
-                                       "cdr", "cmx",
-#endif
-                                       NULL};
-    for (int i = 0; exts[i]; i++)
-        if (g_ascii_strcasecmp(dot, exts[i]) == 0) return TRUE;
-    return FALSE;
+    // our decoders, CorelDRAW (nitrocdr) and GTK's loaders (see nitro-image.c); SVG with or without nitrosvg
+    static const char *const svg[] = {"svg", NULL};
+    return name && (nv_is_image_name(name) || nv_has_ext(name, svg));
 }
 
 static gint compare_files(gconstpointer a, gconstpointer b) {

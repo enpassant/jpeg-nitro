@@ -48,6 +48,7 @@
 #include "nitrodng.h"
 #include "nitrowebp.h"
 #include "nitrotiff.h"
+#include "nitro_load.h"   // reading image files, the image extensions (shared by the viewers)
 #ifdef NV_DAV1D
 #include "nitroavif.h"   // AVIF: AV1 through dav1d
 #endif
@@ -105,6 +106,13 @@ static int swfmt(wchar_t *b, size_t n, const wchar_t *fmt, ...) {
     va_end(ap);
     b[n - 1] = 0;
     return r < 0 || (size_t)r >= n ? -1 : 0;
+}
+
+static char *utf8_dup(const wchar_t *w) {   // (nitro_load takes UTF-8 paths)
+    int n = WideCharToMultiByte(CP_UTF8, 0, w, -1, NULL, 0, NULL, NULL);
+    char *u = n > 0 ? malloc((size_t)n) : NULL;
+    if (u) WideCharToMultiByte(CP_UTF8, 0, w, -1, u, n, NULL, NULL);
+    return u;
 }
 
 static const wchar_t *base_name(const wchar_t *p) {
@@ -235,108 +243,9 @@ static void buf_put(uint8_t *p, size_t cap) {
     ReleaseSRWLockExclusive(&g_pool_lock);
 }
 
+
 // ---------------------------------------------------------------------------
 // files
-
-static uint8_t *read_file(const wchar_t *path, size_t *len) {
-    HANDLE f = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING,
-                           FILE_FLAG_SEQUENTIAL_SCAN, NULL);
-    if (f == INVALID_HANDLE_VALUE) return NULL;
-    LARGE_INTEGER sz;
-    uint8_t *d = NULL;
-    if (GetFileSizeEx(f, &sz) && sz.QuadPart > 0 && (uint64_t)sz.QuadPart < ((uint64_t)1 << 40)) {
-        size_t n = (size_t)sz.QuadPart, got = 0;
-        d = malloc(n + 64);   // decoders may look a few bytes ahead
-        while (d && got < n) {
-            DWORD chunk = (DWORD)MIN(n - got, (size_t)1 << 30), r = 0;
-            if (!ReadFile(f, d + got, chunk, &r, NULL) || !r) { free(d); d = NULL; break; }
-            got += r;
-        }
-        if (d) { memset(d + n, 0, 64); *len = n; }
-    }
-    CloseHandle(f);
-    return d;
-}
-
-static int pread_all(HANDLE f, void *buf, size_t n, uint64_t off) {
-    size_t got = 0;
-    while (got < n) {
-        OVERLAPPED o = {0};
-        o.Offset = (DWORD)(off + got);
-        o.OffsetHigh = (DWORD)((off + got) >> 32);
-        DWORD r = 0, chunk = (DWORD)MIN(n - got, (size_t)1 << 30);
-        if (!ReadFile(f, (uint8_t *)buf + got, chunk, &r, &o) || !r) return -1;
-        got += r;
-    }
-    return 0;
-}
-
-// PSD/PSB: reads only what the merged image needs (see nitroview.m): header +
-// colour mode data + image resources + an empty layer section that keeps the
-// layer count's sign + the merged image. NULL if it is not a sane PSD.
-static uint8_t *read_psd_merged(const wchar_t *path, size_t *len) {
-    HANDLE f = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
-    if (f == INVALID_HANDLE_VALUE) return NULL;
-    uint8_t *out = NULL, h[26], b[8];
-    LARGE_INTEGER sz;
-    if (!GetFileSizeEx(f, &sz) || pread_all(f, h, 26, 0) || memcmp(h, "8BPS", 4)) goto done;
-    {
-        uint64_t size = (uint64_t)sz.QuadPart, pos = 26;
-        int psb = h[5] == 2;
-        size_t L = psb ? 8 : 4;
-        for (int k = 0; k < 2; k++) {
-            if (pread_all(f, b, 4, pos)) goto done;
-            pos += 4 + ((uint64_t)b[0] << 24 | (uint64_t)b[1] << 16 | (uint64_t)b[2] << 8 | b[3]);
-            if (pos > size) goto done;
-        }
-        uint64_t head = pos, lm = 0;
-        if (pread_all(f, b, L, pos)) goto done;
-        for (size_t i = 0; i < L; i++) lm = lm << 8 | b[i];
-        uint64_t x = pos + L + lm;
-        if (lm > size || x + 2 > size) goto done;
-        int16_t count = 0;
-        if (lm >= L + 2) {
-            uint8_t c[10];
-            if (pread_all(f, c, L + 2, pos + L)) goto done;
-            uint64_t li = 0;
-            for (size_t i = 0; i < L; i++) li = li << 8 | c[i];
-            if (li >= 2) count = (int16_t)(c[L] << 8 | c[L + 1]);
-        }
-        uint64_t merged = size - x, total = head + L + L + 2 + merged;
-        out = malloc((size_t)total + 64);
-        if (!out) goto done;
-        if (pread_all(f, out, (size_t)head, 0)) { free(out); out = NULL; goto done; }
-        uint8_t *q = out + head;
-        uint64_t slim = L + 2;
-        for (size_t i = 0; i < L; i++) q[i] = (uint8_t)(slim >> (8 * (L - 1 - i)));
-        for (size_t i = 0; i < L; i++) q[L + i] = (uint8_t)(2 >> (8 * (L - 1 - i)));
-        q[2 * L] = (uint8_t)((uint16_t)count >> 8);
-        q[2 * L + 1] = (uint8_t)count;
-        if (pread_all(f, q + 2 * L + 2, (size_t)merged, x)) { free(out); out = NULL; goto done; }
-        memset(out + total, 0, 64);
-        *len = (size_t)total;
-    }
-done:
-    CloseHandle(f);
-    return out;
-}
-
-static int has_ext(const wchar_t *path, const wchar_t *const *exts) {
-    const wchar_t *dot = wcsrchr(base_name(path), L'.');
-    if (!dot) return 0;
-    for (int i = 0; exts[i]; i++)
-        if (!_wcsicmp(dot + 1, exts[i])) return 1;
-    return 0;
-}
-static const wchar_t *const g_exts[] = {L"jpg", L"jpeg", L"jpe", L"jfif", L"png", L"heic", L"heif", L"avif", L"tif", L"tiff",
-                                        L"webp", L"gif", L"bmp", L"psd", L"psb", L"cr2", L"nef", L"nrw", L"arw", L"raf", L"dng",
-#ifdef NV_SVG
-                                        L"svg",
-#endif
-#ifdef NV_CDR
-                                        L"cdr", L"cmx",
-#endif
-                                        NULL};
 
 typedef struct { wchar_t **v; int n, cap; } FileList;
 
@@ -365,7 +274,7 @@ static void list_dir(FileList *out, const wchar_t *dir, const wchar_t *pattern, 
     int first = out->n;
     do {
         if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
-        if (!any_ext && !has_ext(fd.cFileName, g_exts)) continue;
+        if (!any_ext && !nv_is_image_name_w(fd.cFileName)) continue;
         wchar_t p[MAX_PATH * 2];
         if (!swfmt(p, MAX_PATH * 2, L"%ls%ls%ls", dir, dl && !sep ? L"\\" : L"", fd.cFileName)) fl_add(out, p);
     } while (FindNextFileW(h, &fd));
@@ -905,41 +814,6 @@ done:
     return buf;
 }
 
-// Camera raw files (CR2, NEF ...): reads only the start (the TIFF directories) and the
-// full-size JPEG nitrojpeg finds there, not the raw data (most of the 10-30 MB); with the zero
-// padding read_file leaves. NULL if there is no such JPEG (the caller reads it all).
-static uint8_t *read_raw_jpeg(const wchar_t *path, size_t *len, int *orientation) {
-    static const wchar_t *const e[] = {L"cr2", L"nef", L"nrw", L"arw", L"raf", NULL};
-    if (!has_ext(path, e)) return NULL;
-    HANDLE f = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
-    if (f == INVALID_HANDLE_VALUE) return NULL;
-    uint8_t *out = NULL;
-    LARGE_INTEGER sz;
-    DWORD cap = 1 << 20, n = 0;   // (Nikon puts the SubIFD directories after the maker notes: ~270 KB in)
-    uint8_t *hdr = malloc(cap);
-    size_t off, size;
-    if (hdr && GetFileSizeEx(f, &sz) && ReadFile(f, hdr, cap, &n, NULL) && n > 0 &&
-        !nj_find_embedded(hdr, n, &off, &size, orientation) && off < (uint64_t)sz.QuadPart &&
-        size <= (uint64_t)sz.QuadPart - off && size < ((size_t)1 << 31) && (out = malloc(size + 64))) {
-        LARGE_INTEGER at = {.QuadPart = (LONGLONG)off};
-        DWORD got = 0;
-        if (SetFilePointerEx(f, at, NULL, FILE_BEGIN) && ReadFile(f, out, (DWORD)size, &got, NULL) && got == size) {
-            memset(out + size, 0, 64);
-            *len = size;
-        } else {
-            free(out);
-            out = NULL;
-        }
-    }
-    free(hdr);
-    CloseHandle(f);
-    return out;
-}
-
-static int is_psd_name(const wchar_t *p) {
-    static const wchar_t *const e[] = {L"psd", L"psb", NULL};
-    return has_ext(p, e);
-}
 
 #ifdef NV_VECTOR
 #ifdef NV_SVG
@@ -962,11 +836,11 @@ static void cdr_free(void *doc) { nitrocdr_free(doc); }
 #endif
 
 // An SVG / CDR / CMX file by its name: the document (one reference), else NULL.
-static VectorDoc *load_vector(const wchar_t *path, const uint8_t *data, size_t len) {
+static VectorDoc *load_vector(const char *path, const uint8_t *data, size_t len) {   // (path: UTF-8)
     VectorDoc v = {0};
 #ifdef NV_SVG
-    static const wchar_t *const svg_exts[] = {L"svg", NULL};
-    if (has_ext(path, svg_exts) && (v.doc = nitrosvg_load(data, len))) {
+    static const char *const svg_exts[] = {"svg", NULL};
+    if (nv_has_ext(path, svg_exts) && (v.doc = nitrosvg_load(data, len))) {
         v.render = svg_render;
         v.size = svg_size;
         v.free = svg_free;
@@ -975,8 +849,8 @@ static VectorDoc *load_vector(const wchar_t *path, const uint8_t *data, size_t l
     }
 #endif
 #ifdef NV_CDR
-    static const wchar_t *const cdr_exts[] = {L"cdr", L"cmx", NULL};
-    if (!v.doc && has_ext(path, cdr_exts) && (v.doc = nitrocdr_load(data, len))) {
+    static const char *const cdr_exts[] = {"cdr", "cmx", NULL};
+    if (!v.doc && nv_has_ext(path, cdr_exts) && (v.doc = nitrocdr_load(data, len))) {
         v.render = cdr_render;
         v.size = cdr_size;
         v.free = cdr_free;
@@ -1027,12 +901,15 @@ static uint8_t *decode_vector_page(VectorDoc *v, int page, Decoded *d, size_t *c
 #endif
 
 // Decodes one file and hands it to the GPU. NULL: cannot be decoded.
-static Decoded *decode_file(const wchar_t *path) {
+static Decoded *decode_file(const wchar_t *wpath) {
     double t0 = now_ms();
     size_t len = 0;
     uint8_t *data = NULL;
-    if (is_psd_name(path)) {
-        data = read_psd_merged(path, &len);
+    char *path = utf8_dup(wpath);
+    if (!path) return NULL;
+    static const char *const psd_exts[] = {"psd", "psb", NULL};
+    if (nv_has_ext(path, psd_exts)) {
+        data = nv_read_psd_merged(path, &len);
         ps_info pi;
         if (data && (ps_read_info(data, len, &pi) || !pi.supported || pi.width > MAX_TEX || pi.height > MAX_TEX)) {
             free(data);   // WIC gets the whole file
@@ -1041,12 +918,15 @@ static Decoded *decode_file(const wchar_t *path) {
     }
     // a camera raw (CR2, NEF ...) shows its full-size JPEG (nitrojpeg finds it): only that is read
     int raw_orientation = 0, orient = 0, raw_read = 0;
-    if (!data && (data = read_raw_jpeg(path, &len, &orient))) {
+    if (!data && (data = nv_read_raw_jpeg(path, &len, &orient))) {
         raw_orientation = orient;   // (0: the JPEG's own, RAF)
         raw_read = 1;
     }
-    if (!data) data = read_file(path, &len);
-    if (!data) return NULL;
+    if (!data) data = nv_read_file(path, &len);
+    if (!data) {
+        free(path);
+        return NULL;
+    }
     double t1 = now_ms();
     Decoded *d = calloc(1, sizeof *d);
     if (d) d->serial = next_serial();
@@ -1077,16 +957,21 @@ static Decoded *decode_file(const wchar_t *path) {
     }
     if (!raw_read && !nj_find_embedded(data, len, &eoff, &esize, &orient) && eoff < len && esize <= len - eoff) {
         memmove(data, data + eoff, esize);   // (a raw file with another extension: read whole)
-        memset(data + esize, 0, 64);         // (the zero padding read_file leaves after the data)
+        memset(data + esize, 0, 64);         // (the zero padding nv_read_file leaves after the data)
         len = esize;
         raw_orientation = orient;
     }
 #ifdef NV_VECTOR
     VectorDoc *vec = load_vector(path, data, len);
+    free(path);
+    path = NULL;
     if (vec) {
         buf = decode_vector_page(vec, 0, d, &cap);
         vec_unref(vec);   // (d keeps its own reference)
     } else
+#else
+    free(path);
+    path = NULL;
 #endif
     if (len >= 8 && !memcmp(data, "\x89PNG\r\n\x1a\n", 8)) {
         np_info pi;   // nitropng: 8-bit gray / gray+alpha / RGB / RGBA, non-interlaced: the rows to the GPU
@@ -2444,9 +2329,11 @@ static void on_drop(HDROP drop) {
 // O: open images, Shift+O: a folder (Windows' own dialog); also when started without files.
 static void open_dialog(int folder) {
     static wchar_t pattern[1024];
-    if (!pattern[0])
-        for (int i = 0; g_exts[i]; i++)
-            swfmt(pattern + wcslen(pattern), 1024 - wcslen(pattern), L"%ls*.%ls", i ? L";" : L"", g_exts[i]);
+    if (!pattern[0]) {
+        char p[1024];
+        nv_ext_list(p, sizeof p, "*.", ";");
+        MultiByteToWideChar(CP_UTF8, 0, p, -1, pattern, 1024);
+    }
     IFileOpenDialog *dlg;
     if (FAILED(CoCreateInstance(&CLSID_FileOpenDialog, NULL, CLSCTX_INPROC_SERVER, &IID_IFileOpenDialog, (void **)&dlg))) return;
     FILEOPENDIALOGOPTIONS o = 0;
@@ -2909,7 +2796,9 @@ static int run_selftest(FileList *fl) {
         ID3D11DeviceContext_CopySubresourceRegion(g_ctx, (ID3D11Resource *)stg, 0, 0, 0, 0, (ID3D11Resource *)d->tex, 0, NULL);
         D3D11_MAPPED_SUBRESOURCE m;
         size_t len;
-        uint8_t *file = read_file(fl->v[i], &len);
+        char *u = utf8_dup(fl->v[i]);
+        uint8_t *file = u ? nv_read_file(u, &len) : NULL;
+        free(u);
         Decoded r = {0};
         size_t cap = 0;
         uint8_t *ref = file ? decode_wic(file, len, &r, &cap) : NULL;

@@ -62,6 +62,9 @@ FRAMEWORKS := -framework Cocoa -framework Metal -framework MetalKit -framework Q
               -framework VideoToolbox -framework CoreMedia -framework CoreVideo
 DEC_SRC    := src/nitrojpeg.c src/nitropng.c src/nitropsd.c
 DEC_HDR    := src/nitrojpeg.h src/nitropng.h src/nitropsd.h src/nitro_os.h
+# what the four viewers share (compiled into each with its own NV_* defines)
+VIEWER_SRC := src/nitro_load.c
+VIEWER_HDR := src/nitro_load.h
 
 # Linux library: the decoders in one native C library (JPEG, PNG, PSD, and HEIC, DNG, WebP, TIFF).
 # Keep dedicated PIC objects so the existing benchmark/test objects stay unchanged.
@@ -81,10 +84,10 @@ GNOME_LIBS      = $(shell pkg-config --libs $(GNOME_PKGS) 2>/dev/null)
 GNOME_DIR      := src/gnome
 GNOME_RES      := build/gnome/nitroview-resources.c
 GNOME_SRC      := $(GNOME_DIR)/main.c $(GNOME_DIR)/nitro-window.c $(GNOME_DIR)/nitro-view.c $(GNOME_DIR)/nitro-image.c \
-                  $(GNOME_DIR)/nitro-convert.c $(GNOME_DIR)/nitro-loader.c $(GNOME_RES)
+                  $(GNOME_DIR)/nitro-convert.c $(GNOME_DIR)/nitro-loader.c $(VIEWER_SRC) $(GNOME_RES)
 GNOME_HDR      := $(GNOME_DIR)/nitro-window.h $(GNOME_DIR)/nitro-view.h $(GNOME_DIR)/nitro-image.h $(GNOME_DIR)/nitro-convert.h \
                   $(GNOME_DIR)/nitro-loader.h \
-                  src/nitro_os.h
+                  src/nitro_os.h $(VIEWER_HDR)
 GNOME_BIN      := nitroview-gnome
 GNOME_APP_ID   := com.github.gereoffy.nitroview
 GNOME_DESKTOP  := build/gnome/$(GNOME_APP_ID).desktop
@@ -281,10 +284,10 @@ build/icon.inc: packaging/icon.png
 	@mkdir -p build
 	cd packaging && xxd -i icon.png > ../build/icon.inc
 
-$(SDL_BIN): src/nitroview_sdl.c build/icon.inc $(SDL_DEC) $(SDL_VEC) $(SDL_AVIF) $(DEC_HDR) src/nitroheic.h src/nitrodng.h src/nitrowebp.h \
+$(SDL_BIN): src/nitroview_sdl.c $(VIEWER_SRC) $(VIEWER_HDR) build/icon.inc $(SDL_DEC) $(SDL_VEC) $(SDL_AVIF) $(DEC_HDR) src/nitroheic.h src/nitrodng.h src/nitrowebp.h \
             src/nitrotiff.h src/nitroavif.h src/nitrosvg.h src/nitrocdr.h
 	@test -f $(SDL3_DIR)/lib/libSDL3.a -a -f third_party/stb_image.h || { echo "missing SDL3 / stb_image: run scripts/get-deps.sh first"; exit 1; }
-	$(CC) $(CFLAGS) $(SDL_VDEFS) -Isrc -Ibuild -Ithird_party -I$(SDL3_DIR)/include src/nitroview_sdl.c $(SDL_DEC) $(SDL_AVIF) \
+	$(CC) $(CFLAGS) $(SDL_VDEFS) -Isrc -Ibuild -Ithird_party -I$(SDL3_DIR)/include src/nitroview_sdl.c $(VIEWER_SRC) $(SDL_DEC) $(SDL_AVIF) \
 	  $(SDL_VEC) $(SDL_LIBS) $(SDL_VLIBS) $(THREADLIBS) -lm -o $@
 
 sdl: $(SDL_BIN)
@@ -304,7 +307,7 @@ $(DIST_DIR)/libnitrocdr.a: CDR_C += $(addprefix $(ZLIB)/,adler32.c crc32.c infla
 $(DIST_DIR)/libnitrocdr.a: CDR_DEFS += -I$(ZLIB)
 $(DIST_DIR)/libnitrocdr.a: src/nitrocdr.cpp src/nitrocdr.h $(CDR_STAMP)
 	$(call cdr_lib,-march=$(DIST_ARCH) -I$(ZLIB))
-$(DIST_DIR)/nitroview-sdl: src/nitroview_sdl.c build/icon.inc $(DEC_SRC) $(DEC_HDR) src/nitroheic.c src/nitroheic.h src/nitrohevc.c src/nitrohevc.h \
+$(DIST_DIR)/nitroview-sdl: src/nitroview_sdl.c $(VIEWER_SRC) $(VIEWER_HDR) build/icon.inc $(DEC_SRC) $(DEC_HDR) src/nitroheic.c src/nitroheic.h src/nitrohevc.c src/nitrohevc.h \
                            src/nitrodng.c src/nitrodng.h src/nitrowebp.c src/nitrowebp.h src/nitrotiff.c src/nitrotiff.h src/nitrosvg.h \
                            src/nitrocdr.h src/nitroavif.c src/nitroavif.h src/heif.h $(DIST_VEC)
 	@test -f $(SDL3_DIR)/lib/libSDL3.a -a -f third_party/stb_image.h || { echo "missing SDL3 / stb_image: run scripts/get-deps.sh first"; exit 1; }
@@ -312,7 +315,7 @@ $(DIST_DIR)/nitroview-sdl: src/nitroview_sdl.c build/icon.inc $(DEC_SRC) $(DEC_H
 	$(CC) -O3 -march=$(DIST_ARCH) $(X86JCC) $(DEFS) -fblocks -Wall -Wextra -Wno-unused-parameter \
 	  $(if $(filter %libnitrosvg.a,$(DIST_VEC)),-DNV_SVG) $(if $(filter %libnitrocdr.a,$(DIST_VEC)),-DNV_CDR) \
 	  $(if $(filter 1,$(DAV1D)),-DNV_DAV1D -I$(DAV1D_DIR)/include src/nitroavif.c $(DAV1D_LIB)) \
-	  -Isrc -Ibuild -Ithird_party -I$(SDL3_DIR)/include src/nitroview_sdl.c $(DEC_SRC) src/nitroheic.c src/nitrohevc.c src/nitrodng.c \
+	  -Isrc -Ibuild -Ithird_party -I$(SDL3_DIR)/include src/nitroview_sdl.c $(VIEWER_SRC) $(DEC_SRC) src/nitroheic.c src/nitrohevc.c src/nitrodng.c \
 	  src/nitrowebp.c src/nitrotiff.c $(DIST_VEC) $(SDL_LIBS) $(if $(DIST_VEC),-Wl$(COMMA)-Bstatic -lstdc++ -Wl$(COMMA)-Bdynamic) -static-libgcc \
 	  -lpthread -lm -o $@
 	@echo "$@ needs: $$(objdump -p $@ | sed -n 's/ *NEEDED *//p' | tr '\n' ' ')(glibc $$(objdump -T $@ | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1 | cut -d_ -f2))"
@@ -426,8 +429,8 @@ build/shaders.inc: src/shaders.metal
 	@mkdir -p build
 	cd src && xxd -i shaders.metal > ../$@
 
-nitroview: src/nitroview.m build/shaders.inc build/nitrojpeg.o build/nitropng.o build/nitropsd.o build/nitroheic.o build/nitrohevc.o build/nitrodng.o build/nitrowebp.o build/nitrotiff.o $(VIEWER_OBJS) build/.config-$(CONFIG) Makefile
-	$(CC) $(CFLAGS) $(VIEWER_DEFS) -Ibuild -fobjc-arc src/nitroview.m build/nitrojpeg.o build/nitropng.o build/nitropsd.o build/nitroheic.o build/nitrohevc.o build/nitrodng.o build/nitrowebp.o build/nitrotiff.o $(VIEWER_OBJS) $(VIEWER_LIBS) \
+nitroview: src/nitroview.m $(VIEWER_SRC) $(VIEWER_HDR) build/shaders.inc build/nitrojpeg.o build/nitropng.o build/nitropsd.o build/nitroheic.o build/nitrohevc.o build/nitrodng.o build/nitrowebp.o build/nitrotiff.o $(VIEWER_OBJS) build/.config-$(CONFIG) Makefile
+	$(CC) $(CFLAGS) $(VIEWER_DEFS) -Ibuild -Isrc -fobjc-arc src/nitroview.m $(VIEWER_SRC) build/nitrojpeg.o build/nitropng.o build/nitropsd.o build/nitroheic.o build/nitrohevc.o build/nitrodng.o build/nitrowebp.o build/nitrotiff.o $(VIEWER_OBJS) $(VIEWER_LIBS) \
 	  $(FRAMEWORKS) -framework ImageIO -o $@
 	@echo "built nitroview (libjpeg-turbo fallback: $(if $(filter 1,$(TURBOJPEG)),yes,no), Wuffs PNG: $(if $(filter 1,$(WUFFS)),yes,no), SVG: $(if $(filter 1,$(SVG)),yes,no), CDR: $(if $(filter 1,$(CDR)),yes,no), AVIF: $(if $(filter 1,$(DAV1D)),dav1d,ImageIO), ImageIO: always)"
 
@@ -460,15 +463,15 @@ build/app-%/libnitrocdr.a: src/nitrocdr.cpp src/nitrocdr.h $(CDR_STAMP)
 	$(call cdr_lib,-arch $* $(MAC_MIN) $(APPCPU_$*))
 build/app-%/mimalloc.o: src/nitroalloc.cpp $(wildcard $(MI)/.version-*)
 	$(call mimalloc_objs,-arch $* $(MAC_MIN) $(APPCPU_$*))
-build/app-%/nitroview: src/nitroview.m build/shaders.inc $(DEC_SRC) $(DEC_HDR) src/nitroheic.c src/nitroheic.h src/nitrohevc.c src/nitrohevc.h src/nitrodng.c src/nitrodng.h src/nitrowebp.c src/nitrowebp.h src/nitrotiff.c src/nitrotiff.h src/nitroavif.c src/nitroavif.h src/heif.h $(if $(filter 1,$(WUFFS)),build/app-%/png_wuffs.o) \
+build/app-%/nitroview: src/nitroview.m $(VIEWER_SRC) $(VIEWER_HDR) build/shaders.inc $(DEC_SRC) $(DEC_HDR) src/nitroheic.c src/nitroheic.h src/nitrohevc.c src/nitrohevc.h src/nitrodng.c src/nitrodng.h src/nitrowebp.c src/nitrowebp.h src/nitrotiff.c src/nitrotiff.h src/nitroavif.c src/nitroavif.h src/heif.h $(if $(filter 1,$(WUFFS)),build/app-%/png_wuffs.o) \
                        $(if $(filter 1,$(SVG)),build/app-%/libnitrosvg.a) $(if $(filter 1,$(CDR)),build/app-%/libnitrocdr.a) \
                        $(if $(filter 1,$(MIMALLOC)),build/app-%/mimalloc.o) \
                        build/.config-$(CONFIG) Makefile
 	@mkdir -p $(@D)
-	$(CC) -arch $* $(MAC_MIN) -O3 $(APPCPU_$*) -Wall -Wextra -Wno-unused-parameter -Ibuild \
+	$(CC) -arch $* $(MAC_MIN) -O3 $(APPCPU_$*) -Wall -Wextra -Wno-unused-parameter -Ibuild -Isrc \
 	  $(if $(call ljt_has,$*),-DNV_TURBOJPEG -I$(LJT)/include) $(if $(filter 1,$(WUFFS)),-DNV_WUFFS) $(if $(filter 1,$(SVG)),-DNV_SVG) $(if $(filter 1,$(CDR)),-DNV_CDR) \
 	  $(if $(call dav1d_has,$*),-DNV_DAV1D -I$(DAV1D_DIR)/include src/nitroavif.c $(DAV1D_LIB)) \
-	  -fobjc-arc src/nitroview.m $(DEC_SRC) src/nitroheic.c src/nitrohevc.c src/nitrodng.c src/nitrowebp.c src/nitrotiff.c $(if $(filter 1,$(WUFFS)),$(@D)/png_wuffs.o) $(if $(filter 1,$(CDR)),$(@D)/libnitrocdr.a -liconv -lz) $(if $(filter 1,$(SVG)),$(@D)/libnitrosvg.a -lc++) \
+	  -fobjc-arc src/nitroview.m $(VIEWER_SRC) $(DEC_SRC) src/nitroheic.c src/nitrohevc.c src/nitrodng.c src/nitrowebp.c src/nitrotiff.c $(if $(filter 1,$(WUFFS)),$(@D)/png_wuffs.o) $(if $(filter 1,$(CDR)),$(@D)/libnitrocdr.a -liconv -lz) $(if $(filter 1,$(SVG)),$(@D)/libnitrosvg.a -lc++) \
 	  $(if $(filter 1,$(MIMALLOC)),$(@D)/mimalloc.o $(@D)/nitroalloc.o) $(if $(call ljt_has,$*),$(LJT)/lib/libturbojpeg.a -Wl$(COMMA)-w) $(FRAMEWORKS) -framework ImageIO -o $@
 build/nitroview-universal: $(foreach a,$(MAC_ARCHS),build/app-$(a)/nitroview)
 	lipo -create $^ -output $@
@@ -604,10 +607,10 @@ build/win/libnitrocdr.a: CDR_C += $(addprefix $(ZLIB)/,adler32.c crc32.c inflate
 build/win/libnitrocdr.a: CDR_DEFS += -I$(ZLIB)
 build/win/libnitrocdr.a: src/nitrocdr.cpp src/nitrocdr.h $(CDR_STAMP)
 	$(call cdr_lib,-march=$(WINARCH) -I$(ZLIB))
-nitroview.exe: src/nitroview_win.c $(DEC_SRC) $(DEC_HDR) src/nitroheic.c src/nitroheic.h src/nitrohevc.c src/nitrohevc.h src/nitrodng.c src/nitrodng.h src/nitrowebp.c src/nitrowebp.h \
+nitroview.exe: src/nitroview_win.c $(VIEWER_SRC) $(VIEWER_HDR) $(DEC_SRC) $(DEC_HDR) src/nitroheic.c src/nitroheic.h src/nitrohevc.c src/nitrohevc.h src/nitrodng.c src/nitrodng.h src/nitrowebp.c src/nitrowebp.h \
                src/nitrotiff.c src/nitrotiff.h src/nitroavif.c src/nitroavif.h src/heif.h \
                build/nitroview_res.o $(WIN_OBJS) src/nitrosvg.h src/nitrocdr.h
-	$(WINCC) $(WINFLAGS) $(WIN_DEFS) -Ibuild -Isrc -municode src/nitroview_win.c $(DEC_SRC) src/nitroheic.c src/nitrohevc.c src/nitrodng.c src/nitrowebp.c src/nitrotiff.c \
+	$(WINCC) $(WINFLAGS) $(WIN_DEFS) -Ibuild -Isrc -municode src/nitroview_win.c $(VIEWER_SRC) $(DEC_SRC) src/nitroheic.c src/nitrohevc.c src/nitrodng.c src/nitrowebp.c src/nitrotiff.c \
 	  $(WIN_AVIF) build/nitroview_res.o $(WIN_OBJS) $(WINLIBS) $(WIN_CXXLIBS) -o $@
 windows: nitroview.exe bench/nbench.exe bench/psdverify.exe
 	@echo "built nitroview.exe bench/nbench.exe bench/psdverify.exe (Windows x64, $(WINARCH), SVG: $(if $(filter 1,$(SVG)),yes,no), CDR: $(if $(filter 1,$(CDR)),yes,no), AVIF: $(if $(WIN_AVIF),yes,no))"

@@ -34,6 +34,7 @@
 #include "nitrodng.h"
 #include "nitrowebp.h"
 #include "nitrotiff.h"
+#include "nitro_load.h"   // reading image files, the image extensions (shared by the viewers)
 #ifdef NV_DAV1D
 #include "nitroavif.h"   // AVIF: AV1 through dav1d
 #endif
@@ -335,90 +336,6 @@ static int pread_all(SDL_IOStream *f, void *buf, size_t n, uint64_t off) {
     return read_all(f, buf, n);
 }
 
-static uint8_t *read_file(const char *path, size_t *len) {
-    SDL_IOStream *f = SDL_IOFromFile(path, "rb");
-    if (!f) return NULL;
-    Sint64 sz = SDL_GetIOSize(f);
-    uint8_t *d = NULL;
-    if (sz > 0 && (uint64_t)sz < ((uint64_t)1 << 40) && (d = malloc((size_t)sz + 64))) {   // decoders may look a few bytes ahead
-        if (read_all(f, d, (size_t)sz)) {
-            free(d);
-            d = NULL;
-        } else {
-            memset(d + sz, 0, 64);
-            *len = (size_t)sz;
-        }
-    }
-    SDL_CloseIO(f);
-    return d;
-}
-
-// PSD/PSB: reads only what the merged image needs (see nitroview.m): header +
-// colour mode data + image resources + an empty layer section that keeps the
-// layer count's sign + the merged image. NULL if it is not a sane PSD.
-static uint8_t *read_psd_merged(const char *path, size_t *len) {
-    SDL_IOStream *f = SDL_IOFromFile(path, "rb");
-    if (!f) return NULL;
-    uint8_t *out = NULL, h[26], b[8];
-    Sint64 sz = SDL_GetIOSize(f);
-    if (sz <= 0 || pread_all(f, h, 26, 0) || memcmp(h, "8BPS", 4)) goto done;
-    {
-        uint64_t size = (uint64_t)sz, pos = 26;
-        int psb = h[5] == 2;
-        size_t L = psb ? 8 : 4;
-        for (int k = 0; k < 2; k++) {
-            if (pread_all(f, b, 4, pos)) goto done;
-            pos += 4 + ((uint64_t)b[0] << 24 | (uint64_t)b[1] << 16 | (uint64_t)b[2] << 8 | b[3]);
-            if (pos > size) goto done;
-        }
-        uint64_t head = pos, lm = 0;
-        if (pread_all(f, b, L, pos)) goto done;
-        for (size_t i = 0; i < L; i++) lm = lm << 8 | b[i];
-        uint64_t x = pos + L + lm;
-        if (lm > size || x + 2 > size) goto done;
-        int16_t count = 0;
-        if (lm >= L + 2) {
-            uint8_t c[10];
-            if (pread_all(f, c, L + 2, pos + L)) goto done;
-            uint64_t li = 0;
-            for (size_t i = 0; i < L; i++) li = li << 8 | c[i];
-            if (li >= 2) count = (int16_t)(c[L] << 8 | c[L + 1]);
-        }
-        uint64_t merged = size - x, total = head + L + L + 2 + merged;
-        out = malloc((size_t)total + 64);
-        if (!out) goto done;
-        if (pread_all(f, out, (size_t)head, 0)) { free(out); out = NULL; goto done; }
-        uint8_t *q = out + head;
-        uint64_t slim = L + 2;
-        for (size_t i = 0; i < L; i++) q[i] = (uint8_t)(slim >> (8 * (L - 1 - i)));
-        for (size_t i = 0; i < L; i++) q[L + i] = (uint8_t)(2 >> (8 * (L - 1 - i)));
-        q[2 * L] = (uint8_t)((uint16_t)count >> 8);
-        q[2 * L + 1] = (uint8_t)count;
-        if (pread_all(f, q + 2 * L + 2, (size_t)merged, x)) { free(out); out = NULL; goto done; }
-        memset(out + total, 0, 64);
-        *len = (size_t)total;
-    }
-done:
-    SDL_CloseIO(f);
-    return out;
-}
-
-static int has_ext(const char *path, const char *const *exts) {
-    const char *dot = strrchr(base_name(path), '.');
-    if (!dot) return 0;
-    for (int i = 0; exts[i]; i++)
-        if (!SDL_strcasecmp(dot + 1, exts[i])) return 1;
-    return 0;
-}
-static const char *const g_exts[] = {"jpg", "jpeg", "jpe", "jfif", "png", "heic", "heif", "avif", "webp", "tif", "tiff", "gif", "bmp", "tga",
-                                     "psd", "psb", "cr2", "nef", "nrw", "arw", "raf", "dng",
-#ifdef NV_SVG
-                                     "svg",
-#endif
-#ifdef NV_CDR
-                                     "cdr", "cmx",
-#endif
-                                     NULL};
 
 typedef struct { char **v; int n, cap; } FileList;
 
@@ -459,6 +376,8 @@ static int cmp_names(const void *a, const void *b) {
     return natcmp(base_name(*(char *const *)a), base_name(*(char *const *)b));
 }
 
+static const char *const g_more_exts[] = {"tga", NULL};   // (stb_image reads these too)
+
 static int is_dir(const char *p) {
     SDL_PathInfo info;
     return SDL_GetPathInfo(p, &info) && info.type == SDL_PATHTYPE_DIRECTORY;
@@ -479,7 +398,7 @@ static void list_dir(FileList *out, const char *dir, const char *pattern, int an
     if (!names) return;
     int first = out->n;
     for (int i = 0; i < n; i++) {
-        if (!any_ext && !has_ext(names[i], g_exts)) continue;
+        if (!any_ext && !nv_is_image_name(names[i]) && !nv_has_ext(names[i], g_more_exts)) continue;
         char *p = *dir ? join_path(dir, names[i]) : SDL_strdup(names[i]);
         SDL_PathInfo info;
         if (p && SDL_GetPathInfo(p, &info) && info.type == SDL_PATHTYPE_FILE) fl_add(out, p);
@@ -952,37 +871,10 @@ static uint8_t *decode_stb(const uint8_t *bytes, size_t len, Decoded *d, size_t 
     return buf;
 }
 
-// Camera raw files (CR2, NEF ...): reads only the start (the TIFF directories) and the
-// full-size JPEG nitrojpeg finds there, not the raw data (most of the 10-30 MB); with the zero
-// padding read_file leaves. NULL if there is no such JPEG (the caller reads it all).
-static uint8_t *read_raw_jpeg(const char *path, size_t *len, int *orientation) {
-    static const char *const e[] = {"cr2", "nef", "nrw", "arw", "raf", NULL};
-    if (!has_ext(path, e)) return NULL;
-    SDL_IOStream *f = SDL_IOFromFile(path, "rb");
-    if (!f) return NULL;
-    uint8_t *out = NULL;
-    Sint64 sz = SDL_GetIOSize(f);
-    size_t cap = 1 << 20;   // (Nikon puts the SubIFD directories after the maker notes: ~270 KB in)
-    uint8_t *hdr = malloc(cap);
-    size_t n = hdr ? SDL_ReadIO(f, hdr, cap) : 0, off, size;
-    if (n > 0 && sz > 0 && !nj_find_embedded(hdr, n, &off, &size, orientation) && off < (uint64_t)sz &&
-        size <= (uint64_t)sz - off && size < ((size_t)1 << 31) && (out = malloc(size + 64))) {
-        if (!pread_all(f, out, size, off)) {
-            memset(out + size, 0, 64);
-            *len = size;
-        } else {
-            free(out);
-            out = NULL;
-        }
-    }
-    free(hdr);
-    SDL_CloseIO(f);
-    return out;
-}
 
 static int is_psd_name(const char *p) {
     static const char *const e[] = {"psd", "psb", NULL};
-    return has_ext(p, e);
+    return nv_has_ext(p, e);
 }
 
 #ifdef NV_VECTOR
@@ -1010,7 +902,7 @@ static VectorDoc *load_vector(const char *path, const uint8_t *data, size_t len)
     VectorDoc v = {0};
 #ifdef NV_SVG
     static const char *const svg_exts[] = {"svg", NULL};
-    if (has_ext(path, svg_exts) && (v.doc = nitrosvg_load(data, len))) {
+    if (nv_has_ext(path, svg_exts) && (v.doc = nitrosvg_load(data, len))) {
         v.render = svg_render;
         v.size = svg_size;
         v.free = svg_free;
@@ -1020,7 +912,7 @@ static VectorDoc *load_vector(const char *path, const uint8_t *data, size_t len)
 #endif
 #ifdef NV_CDR
     static const char *const cdr_exts[] = {"cdr", "cmx", NULL};
-    if (!v.doc && has_ext(path, cdr_exts) && (v.doc = nitrocdr_load(data, len))) {
+    if (!v.doc && nv_has_ext(path, cdr_exts) && (v.doc = nitrocdr_load(data, len))) {
         v.render = cdr_render;
         v.size = cdr_size;
         v.free = cdr_free;
@@ -1089,7 +981,7 @@ static Decoded *decode_file(const char *path) {
     size_t len = 0;
     uint8_t *data = NULL;
     if (is_psd_name(path)) {
-        data = read_psd_merged(path, &len);
+        data = nv_read_psd_merged(path, &len);
         ps_info pi;
         if (data && (ps_read_info(data, len, &pi) || !pi.supported || pi.width > g_max_tex || pi.height > g_max_tex)) {
             free(data);   // stb_image gets the whole file
@@ -1098,11 +990,11 @@ static Decoded *decode_file(const char *path) {
     }
     // a camera raw (CR2, NEF ...) shows its full-size JPEG (nitrojpeg finds it): only that is read
     int raw_orientation = 0, orient = 0, raw_read = 0;
-    if (!data && (data = read_raw_jpeg(path, &len, &orient))) {
+    if (!data && (data = nv_read_raw_jpeg(path, &len, &orient))) {
         raw_orientation = orient;   // (0: the JPEG's own, RAF)
         raw_read = 1;
     }
-    if (!data) data = read_file(path, &len);
+    if (!data) data = nv_read_file(path, &len);
     if (!data) return NULL;
     double t1 = now_ms();
     Decoded *d = calloc(1, sizeof *d);
@@ -1134,7 +1026,7 @@ static Decoded *decode_file(const char *path) {
     }
     if (!raw_read && !nj_find_embedded(data, len, &eoff, &esize, &orient) && eoff < len && esize <= len - eoff) {
         memmove(data, data + eoff, esize);   // (a raw file with another extension: read whole)
-        memset(data + esize, 0, 64);         // (the zero padding read_file leaves after the data)
+        memset(data + esize, 0, 64);         // (the zero padding nv_read_file leaves after the data)
         len = esize;
         raw_orientation = orient;
     }
@@ -2051,15 +1943,12 @@ static void SDLCALL dialog_done(void *userdata, const char *const *files, int fi
 }
 
 static void open_dialog(int folder) {   // (SDL has no dialog for files and folders at once)
-    static const SDL_DialogFileFilter f[] = {{"Images", "jpg;jpeg;jpe;jfif;png;heic;heif;avif;webp;tif;tiff;gif;bmp;tga;psd;psb;cr2;nef;nrw;arw;raf;dng"
-#ifdef NV_SVG
-                                                         ";svg"
-#endif
-#ifdef NV_CDR
-                                                         ";cdr;cmx"
-#endif
-                                              },
-                                             {"All files", "*"}};
+    static char pattern[512];
+    if (!pattern[0]) {
+        nv_ext_list(pattern, sizeof pattern - 8, "", ";");
+        strcat(pattern, ";tga");
+    }
+    const SDL_DialogFileFilter f[] = {{"Images", pattern}, {"All files", "*"}};
     if (folder) SDL_ShowOpenFolderDialog(dialog_done, NULL, V.win, NULL, false);
     else SDL_ShowOpenFileDialog(dialog_done, NULL, V.win, f, 2, NULL, true);
 }
@@ -2744,7 +2633,7 @@ static int run_selftest(FileList *fl) {
         glReadPixels(0, 0, d->width, d->height, GL_RGBA, GL_UNSIGNED_BYTE, g);
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
         size_t len;
-        uint8_t *file = read_file(fl->v[i], &len);
+        uint8_t *file = nv_read_file(fl->v[i], &len);
         int rw = 0, rh = 0, rn = 0;
         uint8_t *ref = file && len < INT32_MAX ? stbi_load_from_memory(file, (int)len, &rw, &rh, &rn, 4) : NULL;
         int png16 = file && len > 24 && !memcmp(file, "\x89PNG", 4) && file[24] == 16;   // (stb_image truncates to 8 bits, we round)
