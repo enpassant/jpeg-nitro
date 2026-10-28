@@ -65,9 +65,13 @@ static void page(NitroWindow *self, gint delta);
 static void size_window(NitroWindow *self, gboolean fill);
 
 static gboolean supported_extension(const char *name) {
-    // our decoders, CorelDRAW (nitrocdr) and GTK's loaders (see nitro-image.c); SVG with or without nitrosvg
-    static const char *const svg[] = {"svg", NULL};
-    return name && (nv_is_image_name(name) || nv_has_ext(name, svg));
+    // our decoders and GTK's loaders (see nitro-image.c); SVG with or without nitrosvg, CorelDRAW with nitrocdr
+    static const char *const more[] = {"svg",
+#ifdef NV_CDR
+                                       "cdr", "cmx",
+#endif
+                                       NULL};
+    return name && (nv_is_image_name(name) || nv_has_ext(name, more));
 }
 
 static gint compare_files(gconstpointer a, gconstpointer b) {

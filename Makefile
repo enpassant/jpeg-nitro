@@ -70,7 +70,7 @@ VIEWER_HDR := src/nitro_load.h src/nitro_prefetch.h src/nitro_view.h
 # Keep dedicated PIC objects so the existing benchmark/test objects stay unchanged.
 LIBDIR     := build/lib
 LIB_OBJS   := $(LIBDIR)/nitrojpeg.o $(LIBDIR)/nitropng.o $(LIBDIR)/nitropsd.o $(LIBDIR)/nitroheic.o $(LIBDIR)/nitrohevc.o \
-              $(LIBDIR)/nitrodng.o $(LIBDIR)/nitrowebp.o $(LIBDIR)/nitrotiff.o
+              $(LIBDIR)/nitrodng.o $(LIBDIR)/nitrowebp.o $(LIBDIR)/nitrotiff.o $(LIBDIR)/nitro_load.o
 LIB_SHARED := $(LIBDIR)/libnitro.so
 LIB_STATIC := $(LIBDIR)/libnitro.a
 LIB_CFLAGS := $(CFLAGS) -fPIC
@@ -222,6 +222,9 @@ $(LIBDIR)/nitrotiff.o: src/nitrotiff.c src/nitrotiff.h src/nitropng.h src/nitro_
 	@mkdir -p $(LIBDIR)
 	$(CC) $(LIB_CFLAGS) -c $< -o $@
 
+$(LIBDIR)/nitro_load.o: src/nitro_load.c src/nitro_load.h $(DEC_HDR) src/nitroheic.h src/nitrodng.h src/nitrowebp.h src/nitrotiff.h
+	@mkdir -p $(LIBDIR)
+	$(CC) $(LIB_CFLAGS) -c $< -o $@
 $(LIBDIR)/nitroavif.o: src/nitroavif.c src/nitroavif.h src/heif.h src/nitro_os.h
 	@mkdir -p $(LIBDIR)
 	$(CC) $(LIB_CFLAGS) -I$(DAV1D_DIR)/include -c $< -o $@

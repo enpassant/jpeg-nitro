@@ -1764,8 +1764,17 @@ static NSArray<NSString *> *collect_files(NSArray<NSString *> *args) {
         if (![fm fileExistsAtPath:a isDirectory:&dir]) { fprintf(stderr, "no such file: %s\n", a.UTF8String); continue; }
         if (!dir) { [out addObject:a]; continue; }
         NSArray *items = [[fm contentsOfDirectoryAtPath:a error:nil] sortedArrayUsingSelector:@selector(localizedStandardCompare:)];
+        static const char *const more[] = {   // the vector formats, beside nv_image_exts
+#ifdef NV_SVG
+            "svg",
+#endif
+#ifdef NV_CDR
+            "cdr", "cmx",
+#endif
+            NULL};
         for (NSString *f in items)
-            if (nv_is_image_name(f.UTF8String)) [out addObject:[a stringByAppendingPathComponent:f]];
+            if (nv_is_image_name(f.UTF8String) || nv_has_ext(f.UTF8String, more))
+                [out addObject:[a stringByAppendingPathComponent:f]];
     }
     return out;
 }

@@ -26,14 +26,7 @@
 // file names
 
 const char *const nv_image_exts[] = {"jpg", "jpeg", "jpe", "jfif", "png", "heic", "heif", "avif", "webp", "tif", "tiff",
-                                     "gif", "bmp", "psd", "psb", "cr2", "nef", "nrw", "arw", "raf", "dng",
-#ifdef NV_SVG
-                                     "svg",
-#endif
-#ifdef NV_CDR
-                                     "cdr", "cmx",
-#endif
-                                     NULL};
+                                     "gif", "bmp", "psd", "psb", "cr2", "nef", "nrw", "arw", "raf", "dng", NULL};
 
 static int lower(int c) { return c >= 'A' && c <= 'Z' ? c + 32 : c; }
 
@@ -62,21 +55,23 @@ int nv_has_ext(const char *path, const char *const *exts) {
 int nv_is_image_name(const char *path) { return nv_has_ext(path, nv_image_exts); }
 
 #ifdef _WIN32
-int nv_is_image_name_w(const wchar_t *path) {
+int nv_has_ext_w(const wchar_t *path, const char *const *exts) {
     const wchar_t *name = path, *dot = NULL;
     for (const wchar_t *c = path; *c; c++)
         if (*c == L'/' || *c == L'\\') name = c + 1;
     for (const wchar_t *c = name; *c; c++)
         if (*c == L'.') dot = c;
     if (!dot) return 0;
-    for (int i = 0; nv_image_exts[i]; i++) {
+    for (int i = 0; exts[i]; i++) {
         const wchar_t *a = dot + 1;
-        const char *b = nv_image_exts[i];
+        const char *b = exts[i];
         while (*a && *b && *a < 128 && lower((int)*a) == (int)*b) a++, b++;
         if (!*a && !*b) return 1;
     }
     return 0;
 }
+
+int nv_is_image_name_w(const wchar_t *path) { return nv_has_ext_w(path, nv_image_exts); }
 #endif
 
 char *nv_ext_list(char *buf, size_t n, const char *prefix, const char *sep) {

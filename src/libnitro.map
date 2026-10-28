@@ -25,6 +25,17 @@
         nt_read_info;
         nt_decode;
         nt_dir_size;
+        nv_read_file;
+        nv_read_psd_merged;
+        nv_read_raw_jpeg;
+        nv_read_image;
+        nv_decode;
+        nv_header_size;
+        nv_mode_name;
+        nv_has_ext;
+        nv_is_image_name;
+        nv_ext_list;
+        nv_image_exts;
     local:
         *;
 };

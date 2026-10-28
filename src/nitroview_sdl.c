@@ -344,7 +344,14 @@ static int cmp_names(const void *a, const void *b) {
     return natcmp(base_name(*(char *const *)a), base_name(*(char *const *)b));
 }
 
-static const char *const g_more_exts[] = {"tga", NULL};   // (stb_image reads these too)
+static const char *const g_more_exts[] = {"tga",   // (stb_image reads these too)
+#ifdef NV_SVG
+                                          "svg",
+#endif
+#ifdef NV_CDR
+                                          "cdr", "cmx",
+#endif
+                                          NULL};
 
 static int is_dir(const char *p) {
     SDL_PathInfo info;
@@ -1490,8 +1497,11 @@ static void SDLCALL dialog_done(void *userdata, const char *const *files, int fi
 static void open_dialog(int folder) {   // (SDL has no dialog for files and folders at once)
     static char pattern[512];
     if (!pattern[0]) {
-        nv_ext_list(pattern, sizeof pattern - 8, "", ";");
-        strcat(pattern, ";tga");
+        nv_ext_list(pattern, sizeof pattern - 32, "", ";");
+        for (int i = 0; g_more_exts[i]; i++) {
+            strcat(pattern, ";");
+            strcat(pattern, g_more_exts[i]);
+        }
     }
     const SDL_DialogFileFilter f[] = {{"Images", pattern}, {"All files", "*"}};
     if (folder) SDL_ShowOpenFolderDialog(dialog_done, NULL, V.win, NULL, false);

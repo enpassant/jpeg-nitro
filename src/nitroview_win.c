@@ -231,6 +231,15 @@ static void buf_put(uint8_t *p, size_t cap) {
 // ---------------------------------------------------------------------------
 // files
 
+static const char *const g_more_exts[] = {   // the vector formats, beside nv_image_exts
+#ifdef NV_SVG
+    "svg",
+#endif
+#ifdef NV_CDR
+    "cdr", "cmx",
+#endif
+    NULL};
+
 typedef struct { wchar_t **v; int n, cap; } FileList;
 
 static void fl_add(FileList *l, const wchar_t *p) {
@@ -258,7 +267,7 @@ static void list_dir(FileList *out, const wchar_t *dir, const wchar_t *pattern, 
     int first = out->n;
     do {
         if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
-        if (!any_ext && !nv_is_image_name_w(fd.cFileName)) continue;
+        if (!any_ext && !nv_is_image_name_w(fd.cFileName) && !nv_has_ext_w(fd.cFileName, g_more_exts)) continue;
         wchar_t p[MAX_PATH * 2];
         if (!swfmt(p, MAX_PATH * 2, L"%ls%ls%ls", dir, dl && !sep ? L"\\" : L"", fd.cFileName)) fl_add(out, p);
     } while (FindNextFileW(h, &fd));
@@ -1882,7 +1891,11 @@ static void open_dialog(int folder) {
     static wchar_t pattern[1024];
     if (!pattern[0]) {
         char p[1024];
-        nv_ext_list(p, sizeof p, "*.", ";");
+        nv_ext_list(p, sizeof p - 32, "*.", ";");
+        for (int i = 0; g_more_exts[i]; i++) {
+            strcat(p, ";*.");
+            strcat(p, g_more_exts[i]);
+        }
         MultiByteToWideChar(CP_UTF8, 0, p, -1, pattern, 1024);
     }
     IFileOpenDialog *dlg;

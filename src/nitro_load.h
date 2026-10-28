@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 A'rpi - part of jpeg-nitro (https://github.com/gereoffy/jpeg-nitro)
 //
-// nitro_load: what the viewers (nitroview.m, nitroview_sdl.c, nitroview_win.c, src/gnome) share
-// of loading an image: which files are images, reading them (a PSD's merged image only, a camera
-// raw's embedded JPEG only). Plain C, no platform code: paths are UTF-8 (on Windows they are
-// converted for the file API).
+// nitro_load: loading an image with the decoders of this library (nitrojpeg, nitropng, nitropsd,
+// nitroheic, nitrodng, nitrowebp, nitrotiff; nitroavif when built with dav1d): which files are
+// images, reading them (a PSD's merged image only, a camera raw's embedded JPEG only), trying
+// the decoders in turn, the size from a header. Plain C, no platform code: paths are UTF-8 (on
+// Windows they are converted for the file API). The viewers (nitroview.m, nitroview_sdl.c,
+// nitroview_win.c, src/gnome) build on it; so can anything else.
 #pragma once
 #include <stddef.h>
 #include <stdint.h>
@@ -13,9 +15,9 @@
 extern "C" {
 #endif
 
-// The file extensions of the images a viewer opens from a folder: our decoders' formats and
-// what every platform's fallback decoder reads (NV_SVG / NV_CDR add svg / cdr, cmx).
-// NULL-terminated, lower case, without the dot.
+// The file extensions of the raster images a viewer opens from a folder: our decoders' formats
+// and what every platform's fallback decoder reads. NULL-terminated, lower case, without the
+// dot. (The vector formats, SVG and CorelDRAW, are the viewers' own: they add those.)
 extern const char *const nv_image_exts[];
 
 // Is path's extension (case-insensitively) one of exts (NULL-terminated, without the dot)?
@@ -23,6 +25,7 @@ int nv_has_ext(const char *path, const char *const *exts);
 // ... one of nv_image_exts?
 int nv_is_image_name(const char *path);
 #ifdef _WIN32
+int nv_has_ext_w(const wchar_t *path, const char *const *exts);   // (the same for a wide path)
 int nv_is_image_name_w(const wchar_t *path);
 #endif
 // nv_image_exts as one string, each with prefix before it and sep between them (a file dialog's
