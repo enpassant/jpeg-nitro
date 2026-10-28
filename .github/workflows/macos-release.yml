@@ -1,6 +1,11 @@
 # Notarized macOS release: builds nitroview.dmg from gereoffy/jpeg-nitro at a chosen tag or
 # commit (the source is checked out as is, nothing from this repository goes into the app),
-# signs it with a Developer ID, has Apple notarize it and publishes it as a GitHub Release.
+# signs it with a Developer ID, submits it to Apple for notarization and, once Apple accepts it,
+# staples the ticket and publishes it as a GitHub Release.
+#
+# The run waits up to 20 minutes for Apple. If notarization takes longer (a team's first
+# submissions can take hours), it ends with the signed dmg and the submission ID kept as a
+# workflow artifact: "macOS release: finish" (macos-release-finish.yml) publishes it later.
 #
 # Runs only when started by hand (Actions > macOS release > Run workflow). The signing job uses
 # the "macos-release" environment: its secrets, and a required reviewer who approves each run.
@@ -34,6 +39,7 @@ permissions:
 jobs:
   dmg:
     runs-on: macos-26
+    timeout-minutes: 60
     environment: ${{ inputs.notarize && 'macos-release' || '' }}
     permissions:
       contents: write       # the release
@@ -64,14 +70,11 @@ jobs:
       - name: Fetch and build the dependencies
         run: SDL=0 scripts/get-deps.sh
 
-      - name: Import the signing certificate and notary key
+      - name: Import the signing certificate
         if: inputs.notarize
         env:
           CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
           CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
-          KEY_P8: ${{ secrets.NOTARY_KEY_P8 }}
-          KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
-          ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
         run: |
           KC="$RUNNER_TEMP/signing.keychain-db"
           KC_PASS=$(openssl rand -base64 24)
@@ -82,18 +85,48 @@ jobs:
           security import "$RUNNER_TEMP/cert.p12" -k "$KC" -P "$CERT_PASSWORD" -T /usr/bin/codesign
           security set-key-partition-list -S apple-tool:,apple: -k "$KC_PASS" "$KC" >/dev/null
           security list-keychains -d user -s "$KC" $(security list-keychains -d user | tr -d '"')
-          # the default keychain, so that notarytool keeps the profile there and make notarize finds it
-          security default-keychain -d user -s "$KC"
-          printf '%s\n' "$KEY_P8" > "$RUNNER_TEMP/notary.p8"
-          xcrun notarytool store-credentials nitroview-notary \
-            --key "$RUNNER_TEMP/notary.p8" --key-id "$KEY_ID" --issuer "$ISSUER_ID" --keychain "$KC"
-          rm -f "$RUNNER_TEMP/cert.p12" "$RUNNER_TEMP/notary.p8"
+          rm -f "$RUNNER_TEMP/cert.p12"
 
-      - name: Build, sign and notarize the dmg
+      - name: Build and sign the dmg
         if: inputs.notarize
         env:
           SIGN_ID: ${{ secrets.MACOS_SIGN_ID }}
-        run: make dmg notarize SIGN_ID="$SIGN_ID" NOTARY_PROFILE=nitroview-notary
+        run: make dmg SIGN_ID="$SIGN_ID"
+
+      # notarytool with the API key directly (not a keychain profile): submit, then ask for the
+      # status every 30 s for up to 20 minutes. Accepted: the ticket is stapled to the dmg.
+      - name: Notarize the dmg
+        id: notary
+        if: inputs.notarize
+        env:
+          KEY_P8: ${{ secrets.NOTARY_KEY_P8 }}
+          KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
+        run: |
+          printf '%s\n' "$KEY_P8" > "$RUNNER_TEMP/notary.p8"
+          AUTH=(--key "$RUNNER_TEMP/notary.p8" --key-id "$KEY_ID" --issuer "$ISSUER_ID")
+          json() { python3 -c "import json,sys; print(json.load(sys.stdin)['$1'])"; }
+          ID=$(xcrun notarytool submit nitroview.dmg "${AUTH[@]}" --output-format json | json id)
+          echo "submitted to Apple: $ID"
+          echo "id=$ID" >> "$GITHUB_OUTPUT"
+          for i in $(seq 40); do
+            STATUS=$(xcrun notarytool info "$ID" "${AUTH[@]}" --output-format json | json status)
+            echo "$(date -u +%H:%M:%S) $STATUS"
+            [ "$STATUS" != "In Progress" ] && break
+            sleep 30
+          done
+          case "$STATUS" in
+            Accepted)
+              xcrun stapler staple nitroview.dmg
+              echo "notarized=true" >> "$GITHUB_OUTPUT" ;;
+            "In Progress")
+              echo "notarized=false" >> "$GITHUB_OUTPUT"
+              echo "::notice::Apple is still processing submission $ID. Run \"macOS release: finish\" with run ID $GITHUB_RUN_ID to publish it once it is accepted." ;;
+            *)
+              xcrun notarytool log "$ID" "${AUTH[@]}" || true
+              echo "::error::Apple did not accept the dmg: $STATUS"
+              exit 1 ;;
+          esac
 
       - name: Build the dmg (ad-hoc signed)
         if: ${{ !inputs.notarize }}
@@ -103,7 +136,7 @@ jobs:
         run: |
           codesign --verify --deep --strict --verbose=2 nitroview.app
           lipo -archs nitroview.app/Contents/MacOS/nitroview
-          if ${{ inputs.notarize }}; then
+          if ${{ steps.notary.outputs.notarized == 'true' }}; then
             xcrun stapler validate nitroview.dmg
             spctl --assess --type open --context context:primary-signature --verbose=2 nitroview.dmg
           fi
@@ -112,8 +145,19 @@ jobs:
           shasum -a 256 "$DMG" | tee "$DMG.sha256"
           echo "DMG=$DMG" >> "$GITHUB_ENV"
 
+      # what "macOS release: finish" needs to publish this build later
+      - name: Record the build
+        env:
+          SRC_REPO: ${{ inputs.repository }}
+          SRC_SHA: ${{ steps.src.outputs.sha }}
+          VERSION: ${{ steps.src.outputs.version }}
+          SUBMISSION: ${{ steps.notary.outputs.id }}
+        run: |
+          python3 -c 'import json,os; e=os.environ; json.dump({"dmg": e["DMG"], "version": e["VERSION"], "repository": e["SRC_REPO"], "sha": e["SRC_SHA"], "submission": e["SUBMISSION"], "run": e["GITHUB_RUN_ID"]}, open("build.json", "w"), indent=2)'
+          cat build.json
+
       - name: Attest the build provenance
-        if: inputs.notarize
+        if: steps.notary.outputs.notarized == 'true'
         uses: actions/attest-build-provenance@v2
         with:
           subject-path: ${{ env.DMG }}
@@ -121,13 +165,16 @@ jobs:
       - name: Keep the dmg
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.DMG }}
-          path: ${{ env.DMG }}*
+          name: nitroview-dmg
+          path: |
+            ${{ env.DMG }}
+            ${{ env.DMG }}.sha256
+            build.json
 
       # The release goes to the repository running this workflow (GITHUB_REPOSITORY, e.g. a
       # fork), with its own token: no access to the source repository is needed, only reading it.
       - name: Publish the release
-        if: inputs.notarize
+        if: steps.notary.outputs.notarized == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           SRC_REPO: ${{ inputs.repository }}
@@ -150,5 +197,5 @@ jobs:
       - name: Remove the signing keychain
         if: always() && inputs.notarize
         run: |
-          security default-keychain -d user -s login.keychain-db || true
           security delete-keychain "$RUNNER_TEMP/signing.keychain-db" || true
+          rm -f "$RUNNER_TEMP/notary.p8"
