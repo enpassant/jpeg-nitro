@@ -37,9 +37,6 @@
 // ---------------------------------------------------------------------------
 // utilities
 
-static double now_ms(void) { return nitro_now_ms(); }
-
-static int ncpu(void) { return nitro_ncpu(); }
 
 static inline unsigned be16(const uint8_t *p) { return (unsigned)p[0] << 8 | p[1]; }
 
@@ -67,7 +64,7 @@ void nj_set_sequential_scan(int on) { g_sequential = on; }
 static __thread int t_workers = 0;   // per-call override (nj_decode_own with nthreads == 1)
 
 static void parallel_for(size_t n, void (^body)(size_t)) {
-    int w = t_workers > 0 ? t_workers : g_max_workers > 0 ? g_max_workers : ncpu();
+    int w = t_workers > 0 ? t_workers : g_max_workers > 0 ? g_max_workers : nitro_ncpu();
     if ((size_t)w >= n) {
         nitro_parallel(n, body);
         return;
@@ -162,9 +159,9 @@ static int build_huff(HuffTable *t, const uint8_t bits[17], const uint8_t *vals,
     return 0;
 }
 
-#ifdef NJ_REFERENCE
-// Slow path for codes longer than LOOK bits. 'w' holds the next bits MSB-first.
-static inline int huff_slow(const HuffTable *t, uint64_t w, int *sym) {
+// Slow path for codes longer than LOOK bits. 'w' holds the next bits MSB-first. Returns the
+// code's length, -1 (*sym 0) for an invalid code.
+static inline int huff_slow_chk(const HuffTable *t, uint64_t w, int *sym) {
     unsigned c16 = (unsigned)(w >> 48);
     for (int l = LOOK + 1; l <= 16; l++) {
         int32_t c = (int32_t)(c16 >> (16 - l));
@@ -173,10 +170,28 @@ static inline int huff_slow(const HuffTable *t, uint64_t w, int *sym) {
             return l;
         }
     }
-    *sym = 0;   // invalid code: happens only on not-yet-synchronised paths
-    return 16;
+    *sym = 0;
+    return -1;
+}
+
+#ifdef NJ_REFERENCE
+// The same for the old engine: an invalid code (only on not-yet-synchronised paths) is 16 bits long.
+static inline int huff_slow(const HuffTable *t, uint64_t w, int *sym) {
+    int l = huff_slow_chk(t, w, sym);
+    return l < 0 ? 16 : l;
 }
 #endif
+
+// One table of a DHT segment, at q: its class (*tc) and id (*th), the code counts per length
+// (bits[1..16]) and their total (*n; the values follow at q + 17). -1 if not a valid one.
+static int dht_entry(const uint8_t *seg, size_t sl, size_t q, int *tc, int *th, uint8_t bits[17], int *n) {
+    *tc = seg[q] >> 4;
+    *th = seg[q] & 15;
+    *n = 0;
+    bits[0] = 0;
+    for (int l = 1; l <= 16; l++) { bits[l] = seg[q + l]; *n += bits[l]; }
+    return *th > 3 || *tc > 1 || q + 17 + (size_t)*n > sl ? -1 : 0;
+}
 
 
 // ---------------------------------------------------------------------------
@@ -279,11 +294,9 @@ static int parse(const uint8_t *d, size_t len, Jpeg *j) {
         case 0xC4: {   // DHT
             size_t q = 0;
             while (q + 17 <= sl) {
-                int tc = seg[q] >> 4, th = seg[q] & 15;
-                uint8_t bits[17] = {0};
-                int n = 0;
-                for (int l = 1; l <= 16; l++) { bits[l] = seg[q + l]; n += bits[l]; }
-                if (th > 3 || tc > 1 || q + 17 + n > sl) return -1;
+                int tc, th, n;
+                uint8_t bits[17];
+                if (dht_entry(seg, sl, q, &tc, &th, bits, &n)) return -1;
                 if (build_huff(tc ? &j->ac[th] : &j->dc[th], bits, seg + q + 17, n)) return -1;
                 q += 17 + n;
             }
@@ -843,15 +856,15 @@ static int nj_decode(const uint8_t *data, size_t len, const Output *o, int nthre
     Jpeg *j = malloc(sizeof *j);
     if (!j || parse(data, len, j) || !j->info.supported || j->progressive || j->hdr_overflow) { free(j); return -1; }
     const nj_info *fi = &j->info;
-    if (nthreads <= 0) nthreads = 4 * ncpu();   // many more pieces than cores: dynamic load balance (see README)
+    if (nthreads <= 0) nthreads = 4 * nitro_ncpu();   // many more pieces than cores: dynamic load balance (see README)
     const int R = fi->mcu_rows, mpr = fi->mcus_per_row;
     const size_t total_mcus = (size_t)R * mpr;
     int rc = -1;
-    double t0 = now_ms();
+    double t0 = nitro_now_ms();
 
     if (nthreads == 1 || R < 4) {
         rc = decode_single(j, o);
-        st->decode_ms = now_ms() - t0;
+        st->decode_ms = nitro_now_ms() - t0;
         st->bands = 1;
         free(j);
         return rc;
@@ -889,7 +902,7 @@ static int nj_decode(const uint8_t *data, size_t len, const Output *o, int nthre
                 if (sc[t].rst[i] < scan_end) rst[k++] = sc[t].rst[i];
         nrst = k;
         size_t intervals = (total_mcus + Ri - 1) / Ri;
-        st->scan_ms = now_ms() - t0;
+        st->scan_ms = nitro_now_ms() - t0;
         if (nrst + 1 != intervals) {   // damaged or unusual: let libjpeg deal with it
             free(rst);
             goto failed;
@@ -908,7 +921,7 @@ static int nj_decode(const uint8_t *data, size_t len, const Output *o, int nthre
         if (nbands < 2) { free(rst); goto single; }
         st->mode = 1;
         int fail = 0, *const pfail = &fail;
-        double t1 = now_ms();
+        double t1 = nitro_now_ms();
         parallel_for(nbands, ^(size_t b) {
             int r0 = bstart[b], r1 = bstart[b + 1];
             size_t k0 = (size_t)r0 * mpr / Ri, k1 = (size_t)r1 * mpr / Ri;
@@ -920,7 +933,7 @@ static int nj_decode(const uint8_t *data, size_t len, const Output *o, int nthre
             size_t sl[3] = {j->hdr_len, e - a, 0};
             if (decode_band(j, o, seg, sl, r0, r0, r1)) __atomic_store_n(pfail, 1, __ATOMIC_RELAXED);
         });
-        st->decode_ms = now_ms() - t1;
+        st->decode_ms = nitro_now_ms() - t1;
         st->bands = nbands;
         free(rst);
         rc = fail ? -1 : 0;
@@ -955,9 +968,9 @@ static int nj_decode(const uint8_t *data, size_t len, const Output *o, int nthre
             }
         });
         free(coff);
-        st->scan_ms = now_ms() - t0;
+        st->scan_ms = nitro_now_ms() - t0;
 
-        double t1 = now_ms();
+        double t1 = nitro_now_ms();
         const uint64_t Lbits = (uint64_t)clean_len * 8;
         if (g_sequential) {
             // --- 3'. one sequential pass from the start: just record MCU row starts ---
@@ -1049,13 +1062,13 @@ static int nj_decode(const uint8_t *data, size_t len, const Output *o, int nthre
     validate:
         for (int r = 0; r < R; r++)
             if (rows[r].pos == UINT64_MAX || rows[r].pos >= Lbits) {
-                st->sync_ms = now_ms() - t1;
+                st->sync_ms = nitro_now_ms() - t1;
                 goto failed;
             }
-        st->sync_ms = now_ms() - t1;
+        st->sync_ms = nitro_now_ms() - t1;
 
         // --- 5. build band JPEGs and decode them (parallel) ---
-        double t2 = now_ms();
+        double t2 = nitro_now_ms();
         int target = g_bands > 0 ? g_bands : T * 2;
         if (target > R) target = R;
         nbands = target;
@@ -1131,7 +1144,7 @@ static int nj_decode(const uint8_t *data, size_t len, const Output *o, int nthre
             if (decode_band(j, o, seg, sl, d0, o0, o1)) __atomic_store_n(pfail, 1, __ATOMIC_RELAXED);
             free(buf);
         });
-        st->decode_ms = now_ms() - t2;
+        st->decode_ms = nitro_now_ms() - t2;
         st->bands = nbands;
         if (fail) goto failed;
         if (noenc) goto single;
@@ -1146,11 +1159,11 @@ failed:
     goto done;
 single:
     {
-        double t3 = now_ms();
+        double t3 = nitro_now_ms();
         st->mode = 0;
         st->bands = 1;
         rc = decode_single(j, o);
-        st->decode_ms = now_ms() - t3;
+        st->decode_ms = nitro_now_ms() - t3;
     }
 done:
     for (int t = 0; t < T; t++) { free(sc[t].rst); free(sc[t].rstc); }
@@ -1516,19 +1529,6 @@ static inline void idct_mcu(const Jpeg *j, const Output *o, size_t idx, const in
 }
 
 // Huffman decode with validity check: returns length, or -1 for an invalid code.
-static inline int huff_slow_chk(const HuffTable *t, uint64_t w, int *sym) {
-    unsigned c16 = (unsigned)(w >> 48);
-    for (int l = LOOK + 1; l <= 16; l++) {
-        int32_t c = (int32_t)(c16 >> (16 - l));
-        if (c <= t->maxcode[l]) {
-            *sym = t->huffval[(c + t->valoff[l]) & 0xFF];
-            return l;
-        }
-    }
-    *sym = 0;
-    return -1;
-}
-
 // Full decode of one MCU into nblocks x 64 coefficients (natural order,
 // quantised). DC is stored as the running predictor value (int16, modulo
 // 2^16: a later constant offset fixes speculative starts). Returns nonzero
@@ -1805,12 +1805,12 @@ static int nj_decode_own(const uint8_t *data, size_t len, const Output *o, int n
         return r;
     }
     const nj_info *fi = &j->info;
-    if (nthreads <= 0) nthreads = 4 * ncpu();
+    if (nthreads <= 0) nthreads = 4 * nitro_ncpu();
     const int R = fi->mcu_rows, mpr = fi->mcus_per_row;
     const size_t total = (size_t)R * mpr;
     const size_t msz = (size_t)j->nblocks * 64;   // coefficients per MCU
     int rc = -1, fail = 0, *const pfail = &fail;
-    double t0 = now_ms();
+    double t0 = nitro_now_ms();
     uint8_t *clean = NULL;
     size_t clean_cap = 0;
 
@@ -1877,7 +1877,7 @@ static int nj_decode_own(const uint8_t *data, size_t len, const Output *o, int n
     });
     free(coff);
     if (fail) goto out;
-    st->scan_ms = now_ms() - t0;
+    st->scan_ms = nitro_now_ms() - t0;
     const uint64_t Lbits = (uint64_t)clean_len * 8;
 
     if (fi->restart_interval) {
@@ -1896,7 +1896,7 @@ static int nj_decode_own(const uint8_t *data, size_t len, const Output *o, int n
         istart[I] = clean_len;
         int tasks = g_bands > 0 ? g_bands : T * 2;
         if ((size_t)tasks > I) tasks = (int)I;
-        double t1 = now_ms();
+        double t1 = nitro_now_ms();
         parallel_for((size_t)tasks, ^(size_t ti) {
             size_t k0 = I * ti / tasks, k1 = I * (ti + 1) / tasks;
             int16_t coef[MAX_BLOCKS * 64];
@@ -1913,7 +1913,7 @@ static int nj_decode_own(const uint8_t *data, size_t len, const Output *o, int n
                 if (br_pos(&br, clean) > (uint64_t)istart[kk + 1] * 8) __atomic_store_n(pfail, 1, __ATOMIC_RELAXED);   // overran the interval
             }
         });
-        st->decode_ms = now_ms() - t1;
+        st->decode_ms = nitro_now_ms() - t1;
         st->bands = tasks;
         st->mode = 1;
         free(istart);
@@ -1924,9 +1924,9 @@ static int nj_decode_own(const uint8_t *data, size_t len, const Output *o, int n
     {
         // --- 3-5. pipelined: speculative full decode of small chunks, stitching
         // in order, IDCT of stitched chunks while their coefficients are hot ---
-        double t1 = now_ms();
-        const int C = g_chunks > 0 ? g_chunks : 32 * ncpu();   // ~200 KB of coefficients each
-        const int W = t_workers > 0 ? t_workers : g_max_workers > 0 ? g_max_workers : ncpu();
+        double t1 = nitro_now_ms();
+        const int C = g_chunks > 0 ? g_chunks : 32 * nitro_ncpu();   // ~200 KB of coefficients each
+        const int W = t_workers > 0 ? t_workers : g_max_workers > 0 ? g_max_workers : nitro_ncpu();
         Chunk *ch = calloc(C, sizeof *ch);
         if (!ch) goto out;
         for (int i = 0; i < C; i++) {
@@ -1964,7 +1964,7 @@ static int nj_decode_own(const uint8_t *data, size_t len, const Output *o, int n
             }
         });
         fail |= S.fail;
-        st->sync_ms = now_ms() - t1;   // whole pipeline (decode + stitch + IDCT)
+        st->sync_ms = nitro_now_ms() - t1;   // whole pipeline (decode + stitch + IDCT)
         st->decode_ms = 0;
         st->bands = C;
         st->mode = 2;
@@ -2054,10 +2054,9 @@ static int prog_layout(Prog *P) {
         if (m == 0xC4) {                // DHT
             size_t q = 0;
             while (q + 17 <= sl) {
-                int tc = seg[q] >> 4, th = seg[q] & 15, n = 0;
-                uint8_t b[17] = {0};
-                for (int l = 1; l <= 16; l++) { b[l] = seg[q + l]; n += b[l]; }
-                if (th > 3 || tc > 1 || q + 17 + n > sl) return -1;
+                int tc, th, n;
+                uint8_t b[17];
+                if (dht_entry(seg, sl, q, &tc, &th, b, &n)) return -1;
                 if (P->ntabs == (int)(sizeof P->tabs / sizeof *P->tabs)) return -1;
                 HuffTable *t = malloc(sizeof *t);
                 P->tabs[P->ntabs++] = t;
@@ -2529,7 +2528,7 @@ static void prog_worker(Prog *P) {
 
 static int nj_decode_prog(const Jpeg *j, const uint8_t *data, size_t len, const Output *o, nj_stats *st) {
     const nj_info *fi = &j->info;
-    double t0 = now_ms();
+    double t0 = nitro_now_ms();
     Prog *P = calloc(1, sizeof *P);
     if (!P) return -1;
     P->j = j; P->o = o; P->data = data; P->len = len;
@@ -2552,19 +2551,19 @@ static int nj_decode_prog(const Jpeg *j, const uint8_t *data, size_t len, const 
     P->cleared_chunk = calloc((size_t)(P->R + P->K - 1) / P->K, 1);
     if (!P->cbuf || !P->cleared_chunk) goto out;
     for (int c = 0; c < fi->ncomp; c++) P->coef[c] = c ? P->coef[c - 1] + P->bw[c - 1] * P->bh[c - 1] * 64 : (int16_t *)P->cbuf;
-    st->scan_ms = now_ms() - t0;
-    double t1 = now_ms();
+    st->scan_ms = nitro_now_ms() - t0;
+    double t1 = nitro_now_ms();
     pthread_mutex_init(&P->mu, NULL);
     pthread_cond_init(&P->cv, NULL);
     // 4 workers unless set (nj_set_max_workers): the longest scan is about a quarter to a
     // third of the work, so more can't be kept busy; they only cost (i9 and M1: 7% faster
     // than all cores, small web images 30%; 24 MP the same from 4 to 16)
-    const int W = t_workers > 0 ? t_workers : g_max_workers > 0 ? g_max_workers : ncpu() < 4 ? ncpu() : 4;
+    const int W = t_workers > 0 ? t_workers : g_max_workers > 0 ? g_max_workers : nitro_ncpu() < 4 ? nitro_ncpu() : 4;
     Prog *const p = P;
     parallel_for((size_t)W, ^(size_t w) { (void)w; prog_worker(p); });
     pthread_cond_destroy(&P->cv);
     pthread_mutex_destroy(&P->mu);
-    st->decode_ms = now_ms() - t1;
+    st->decode_ms = nitro_now_ms() - t1;
     st->bands = P->nscan;
     st->mode = 3;
     rc = P->fail ? -1 : 0;

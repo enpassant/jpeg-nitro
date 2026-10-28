@@ -167,3 +167,18 @@ static inline int nitro_ncpu(void) {
 }
 
 static inline void nitro_yield(void) { sched_yield(); }
+
+// nitro_parallel, or the loop on the calling thread when nthreads is 1
+static inline void nitro_parallel_n(size_t n, int nthreads, nitro_body body) {
+    if (nthreads == 1)
+        for (size_t i = 0; i < n; i++) body(i);
+    else
+        nitro_parallel(n, body);
+}
+
+#ifndef MIN
+#define MIN(a, b) ((a) < (b) ? (a) : (b))
+#endif
+#ifndef MAX
+#define MAX(a, b) ((a) > (b) ? (a) : (b))
+#endif

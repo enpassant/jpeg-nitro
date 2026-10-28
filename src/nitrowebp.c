@@ -9,8 +9,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define MIN(a, b) ((a) < (b) ? (a) : (b))
-#define MAX(a, b) ((a) > (b) ? (a) : (b))
 
 // VP8 tables from RFC 6386 (taken from the RFC text by a script)
 static const uint8_t kf_bmode_prob[10][10][9] = {

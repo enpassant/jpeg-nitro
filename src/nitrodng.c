@@ -10,8 +10,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define MIN(a, b) ((a) < (b) ? (a) : (b))
-#define MAX(a, b) ((a) > (b) ? (a) : (b))
 
 // ---------------------------------------------------------------------------
 // TIFF (tiff.h)
@@ -314,6 +312,19 @@ static inline int udiff(const uint8_t *u, size_t ulen, uint64_t *pos, const Huff
     return v < (1 << (s - 1)) ? v - (1 << s) + 1 : v;
 }
 
+// Lossless JPEG's predictors (ra: the sample on the left, rb the one above, rcc above left).
+static inline int predict(int pred, int ra, int rb, int rcc) {
+    switch (pred) {
+    case 1: return ra;
+    case 2: return rb;
+    case 3: return rcc;
+    case 4: return ra + rb - rcc;
+    case 5: return ra + ((rb - rcc) >> 1);
+    case 6: return rb + ((ra - rcc) >> 1);
+    default: return (ra + rb) >> 1;
+    }
+}
+
 // The entropy-coded data at d (up to its first marker) without the stuffed zero bytes, in a new
 // buffer followed by 16 zero bytes; *ulen: its length. In parallel, by 1 MB pieces.
 static uint8_t *unstuff(const uint8_t *d, size_t n, size_t *ulen) {
@@ -545,18 +556,15 @@ static int scan_parallel(const uint8_t *d, size_t n, const Huff *hf, uint16_t *o
                     size_t i0 = b ? b * BS : (size_t)nc, i1 = MIN(L, (size_t)(b + 1) * BS);
                     if (!b)
                         for (int c = 0; c < nc; c++) cur[c] = (uint16_t)(cur[c] + prev[c]);
-                    #define ROW(PX) for (size_t i = i0; i < i1; i++) { \
-                            int ra = cur[i - nc], rb = prev[i], rcc = prev[i - nc]; \
-                            (void)ra; (void)rb; (void)rcc; \
-                            cur[i] = (uint16_t)((PX) + cur[i]); \
-                        }
-                    switch (pred) {
-                    case 2: ROW(rb) break;
-                    case 3: ROW(rcc) break;
-                    case 4: ROW(ra + rb - rcc) break;
-                    case 5: ROW(ra + ((rb - rcc) >> 1)) break;
-                    case 6: ROW(rb + ((ra - rcc) >> 1)) break;
-                    default: ROW((ra + rb) >> 1) break;
+                    #define ROW(P) for (size_t i = i0; i < i1; i++) \
+                            cur[i] = (uint16_t)(predict(P, cur[i - nc], prev[i], prev[i - nc]) + cur[i]);
+                    switch (pred) {   // (a loop per predictor: P is a constant in each)
+                    case 2: ROW(2) break;
+                    case 3: ROW(3) break;
+                    case 4: ROW(4) break;
+                    case 5: ROW(5) break;
+                    case 6: ROW(6) break;
+                    default: ROW(7) break;
                     }
                     #undef ROW
                     atomic_store_explicit(&pprog[y], b + 1, memory_order_release);
@@ -651,21 +659,19 @@ static int lossless_jpeg(const uint8_t *d, size_t n, uint16_t *out, int tw, int 
                 if (!ri) {   // (the usual case) without restarts: a loop per predictor
                     const Huff *hc[4] = {&huff[tbl[0]], &huff[tbl[1 % nc]], &huff[tbl[2 % nc]], &huff[tbl[3 % nc]]};
                     for (int c = 0; c < nc; c++) cur[c] = (uint16_t)((first_row ? initial : prev[c]) + huff_decode(&b, hc[c]));
-                    #define ROW(PX) for (size_t x = 1; x < (size_t)w; x++) \
+                    #define ROW(P) for (size_t x = 1; x < (size_t)w; x++) \
                         for (int c = 0; c < nc; c++) { \
                             size_t i = x * nc + c; \
-                            int ra = cur[i - nc], rb = prev[i], rcc = prev[i - nc]; \
-                            (void)ra; (void)rb; (void)rcc; \
-                            cur[i] = (uint16_t)((PX) + huff_decode(&b, hc[c])); \
+                            cur[i] = (uint16_t)(predict(P, cur[i - nc], prev[i], prev[i - nc]) + huff_decode(&b, hc[c])); \
                         }
-                    switch (first_row ? 1 : pred) {
-                    case 1: ROW(ra) break;
-                    case 2: ROW(rb) break;
-                    case 3: ROW(rcc) break;
-                    case 4: ROW(ra + rb - rcc) break;
-                    case 5: ROW(ra + ((rb - rcc) >> 1)) break;
-                    case 6: ROW(rb + ((ra - rcc) >> 1)) break;
-                    default: ROW((ra + rb) >> 1) break;
+                    switch (first_row ? 1 : pred) {   // (a loop per predictor: P is a constant in each)
+                    case 1: ROW(1) break;
+                    case 2: ROW(2) break;
+                    case 3: ROW(3) break;
+                    case 4: ROW(4) break;
+                    case 5: ROW(5) break;
+                    case 6: ROW(6) break;
+                    default: ROW(7) break;
                     }
                     #undef ROW
                 } else for (int x = 0; x < w; x++) {
@@ -683,15 +689,7 @@ static int lossless_jpeg(const uint8_t *d, size_t n, uint16_t *out, int tw, int 
                         int ra = x ? cur[i - nc] : 0, rb = prev[i], rcc = x ? prev[i - nc] : 0, px;
                         if (first_row) px = x ? ra : initial;
                         else if (x == 0) px = rb;
-                        else switch (pred) {
-                            case 1: px = ra; break;
-                            case 2: px = rb; break;
-                            case 3: px = rcc; break;
-                            case 4: px = ra + rb - rcc; break;
-                            case 5: px = ra + ((rb - rcc) >> 1); break;
-                            case 6: px = rb + ((ra - rcc) >> 1); break;
-                            default: px = (ra + rb) >> 1; break;
-                            }
+                        else px = predict(pred, ra, rb, rcc);
                         cur[i] = (uint16_t)(px + diff);
                     }
                     mcus++;
@@ -722,13 +720,6 @@ out:
     return rc;
 }
 
-static void run(size_t n, int nthreads, nitro_body body) {   // nthreads 1: on the calling thread
-    if (nthreads == 1)
-        for (size_t i = 0; i < n; i++) body(i);
-    else
-        nitro_parallel(n, body);
-}
-
 // ---------------------------------------------------------------------------
 // development, row by row: the samples of five rows around the current one normalised (black /
 // white levels, white balance) and split into even and odd columns, so that the loops over a
@@ -744,14 +735,19 @@ typedef struct {
     float black[4], scale[4];     // per 2x2 position: (v - black) * scale
 } Dev;
 
+// a sample normalised: (v - black level - the column's and row's delta) * scale, in 0..1
+static inline float norm1(float v, float black, float bh, float bv, float scale) {
+    float f = (v - black - bh - bv) * scale;
+    return f < 0 ? 0 : f > 1 ? 1 : f;
+}
+
 static float edge_sample(const Dev *g, const uint16_t *src, int xx, float bv, int p) {   // mirrored inside the area
     if (xx < 0) xx = -xx;
     else if (xx >= g->aw) xx = 2 * g->aw - 2 - xx;
     int k = p + (xx & 1);
     unsigned v = src[xx];
     if (g->lin) v = g->lin[MIN(v, (unsigned)g->lin_n - 1)];
-    float f = ((float)v - g->black[k] - g->bh[xx] - bv) * g->scale[k];
-    return f < 0 ? 0 : f > 1 ? 1 : f;
+    return norm1((float)v, g->black[k], g->bh[xx], bv, g->scale[k]);
 }
 
 // Row yy of the active area (mirrored at its edges), columns x0, x0 + 1 ... normalised: x0 + 2i into
@@ -776,9 +772,8 @@ static void norm_row(const Dev *g, int yy, int x0, int n, float *e, float *o) {
     #define NORM(VE, VO) \
         for (int i = lo; i < hi; i++) { \
             int xe = x0 + 2 * i; \
-            float fe = ((float)(VE) - be - bh[xe] - bv) * se, fo = ((float)(VO) - bo - bh[xe + 1] - bv) * so; \
-            e[i] = fe < 0 ? 0 : fe > 1 ? 1 : fe; \
-            o[i] = fo < 0 ? 0 : fo > 1 ? 1 : fo; \
+            e[i] = norm1((float)(VE), be, bh[xe], bv, se); \
+            o[i] = norm1((float)(VO), bo, bh[xe + 1], bv, so); \
         }
     if (!lin) {
         NORM(src[xe], src[xe + 1])
@@ -862,7 +857,7 @@ int ndng_decode(const uint8_t *data, size_t len, const ndng_info *in, uint8_t *b
     uint16_t *praw = raw;
     // few long lossless JPEG scans (one strip ...): one after the other, each decoded in parallel
     int par = in->compression == 7 && in->ntiles < 4 && nthreads != 1;
-    run((size_t)in->ntiles, par ? 1 : nthreads, ^(size_t i) {
+    nitro_parallel_n((size_t)in->ntiles, par ? 1 : nthreads, ^(size_t i) {
         Entry eo = {pin->tile_off_type, (uint32_t)pin->ntiles, pin->tile_off_pos, 1};
         Entry ec = {pin->tile_cnt_type, (uint32_t)pin->ntiles, pin->tile_cnt_pos, 1};
         uint64_t off = (uint64_t)tiff_val(pt, eo, (uint32_t)i), cnt = (uint64_t)tiff_val(pt, ec, (uint32_t)i);
@@ -980,7 +975,7 @@ int ndng_decode(const uint8_t *data, size_t len, const ndng_info *in, uint8_t *b
     const int *pcfa = in->cfa;
     int npairs = (ow + 1) / 2, n = npairs + 2;   // n: samples per row and plane (window: +-2 columns)
     size_t bands = (size_t)(oh + 31) / 32;
-    run(bands, nthreads, ^(size_t band) {
+    nitro_parallel_n(bands, nthreads, ^(size_t band) {
         int y0 = (int)band * 32, y1 = MIN(y0 + 32, oh);
         float *mem = malloc(sizeof(float) * (size_t)n * 10 + sizeof(uint16_t) * (size_t)npairs * 6);
         if (!mem) return;

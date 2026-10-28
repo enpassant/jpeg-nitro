@@ -12,7 +12,6 @@
 #include <string.h>
 #include <unistd.h>
 
-static double now_ms(void) { return nitro_now_ms(); }
 
 static inline uint32_t be32(const uint8_t *p) { return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3]; }
 
@@ -234,24 +233,8 @@ static int read_dynamic(BR *r, Tables *t) {
         cl[order[i]] = (uint8_t)br_peek(r, 3);
         br_skip(r, 3);
     }
-    uint32_t clt[1 << 7];
-    // code-length code: 7-bit table, all codes <= 7 bits
-    {
-        int count[8] = {0}, left = 1, total = 0, max = 0;
-        for (int s = 0; s < 19; s++) count[cl[s]]++;
-        count[0] = 0;
-        for (int l = 1; l <= 7; l++) { left <<= 1; left -= count[l]; if (left < 0) return -1; total += count[l]; if (count[l]) max = l; }
-        if (left > 0 && !(max == 1 && total == 1)) return -1;
-        for (int i = 0; i < 128; i++) clt[i] = ENT(0, K_BAD, 0, 0);
-        unsigned next[8], code = 0;
-        for (int l = 1; l <= 7; l++) { code = (code + count[l - 1]) << 1; next[l] = code; }
-        for (int s = 0; s < 19; s++) {
-            int l = cl[s];
-            if (!l) continue;
-            unsigned rev = bitrev(next[l]++, l);
-            for (unsigned i = rev; i < 128; i += 1u << l) clt[i] = ENT(l, K_LIT, 0, s);
-        }
-    }
+    uint32_t clt[1 << 7];   // the code-length code: a 7-bit table (all its codes are <= 7 bits: no subtables)
+    if (build_table(cl, 19, clt, 7, 0)) return -1;
     uint8_t lens[286 + 30];
     unsigned n = 0, total = hlit + hdist;
     while (n < total) {
@@ -329,6 +312,16 @@ static int decode_symbols8(BR *r, const Tables *t, uint8_t *out, size_t *ppos, s
     return br_over(r) ? -1 : 0;
 }
 
+// A stored block's header (after BFINAL / BTYPE): the reader to the byte boundary, LEN checked
+// against NLEN. Returns LEN, -1 if damaged.
+static inline int stored_len(BR *r) {
+    br_skip(r, r->cnt & 7);
+    br_refill(r);
+    unsigned slen = br_peek(r, 16), nlen = (unsigned)(r->buf >> 16) & 0xFFFF;
+    br_skip(r, 32);
+    return (slen ^ 0xFFFF) != nlen ? -1 : (int)slen;
+}
+
 // Decodes one deflate block (header at the reader's position) into out.
 static int inflate8_one(BR *r, uint8_t *out, size_t *ppos, size_t cap, Tables *t, int *final) {
     {
@@ -337,12 +330,9 @@ static int inflate8_one(BR *r, uint8_t *out, size_t *ppos, size_t cap, Tables *t
         unsigned btype = (unsigned)(r->buf >> 1) & 3;
         br_skip(r, 3);
         if (btype == 0) {   // stored
-            unsigned drop = r->cnt & 7;
-            br_skip(r, drop);
-            br_refill(r);
-            unsigned slen = br_peek(r, 16), nlen = (unsigned)(r->buf >> 16) & 0xFFFF;
-            br_skip(r, 32);
-            if ((slen ^ 0xFFFF) != nlen || *ppos + slen > cap) return -1;
+            int n = stored_len(r);
+            if (n < 0 || *ppos + (size_t)n > cap) return -1;
+            unsigned slen = (unsigned)n;
             // the remaining buffered bits are whole bytes: read them, then the rest directly
             for (; slen && r->cnt >= 8; slen--) { out[(*ppos)++] = (uint8_t)r->buf; br_skip(r, 8); }
             const uint8_t *src = r->p - r->cnt / 8;   // cnt is 0 here, or we are still inside the buffer
@@ -374,7 +364,7 @@ static int inflate8(BR *r, uint8_t *out, size_t *ppos, size_t cap, Tables *t, in
 }
 
 // ---------------------------------------------------------------------------
-// Adler-32
+// Adler-32, and the sequential decoding of a whole stream
 
 #ifdef __AVX2__
 #include <immintrin.h>
@@ -447,48 +437,40 @@ static uint32_t adler32(uint32_t adler, const uint8_t *p, size_t n) {
     return b << 16 | a;
 }
 
-// ---------------------------------------------------------------------------
-// filters (sequential reference implementation; parallel version below)
-
-static int ncpu(void);
-
-static inline uint8_t paeth(int a, int b, int c) {
-    int p = a + b - c, pa = abs(p - a), pb = abs(p - b), pc = abs(p - c);
-    return (uint8_t)(pa <= pb && pa <= pc ? a : pb <= pc ? b : c);
+// Is z (zlen bytes) a zlib stream we take: deflate, a window up to 32 KB, no preset dictionary?
+static int zlib_header_ok(const uint8_t *z, size_t zlen) {
+    return zlen >= 6 && (z[0] & 15) == 8 && (z[0] >> 4) <= 7 && ((z[0] << 8) | z[1]) % 31 == 0 && !(z[1] & 0x20);
 }
 
-static int unfilter_row(uint8_t *row, const uint8_t *prev, size_t stride, int bpp) {
-    uint8_t t = row[-1];
-    switch (t) {
-    case 0: break;
-    case 1: for (size_t x = bpp; x < stride; x++) row[x] += row[x - bpp]; break;
-    case 2: if (prev) for (size_t x = 0; x < stride; x++) row[x] += prev[x]; break;
-    case 3:
-        if (prev) {
-            for (int x = 0; x < bpp; x++) row[x] += prev[x] >> 1;
-            for (size_t x = bpp; x < stride; x++) row[x] += (row[x - bpp] + prev[x]) >> 1;
-        } else {
-            for (size_t x = bpp; x < stride; x++) row[x] += row[x - bpp] >> 1;
-        }
-        break;
-    case 4:
-        if (prev) {
-            for (int x = 0; x < bpp; x++) row[x] += prev[x];   // paeth(0, b, 0) = b
-            for (size_t x = bpp; x < stride; x++) row[x] += paeth(row[x - bpp], prev[x], prev[x - bpp]);
-        } else {
-            for (size_t x = bpp; x < stride; x++) row[x] += row[x - bpp];   // paeth(a, 0, 0) = a
-        }
-        break;
-    default: return -1;
+// Inflates the zlib stream z (zlen bytes, padded) on this thread into out (outlen bytes), and
+// checks its Adler-32. Returns 0 if the result is complete and the checksum matches.
+static int inflate_seq(const uint8_t *z, size_t zlen, uint8_t *out, size_t outlen) {
+    Tables *t = malloc(sizeof *t);
+    if (!t) return -1;
+    BR r;
+    br_init(&r, z + 2, zlen - 2, 0);
+    size_t pos = 0;
+    int final, rc = -1;
+    if (!inflate8(&r, out, &pos, outlen, t, &final) && final && pos == outlen) {
+        size_t ai = (size_t)((br_pos(&r) + 7) / 8) + 2;   // the Adler-32 trailer: byte-aligned after the last block
+        if (ai + 4 <= zlen && adler32(1, out, pos) == be32(z + ai)) rc = 0;
     }
-    return 0;
+    free(t);
+    return rc;
 }
+
+// ---------------------------------------------------------------------------
+// filters (sequential: the parallel version's segments, row by row; the parallel version below)
+
+static void unfilter_seg(uint8_t *row, const uint8_t *prev, size_t a, size_t b, int bpp, int t);
 
 static int unfilter_seq(uint8_t *out, const np_info *fi) {
-    int bpp = fi->bpp;
     size_t rs = fi->stride + 1;
-    for (int y = 0; y < fi->height; y++)
-        if (unfilter_row(out + (size_t)y * rs + 1, y ? out + (size_t)(y - 1) * rs + 1 : NULL, fi->stride, bpp)) return -1;
+    for (int y = 0; y < fi->height; y++) {
+        uint8_t *row = out + (size_t)y * rs + 1;
+        if (row[-1] > 4) return -1;
+        unfilter_seg(row, y ? row - rs : NULL, 0, fi->stride, fi->bpp, row[-1]);
+    }
     return 0;
 }
 
@@ -569,7 +551,7 @@ static int unfilter_parallel(uint8_t *out, const np_info *fi, int nthreads) {
     if (!progress) return -1;
     volatile long next = 0, *const pnext = &next;
     // not all hyper-threads: waiting ones would slow down their working siblings (measured: 12 of 16 best)
-    int W = nthreads > 0 ? nthreads : (ncpu() * 3 + 3) / 4;
+    int W = nthreads > 0 ? nthreads : (nitro_ncpu() * 3 + 3) / 4;
     if (getenv("NP_UW")) W = atoi(getenv("NP_UW"));
     const size_t seg = (SEG / bpp) * bpp;
     nitro_parallel((size_t)W, ^(size_t w) {
@@ -682,12 +664,9 @@ static int decode_block16(BR *r, Tables *t, uint16_t **o, size_t *pos, size_t *c
     unsigned btype = (unsigned)(r->buf >> 1) & 3;
     br_skip(r, 3);
     if (btype == 0) {
-        br_skip(r, r->cnt & 7);
-        br_refill(r);
-        unsigned slen = br_peek(r, 16), nlen = (unsigned)(r->buf >> 16) & 0xFFFF;
-        br_skip(r, 32);
-        if ((slen ^ 0xFFFF) != nlen) return -1;
-        if (grow16(o, cap, *pos + slen)) return -1;
+        int n = stored_len(r);
+        if (n < 0 || grow16(o, cap, *pos + (size_t)n)) return -1;
+        unsigned slen = (unsigned)n;
         uint16_t *out = *o;
         for (; slen && r->cnt >= 8; slen--) { out[(*pos)++] = (uint8_t)r->buf; br_skip(r, 8); }
         const uint8_t *src = r->p;
@@ -811,6 +790,18 @@ void np_set_chunks(int n) { g_chunks = n; }
 
 // Writes symbols [i0, i1) of a chunk (at output offset o) as bytes, looking up
 // placeholders in the window before the chunk. Returns -1 on an impossible reference.
+static inline int resolve_scalar(uint8_t *out, size_t o, const uint16_t *sym, size_t i0, size_t i1) {
+    for (size_t i = i0; i < i1; i++) {
+        uint16_t s = sym[i];
+        if (s < 256) { out[o + i] = (uint8_t)s; continue; }
+        int64_t w = (int64_t)o + ((int64_t)s - PH_BASE);
+        if (w < 0) return -1;
+        out[o + i] = out[w];
+    }
+    return 0;
+}
+
+// The same, 16 symbols at a time where none of them is a placeholder.
 static int resolve(uint8_t *out, size_t o, const uint16_t *sym, size_t i0, size_t i1) {
     size_t i = i0;
 #ifdef __AVX2__
@@ -818,13 +809,7 @@ static int resolve(uint8_t *out, size_t o, const uint16_t *sym, size_t i0, size_
     for (; i + 16 <= i1; i += 16) {
         __m256i v = _mm256_loadu_si256((const __m256i *)(sym + i));
         if (!_mm256_testz_si256(v, _mm256_andnot_si256(lim, _mm256_set1_epi16(-1)))) {   // any >= 256
-            for (size_t k = i; k < i + 16; k++) {
-                uint16_t s = sym[k];
-                if (s < 256) { out[o + k] = (uint8_t)s; continue; }
-                int64_t w = (int64_t)o + ((int64_t)s - PH_BASE);
-                if (w < 0) return -1;
-                out[o + k] = out[w];
-            }
+            if (resolve_scalar(out, o, sym, i, i + 16)) return -1;
             continue;
         }
         __m128i lo = _mm256_castsi256_si128(v), hi = _mm256_extracti128_si256(v, 1);
@@ -834,26 +819,13 @@ static int resolve(uint8_t *out, size_t o, const uint16_t *sym, size_t i0, size_
     for (; i + 16 <= i1; i += 16) {
         uint16x8_t lo = vld1q_u16(sym + i), hi = vld1q_u16(sym + i + 8);
         if (vmaxvq_u16(vorrq_u16(lo, hi)) > 255) {   // a placeholder among them
-            for (size_t k = i; k < i + 16; k++) {
-                uint16_t s = sym[k];
-                if (s < 256) { out[o + k] = (uint8_t)s; continue; }
-                int64_t w = (int64_t)o + ((int64_t)s - PH_BASE);
-                if (w < 0) return -1;
-                out[o + k] = out[w];
-            }
+            if (resolve_scalar(out, o, sym, i, i + 16)) return -1;
             continue;
         }
         vst1q_u8(out + o + i, vcombine_u8(vmovn_u16(lo), vmovn_u16(hi)));
     }
 #endif
-    for (; i < i1; i++) {
-        uint16_t s = sym[i];
-        if (s < 256) { out[o + i] = (uint8_t)s; continue; }
-        int64_t w = (int64_t)o + ((int64_t)s - PH_BASE);
-        if (w < 0) return -1;
-        out[o + i] = out[w];
-    }
-    return 0;
+    return resolve_scalar(out, o, sym, i, i1);
 }
 
 // --- buffer pool: symbol buffers and tables are reused between images ---
@@ -903,13 +875,11 @@ void np_free_buffers(void) {
     pthread_mutex_unlock(&g_pool_mu);
 }
 
-static int ncpu(void) { return nitro_ncpu(); }
-
 // Parallel inflate of the raw deflate stream d (dl bytes, padded) into out.
 // Returns 0 if the result is complete and its Adler-32 matches.
 static int inflate_parallel(const uint8_t *d, size_t dl, const uint8_t *ztrail_base, size_t zlen, uint8_t *out,
                             size_t outlen, int nthreads, np_stats *st) {
-    int N = g_chunks > 0 ? g_chunks : (nthreads > 0 ? nthreads : ncpu());
+    int N = g_chunks > 0 ? g_chunks : (nthreads > 0 ? nthreads : nitro_ncpu());
     uint64_t bits = (uint64_t)dl * 8;
     if ((uint64_t)N * 8 * 65536 > bits) N = (int)(bits / (8 * 65536)) + 1;   // >= 64 KB per chunk
     PChunk *ch = calloc(N, sizeof *ch);
@@ -931,17 +901,17 @@ static int inflate_parallel(const uint8_t *d, size_t dl, const uint8_t *ztrail_b
             ch[i].cap = bytes / sizeof(uint16_t) - OUT_PAD;
         }
     }
-    double tp0 = now_ms();
+    double tp0 = nitro_now_ms();
     // phase 1: block starts (chunk 0 starts at bit 0 by definition)
     ch[0].start = 0;
     nitro_parallel((size_t)(N - 1), ^(size_t k) { pc_find(d, dl, &ch[k + 1], limit); });
-    double tp1 = now_ms();
+    double tp1 = nitro_now_ms();
     // phase 2: decode until reaching the next chunk's start (chunk 0: straight into out)
     nitro_parallel((size_t)N, ^(size_t i) {
         if (i == 0) pc_decode0(d, dl, ch, N, out, outlen);
         else if (!ch[i].err) pc_decode(d, dl, ch, N, (int)i, limit);
     });
-    double tp2 = now_ms();
+    double tp2 = nitro_now_ms();
     // stitch: follow the chain of chunks from the first one
     chain = malloc(N * sizeof *chain);
     off = calloc(N, sizeof *off);
@@ -975,7 +945,7 @@ static int inflate_parallel(const uint8_t *d, size_t dl, const uint8_t *ztrail_b
             if (k && resolve(out, o, c->o, 0, t0)) *pbad = 1;
             ad[k] = adler32(1, out + o, c->n);
         });
-        double tp3 = now_ms();
+        double tp3 = nitro_now_ms();
         if (getenv("NP_DEBUG")) {
             size_t ph = 0;
             for (int k = 1; k < nc; k++) {
@@ -1009,29 +979,15 @@ fail:
 
 int np_zlib_decompress(const uint8_t *zin, size_t zlen, uint8_t *out, size_t outlen, int nthreads) {
     init_fixed();
-    if (zlen < 6 || (zin[0] & 15) != 8 || (zin[0] >> 4) > 7 || ((zin[0] << 8) | zin[1]) % 31 || (zin[1] & 0x20))
-        return -1;
+    if (!zlib_header_ok(zin, zlen)) return -1;
     uint8_t *z = malloc(zlen + IN_PAD);   // the bit reader wants zero padding after the data
     if (!z) return -1;
     memcpy(z, zin, zlen);
     memset(z + zlen, 0, IN_PAD);
     np_stats st;
     memset(&st, 0, sizeof st);
-    int rc = -1;
-    if (nthreads != 1) {
-        rc = inflate_parallel(z + 2, zlen - 2, z, zlen, out, outlen, nthreads, &st);
-    } else {
-        Tables *t = malloc(sizeof *t);
-        BR r;
-        br_init(&r, z + 2, zlen - 2, 0);
-        size_t pos = 0;
-        int final;
-        if (t && !inflate8(&r, out, &pos, outlen, t, &final) && final && pos == outlen) {
-            size_t ai = (size_t)((br_pos(&r) + 7) / 8) + 2;
-            if (ai + 4 <= zlen && adler32(1, out, pos) == be32(z + ai)) rc = 0;
-        }
-        free(t);
-    }
+    int rc = nthreads != 1 ? inflate_parallel(z + 2, zlen - 2, z, zlen, out, outlen, nthreads, &st)
+                           : inflate_seq(z, zlen, out, outlen);
     free(z);
     return rc;
 }
@@ -1045,46 +1001,35 @@ int np_decode(const uint8_t *data, size_t len, const np_info *fi, uint8_t *out, 
     memset(st, 0, sizeof *st);
     if (!fi->convertible) return -1;
     init_fixed();
-    double t0 = now_ms();
+    double t0 = nitro_now_ms();
     size_t zlen;
     uint8_t *z = gather_idat(data, len, &zlen);
     if (!z) return -1;
     int rc = -1;
-    Tables *t = NULL;   // (the sequential path's; the parallel one has its own per chunk)
-    if (zlen < 6 || (z[0] & 15) != 8 || (z[0] >> 4) > 7 || ((z[0] << 8) | z[1]) % 31 || (z[1] & 0x20)) goto done;
-    st->parse_ms = now_ms() - t0;
+    if (!zlib_header_ok(z, zlen)) goto done;
+    st->parse_ms = nitro_now_ms() - t0;
     if (nthreads != 1) {
-        double t1 = now_ms();
+        double t1 = nitro_now_ms();
         if (inflate_parallel(z + 2, zlen - 2, z, zlen, out, fi->raw_size, nthreads, st)) goto done;
-        st->inflate_ms = now_ms() - t1;
+        st->inflate_ms = nitro_now_ms() - t1;
         st->mode = 1;
-        double t2 = now_ms();
+        double t2 = nitro_now_ms();
         if (unfilter_parallel(out, fi, nthreads)) goto done;
-        st->unfilter_ms = now_ms() - t2;
+        st->unfilter_ms = nitro_now_ms() - t2;
         rc = 0;
         goto done;
     }
     {
-        double t1 = now_ms();
-        BR r;
-        br_init(&r, z + 2, zlen - 2, 0);
-        size_t pos = 0;
-        int final;
-        if (!(t = malloc(sizeof *t)) || inflate8(&r, out, &pos, fi->raw_size, t, &final) || !final || pos != fi->raw_size)
-            goto done;
-        // Adler-32 trailer: byte-aligned after the last block
-        uint64_t bp = (br_pos(&r) + 7) & ~7ull;
-        size_t ai = (size_t)(bp / 8) + 2;
-        if (ai + 4 > zlen || adler32(1, out, pos) != be32(z + ai)) goto done;
-        st->inflate_ms = now_ms() - t1;
+        double t1 = nitro_now_ms();
+        if (inflate_seq(z, zlen, out, fi->raw_size)) goto done;
+        st->inflate_ms = nitro_now_ms() - t1;
         st->chunks = 1;
-        double t2 = now_ms();
+        double t2 = nitro_now_ms();
         if (unfilter_seq(out, fi)) goto done;
-        st->unfilter_ms = now_ms() - t2;
+        st->unfilter_ms = nitro_now_ms() - t2;
         rc = 0;
     }
 done:
-    free(t);
     free(z);
     return rc;
 }

@@ -9,13 +9,10 @@
 #include <string.h>
 #include <unistd.h>
 
-static double now_ms(void) { return nitro_now_ms(); }
 
 static inline uint32_t be16(const uint8_t *p) { return (uint32_t)p[0] << 8 | p[1]; }
 static inline uint32_t be32(const uint8_t *p) { return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3]; }
 static inline uint64_t be64(const uint8_t *p) { return (uint64_t)be32(p) << 32 | be32(p + 4); }
-
-static int ncpu(void) { return nitro_ncpu(); }
 
 int ps_read_info(const uint8_t *d, size_t len, ps_info *fi) {
     memset(fi, 0, sizeof *fi);
@@ -88,12 +85,12 @@ int ps_decode(const uint8_t *d, size_t len, const ps_info *fi, uint8_t *out, int
     if (!st) st = &dummy;
     memset(st, 0, sizeof *st);
     if (!fi->supported) return -1;
-    double t0 = now_ms();
+    double t0 = nitro_now_ms();
     const int H = fi->height, P = fi->ncolor + fi->alpha;   // planes we need
     const size_t W = (size_t)fi->width, rows = (size_t)P * H;
     const uint8_t *data = d + fi->data_off;
     const size_t avail = len - fi->data_off;
-    const size_t tasks = (size_t)(nthreads > 0 ? nthreads : ncpu()) * 8;   // row ranges, for balance
+    const size_t tasks = (size_t)(nthreads > 0 ? nthreads : nitro_ncpu()) * 8;   // row ranges, for balance
     const size_t nt = tasks < rows ? tasks : rows;
     volatile int bad = 0, *const pbad = &bad;
     st->mode = fi->compression;
@@ -141,6 +138,6 @@ int ps_decode(const uint8_t *d, size_t len, const ps_info *fi, uint8_t *out, int
             free(buf);
         }
     }
-    st->decode_ms = now_ms() - t0;
+    st->decode_ms = nitro_now_ms() - t0;
     return bad ? -1 : 0;
 }

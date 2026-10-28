@@ -11,8 +11,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define MIN(a, b) ((a) < (b) ? (a) : (b))
-#define MAX(a, b) ((a) > (b) ? (a) : (b))
 #define CLIP3(lo, hi, v) ((v) < (lo) ? (lo) : (v) > (hi) ? (hi) : (v))
 
 static inline uint8_t clip_pixel(int v) { return (uint8_t)CLIP3(0, 255, v); }

@@ -9,8 +9,6 @@
 #include <math.h>
 #include <stdatomic.h>
 
-#define MIN(a, b) ((a) < (b) ? (a) : (b))
-#define MAX(a, b) ((a) > (b) ? (a) : (b))
 
 // A pixel of the image after transformations xf[0..n) back to before them (ws / hs: the sizes before each).
 static void unmap(const Xf *xf, int n, const int *ws, const int *hs, int *x, int *y) {

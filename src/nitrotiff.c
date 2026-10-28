@@ -10,8 +10,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define MIN(a, b) ((a) < (b) ? (a) : (b))
-#define MAX(a, b) ((a) > (b) ? (a) : (b))
 
 // ---------------------------------------------------------------------------
 // TIFF structure (tiff.h)
@@ -447,13 +445,6 @@ static int ccitt(const nt_info *in, const uint8_t *s, size_t sl, uint8_t *d, int
 // ---------------------------------------------------------------------------
 // decoding
 
-static void run(size_t n, int nthreads, nitro_body body) {   // nthreads 1: on the calling thread
-    if (nthreads == 1)
-        for (size_t i = 0; i < n; i++) body(i);
-    else
-        nitro_parallel(n, body);
-}
-
 static int chunk(const Tiff *t, const nt_info *in, int i, const uint8_t **p, size_t *n) {
     uint32_t o = in->off_type == 3 ? t16(t, in->off_pos + 2 * (size_t)i) : t32(t, in->off_pos + 4 * (size_t)i);
     uint32_t c = in->cnt_type == 3 ? t16(t, in->cnt_pos + 2 * (size_t)i) : t32(t, in->cnt_pos + 4 * (size_t)i);
@@ -614,7 +605,7 @@ int nt_decode(const uint8_t *data, size_t len, const nt_info *in, uint8_t *bgrx,
         raw = malloc(plane * P + 16);
         if (!raw) err = 1;
         int one = in->nchunks == 1 ? nthreads : 1;   // (a single chunk: Deflate can still go parallel)
-        if (!err) run((size_t)in->nchunks, nthreads, ^(size_t i) {
+        if (!err) nitro_parallel_n((size_t)in->nchunks, nthreads, ^(size_t i) {
             const uint8_t *c;
             size_t n;
             int k = (int)i, per = in->across * in->down, p = k / per, ty = k % per / in->across, tx = k % in->across;
@@ -642,7 +633,7 @@ int nt_decode(const uint8_t *data, size_t len, const nt_info *in, uint8_t *bgrx,
     if (!err) {   // the conversion, in bands of rows
         const int band = 16;
         const uint8_t(*cm)[3] = (const uint8_t(*)[3])cmap;
-        run((size_t)(h + band - 1) / band, nthreads, ^(size_t bi) {
+        nitro_parallel_n((size_t)(h + band - 1) / band, nthreads, ^(size_t bi) {
             uint8_t *s8 = malloc((size_t)w * in->spp + 16);
             if (!s8) { *errp = 1; return; }
             for (int y = (int)bi * band; y < MIN(h, (int)bi * band + band); y++) {
