@@ -10,6 +10,7 @@
 #ifdef __APPLE__
 #include <CoreMedia/CoreMedia.h>
 #include <VideoToolbox/VideoToolbox.h>
+#include <pthread.h>
 #endif
 #include <stdatomic.h>
 #include <stdlib.h>
@@ -206,22 +207,48 @@ static int decode_own(const uint8_t *data, const nh_info *info, uint8_t *const p
 
 #ifdef __APPLE__
 // ---- decoding: one VideoToolbox session per worker, tiles handed out in order
+//
+// VideoToolbox's HEVC decoders (software and hardware) can loop forever on a damaged stream: the
+// decode call never returns, synchronous or not, and neither does invalidating the session (the
+// decoder spins in its XPC service). So the decoding runs on a queue of its own and is waited for
+// with a time limit; past it this fails (the caller falls back to ImageIO, which rejects such files
+// quickly) and leaves the stuck work behind. That work owns all it uses (Run: a copy of the info and
+// of the tile data) and writes into the caller's planes only while the caller still waits.
 
 typedef struct {
-    const nh_info *info;
-    uint8_t *const *planes;
-    const size_t *pitch;
+    nh_info info;               // (its hvcc points into data)
+    uint8_t *planes[3];
+    size_t pitch[3];
+    pthread_rwlock_t lock;      // tile_done reads `cancelled` (several at once); the caller sets it
+    int cancelled;
+    _Atomic int refs;           // the caller and the decoding work
+    _Atomic int next, failed;
+    dispatch_semaphore_t done;
+    uint8_t *data;              // the tiles' data and the hvcC, copied
+    size_t off[256];            // each tile's in data
+} Run;
+
+typedef struct {
+    Run *run;
     int tile;
-    _Atomic int *failed;
 } Job;
+
+static void run_release(Run *r) {
+    if (atomic_fetch_sub(&r->refs, 1) != 1) return;
+    pthread_rwlock_destroy(&r->lock);
+    dispatch_release(r->done);
+    free(r->data);
+    free(r);
+}
 
 static void tile_done(void *ref, void *src, OSStatus st, VTDecodeInfoFlags flags, CVImageBufferRef img, CMTime pts,
                       CMTime dur) {
     Job *j = src;
-    const nh_info *in = j->info;
+    Run *r = j->run;
+    const nh_info *in = &r->info;
     if (st || !img || CVPixelBufferGetPixelFormatType(img) != kCVPixelFormatType_420YpCbCr8BiPlanarFullRange ||
         (int)CVPixelBufferGetWidth(img) != in->tile_w || (int)CVPixelBufferGetHeight(img) != in->tile_h) {
-        atomic_store(j->failed, 1);
+        atomic_store(&r->failed, 1);
         return;
     }
     // BT.601 coefficients: matrix_coeffs 6 (ITU_R_601_4) or 5 (BT.470BG, as Samsung phones write it, which
@@ -231,31 +258,36 @@ static void tile_done(void *ref, void *src, OSStatus st, VTDecodeInfoFlags flags
                 !CFEqual(matrix, CFSTR("YCbCrMatrix#5"));
     if (matrix) CFRelease(matrix);
     if (other) {
-        atomic_store(j->failed, 1);
+        atomic_store(&r->failed, 1);
         return;
     }
-    CVPixelBufferLockBaseAddress(img, kCVPixelBufferLock_ReadOnly);
-    int col = j->tile % in->cols, row = j->tile / in->cols;
-    const uint8_t *y = CVPixelBufferGetBaseAddressOfPlane(img, 0), *uv = CVPixelBufferGetBaseAddressOfPlane(img, 1);
-    size_t ys = CVPixelBufferGetBytesPerRowOfPlane(img, 0), uvs = CVPixelBufferGetBytesPerRowOfPlane(img, 1);
-    for (int r = 0; r < in->tile_h; r++)
-        memcpy(j->planes[0] + (size_t)(row * in->tile_h + r) * j->pitch[0] + (size_t)col * in->tile_w, y + r * ys,
-               (size_t)in->tile_w);
-    int cw = in->tile_w / 2, ch = in->tile_h / 2;
-    for (int r = 0; r < ch; r++) {   // CbCr interleaved -> two planes
-        const uint8_t *s = uv + r * uvs;
-        uint8_t *cb = j->planes[1] + (size_t)(row * ch + r) * j->pitch[1] + (size_t)col * cw;
-        uint8_t *cr = j->planes[2] + (size_t)(row * ch + r) * j->pitch[2] + (size_t)col * cw;
-        for (int x = 0; x < cw; x++) {
-            cb[x] = s[2 * x];
-            cr[x] = s[2 * x + 1];
+    pthread_rwlock_rdlock(&r->lock);
+    if (!r->cancelled) {
+        CVPixelBufferLockBaseAddress(img, kCVPixelBufferLock_ReadOnly);
+        int col = j->tile % in->cols, row = j->tile / in->cols;
+        const uint8_t *y = CVPixelBufferGetBaseAddressOfPlane(img, 0), *uv = CVPixelBufferGetBaseAddressOfPlane(img, 1);
+        size_t ys = CVPixelBufferGetBytesPerRowOfPlane(img, 0), uvs = CVPixelBufferGetBytesPerRowOfPlane(img, 1);
+        for (int k = 0; k < in->tile_h; k++)
+            memcpy(r->planes[0] + (size_t)(row * in->tile_h + k) * r->pitch[0] + (size_t)col * in->tile_w, y + k * ys,
+                   (size_t)in->tile_w);
+        int cw = in->tile_w / 2, ch = in->tile_h / 2;
+        for (int k = 0; k < ch; k++) {   // CbCr interleaved -> two planes
+            const uint8_t *s = uv + k * uvs;
+            uint8_t *cb = r->planes[1] + (size_t)(row * ch + k) * r->pitch[1] + (size_t)col * cw;
+            uint8_t *cr = r->planes[2] + (size_t)(row * ch + k) * r->pitch[2] + (size_t)col * cw;
+            for (int x = 0; x < cw; x++) {
+                cb[x] = s[2 * x];
+                cr[x] = s[2 * x + 1];
+            }
         }
+        CVPixelBufferUnlockBaseAddress(img, kCVPixelBufferLock_ReadOnly);
     }
-    CVPixelBufferUnlockBaseAddress(img, kCVPixelBufferLock_ReadOnly);
+    pthread_rwlock_unlock(&r->lock);
 }
 
-static int decode_vt(const uint8_t *data, const nh_info *info, uint8_t *const planes[3], const size_t pitch[3],
-                     int nthreads) {
+// The decoding itself (on its own queue). Sets r->failed on any error.
+static void vt_work(Run *r, int nthreads) {
+    const nh_info *info = &r->info;
     CFDataRef hvcc = CFDataCreate(NULL, info->hvcc, (CFIndex)info->hvcc_len);
     const void *ak[] = {CFSTR("hvcC")}, *av[] = {hvcc};
     CFDictionaryRef atoms = CFDictionaryCreate(NULL, ak, av, 1, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
@@ -266,7 +298,13 @@ static int decode_vt(const uint8_t *data, const nh_info *info, uint8_t *const pl
     CFRelease(ext);
     CFRelease(atoms);
     CFRelease(hvcc);
-    if (st || !fmt) return -1;
+    Job *jobs = calloc((size_t)info->ntiles, sizeof *jobs);
+    if (st || !fmt || !jobs) {
+        if (fmt) CFRelease(fmt);
+        free(jobs);
+        atomic_store(&r->failed, 1);
+        return;
+    }
 
     // Intel: the software decoder; in parallel it is several times faster than a hardware one
     // (a Radeon's serves one tile at a time). Apple Silicon: its media engine, with 4 sessions
@@ -291,38 +329,82 @@ static int decode_vt(const uint8_t *data, const nh_info *info, uint8_t *const pl
         nthreads = n < 1 ? 1 : n > max_workers ? max_workers : (int)n;
     }
     if (nthreads > info->ntiles) nthreads = info->ntiles;
-    _Atomic int next = 0, failed = 0;
-    _Atomic int *pnext = &next, *pfailed = &failed;
     dispatch_apply((size_t)nthreads, DISPATCH_APPLY_AUTO, ^(size_t w) {
         (void)w;
         VTDecompressionOutputCallbackRecord cb = {tile_done, NULL};
         VTDecompressionSessionRef s = NULL;
         if (VTDecompressionSessionCreate(NULL, fmt, spec, attrs, &cb, &s) || !s) {
-            atomic_store(pfailed, 1);
+            atomic_store(&r->failed, 1);
             return;
         }
+        // asynchronous, all of this worker's tiles, then waited for once
         int t;
-        while (!atomic_load(pfailed) && (t = atomic_fetch_add(pnext, 1)) < info->ntiles) {
+        while (!atomic_load(&r->failed) && (t = atomic_fetch_add(&r->next, 1)) < info->ntiles) {
             CMBlockBufferRef bb = NULL;
             CMSampleBufferRef sb = NULL;
             size_t n = info->tile_len[t];
-            Job job = {info, planes, pitch, t, pfailed};
-            if (CMBlockBufferCreateWithMemoryBlock(NULL, (void *)(data + info->tile_off[t]), n, kCFAllocatorNull, NULL, 0,
-                                                   n, 0, &bb) ||
+            jobs[t] = (Job){r, t};
+            if (CMBlockBufferCreateWithMemoryBlock(NULL, r->data + r->off[t], n, kCFAllocatorNull, NULL, 0, n, 0, &bb) ||
                 CMSampleBufferCreateReady(NULL, bb, fmt, 1, 0, NULL, 1, &n, &sb) ||
-                VTDecompressionSessionDecodeFrame(s, sb, 0, &job, NULL))
-                atomic_store(pfailed, 1);
-            VTDecompressionSessionWaitForAsynchronousFrames(s);   // (job lives on this stack)
-            if (sb) CFRelease(sb);
+                VTDecompressionSessionDecodeFrame(s, sb, kVTDecodeFrame_EnableAsynchronousDecompression, &jobs[t], NULL))
+                atomic_store(&r->failed, 1);
+            if (sb) CFRelease(sb);   // (VideoToolbox keeps what it still needs)
             if (bb) CFRelease(bb);
         }
+        VTDecompressionSessionWaitForAsynchronousFrames(s);
         VTDecompressionSessionInvalidate(s);
         CFRelease(s);
     });
+    free(jobs);
     CFRelease(spec);
     CFRelease(attrs);
     CFRelease(fmt);
-    return atomic_load(&failed) ? -1 : 0;
+}
+
+static int decode_vt(const uint8_t *data, const nh_info *info, uint8_t *const planes[3], const size_t pitch[3],
+                     int nthreads) {
+    size_t total = info->hvcc_len;
+    for (int t = 0; t < info->ntiles; t++) total += info->tile_len[t];
+    Run *r = calloc(1, sizeof *r);
+    if (!r || !(r->data = malloc(total))) {
+        free(r);
+        return -1;
+    }
+    r->info = *info;
+    size_t at = 0;
+    for (int t = 0; t < info->ntiles; t++) {
+        r->off[t] = at;
+        memcpy(r->data + at, data + info->tile_off[t], info->tile_len[t]);
+        at += info->tile_len[t];
+    }
+    memcpy(r->data + at, info->hvcc, info->hvcc_len);
+    r->info.hvcc = r->data + at;
+    for (int c = 0; c < 3; c++) {
+        r->planes[c] = planes[c];
+        r->pitch[c] = pitch[c];
+    }
+    pthread_rwlock_init(&r->lock, NULL);
+    r->done = dispatch_semaphore_create(0);
+    atomic_store(&r->refs, 2);
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), ^{
+        vt_work(r, nthreads);
+        dispatch_semaphore_signal(r->done);
+        run_release(r);
+    });
+    // the time limit: generous (12 MP: ~30-60 ms; a 25 MP single tile ~0.2 s; here 3.3 s)
+    double mp = (double)info->plane_w[0] * info->plane_h[0] / 1e6;
+    int64_t limit_ms = 2000 + (int64_t)(mp * 50);
+    int rc;
+    if (dispatch_semaphore_wait(r->done, dispatch_time(DISPATCH_TIME_NOW, limit_ms * (int64_t)NSEC_PER_MSEC))) {
+        pthread_rwlock_wrlock(&r->lock);   // (waits for a tile being copied in)
+        r->cancelled = 1;
+        pthread_rwlock_unlock(&r->lock);
+        rc = -1;
+    } else {
+        rc = atomic_load(&r->failed) ? -1 : 0;
+    }
+    run_release(r);
+    return rc;
 }
 #endif
 
