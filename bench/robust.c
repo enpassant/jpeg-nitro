@@ -111,12 +111,13 @@ int main(int argc, char **argv) {
             snprintf(what, sizeof what, "bit flip @%zu", p);
             run(name, what, d, n);
         }
-        // 4. zeroed / 0xFF-filled block (bad sector, partial write)
-        for (int k = 0; k < 2; k++) {
+        // 4. zeroed / 0xFF-filled block (bad sector, partial write); small files: half their data
+        size_t blk = n - ss > 2 * 65536 ? 65536 : (n - ss) / 2;
+        for (int k = 0; k < 2 && blk >= 16; k++) {
             memcpy(d, orig, n);
-            size_t p = ss + rnd() % (n - ss - 65536);
-            memset(d + p, k ? 0xFF : 0x00, 65536);
-            run(name, k ? "64K of 0xFF" : "64K of zeros", d, n);
+            size_t p = ss + rnd() % (n - ss - blk);
+            memset(d + p, k ? 0xFF : 0x00, blk);
+            run(name, k ? "block of 0xFF" : "block of zeros", d, n);
         }
         // 5. spurious markers inside the data (RSTn, EOI, SOS, random)
         uint8_t mk[] = {0xD0, 0xD3, 0xD9, 0xDA, 0xC4, 0xE1, 0x01, 0xFF};
