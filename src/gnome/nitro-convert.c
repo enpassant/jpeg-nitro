@@ -76,11 +76,20 @@ static void upsample_row(const Comp *c, int y, int width, uint8_t *out, int *cs)
         for (int x = 0; x < width; x++) out[x] = (uint8_t)((in0[x] * 3 + in1[x] + bias) >> 2);
     } else {                                            // other factors (and tiny images): replication
         const uint8_t *in = c->p + (size_t)y * c->v / c->vmax * c->pitch;
-        for (int x = 0; x < width; x++) out[x] = in[(size_t)x * c->h / c->hmax];
+        // h <= hmax: advance by at most one source sample per output pixel.
+        // This is exactly floor(x * h / hmax), without a division per pixel.
+        int sx = 0, phase = 0;
+        for (int x = 0; x < width; x++) {
+            out[x] = in[sx];
+            phase += c->h;
+            if (phase >= c->hmax) { phase -= c->hmax; sx++; }
+        }
     }
 }
 
 static void convert(const Comp *comps, int nc, int W, int H, int limited, uint8_t *dst, size_t stride) {
+    size_t bands = (size_t)W * (size_t)H <= 1024 ? 1 : (size_t)nitro_ncpu() * 4;
+    if (bands > (size_t)H) bands = (size_t)H;
     int maxcw = W;
     for (int k = 0; k < nc; k++)
         if (2 * comps[k].cw > maxcw) maxcw = 2 * comps[k].cw;
@@ -88,8 +97,6 @@ static void convert(const Comp *comps, int nc, int W, int H, int limited, uint8_
     build_tables(&tab, limited);
     const Comp *cp = comps;
     const Tables *t = &tab;
-    size_t bands = (size_t)nitro_ncpu() * 4;
-    if (bands > (size_t)H) bands = (size_t)H;
     const size_t rowlen = (size_t)maxcw + 16;
     nitro_parallel(bands, ^(size_t b) {
         int y0 = (int)((size_t)H * b / bands), y1 = (int)((size_t)H * (b + 1) / bands);
@@ -99,15 +106,19 @@ static void convert(const Comp *comps, int nc, int W, int H, int limited, uint8_
         uint8_t *yr = rows, *cbr = rows + rowlen, *crr = rows + 2 * rowlen;
         for (int y = y0; y < y1; y++) {
             uint8_t *o = dst + (size_t)y * stride;
-            upsample_row(&cp[0], y, W, yr, cs);
+            const uint8_t *yrow = yr;
+            if (cp[0].hr == 1 && cp[0].vr == 1)
+                yrow = cp[0].p + (size_t)y * cp[0].pitch;
+            else
+                upsample_row(&cp[0], y, W, yr, cs);
             if (nc == 1) {
-                for (int x = 0; x < W; x++) o[3 * x] = o[3 * x + 1] = o[3 * x + 2] = yr[x];
+                for (int x = 0; x < W; x++) o[3 * x] = o[3 * x + 1] = o[3 * x + 2] = yrow[x];
                 continue;
             }
             upsample_row(&cp[1], y, W, cbr, cs);
             upsample_row(&cp[2], y, W, crr, cs);
             for (int x = 0; x < W; x++) {
-                int Y = t->y[yr[x]], cb = cbr[x], cr = crr[x];
+                int Y = t->y[yrow[x]], cb = cbr[x], cr = crr[x];
                 o[3 * x] = clamp255(Y + t->cr_r[cr]);
                 o[3 * x + 1] = clamp255(Y + (int)((t->cb_g[cb] + t->cr_g[cr]) >> SCALEBITS));
                 o[3 * x + 2] = clamp255(Y + t->cb_b[cb]);
