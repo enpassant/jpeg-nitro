@@ -20,106 +20,23 @@
 int nh_read_info(const uint8_t *d, size_t len, nh_info *info) {
     Heif *h = calloc(1, sizeof *h);   // (big: not on the stack)
     if (!h) return -1;
-    int rc = -1, wide_primaries = 0;
-    h->d = d;
-    h->len = len;
-    Box ftyp, meta, b;
-    size_t o = 0;
-    if (!next_box(d, &o, len, &ftyp) || ftyp.type != FOURCC("ftyp")) goto out;
-    int brand = 0;
-    for (size_t p = ftyp.start; p + 4 <= ftyp.end; p += 4)
-        if (p != ftyp.start + 4 && (be32(d + p) == FOURCC("heic") || be32(d + p) == FOURCC("heix") ||
-                                    be32(d + p) == FOURCC("mif1")))
-            brand = 1;
-    if (!brand || !find_box(d, 0, len, "meta", &meta) || meta.end - meta.start < 4) goto out;
-    size_t ms = meta.start + 4;
-    Box hdlr, pitm, iinf, iloc, iprp, iref = {0};
-    if (!find_box(d, ms, meta.end, "hdlr", &hdlr) || hdlr.end - hdlr.start < 12 ||
-        be32(d + hdlr.start + 8) != FOURCC("pict"))
-        goto out;
-    if (!find_box(d, ms, meta.end, "pitm", &pitm) || !find_box(d, ms, meta.end, "iinf", &iinf) ||
-        !find_box(d, ms, meta.end, "iloc", &iloc) || !find_box(d, ms, meta.end, "iprp", &iprp))
-        goto out;
-    if (find_box(d, ms, meta.end, "iref", &iref) && iref.end - iref.start < 4) iref.start = iref.end = 0;   // (empty: none)
-    find_box(d, ms, meta.end, "idat", &h->idat);
-    if (pitm.end - pitm.start < 6 || (d[pitm.start] != 0 && pitm.end - pitm.start < 8)) goto out;   // (v1: a 32-bit id)
-    uint32_t primary = d[pitm.start] == 0 ? be16(d + pitm.start + 4) : be32(d + pitm.start + 4);
-    if (parse_iinf(h, &iinf) || parse_iloc(h, &iloc) || parse_iprp(h, &iprp)) goto out;
+    static const char *const brands[] = {"heic", "heix", "mif1", NULL};
+    int rc = -1, wide_primaries = 0, hvcc_index = 0, npieces, gw, gh;
+    size_t poff[8], plen[8];
+    Box iref;
+    uint32_t primary;
+    if (heif_open(h, d, len, brands, &iref, &primary)) goto out;
     Item *pi = item(h, primary);
-    if (!pi) goto out;
-
-    // tiles: dimg references of a grid; alpha planes (auxl to the primary): not handled
     memset(info, 0, sizeof *info);
-    if (iref.end) {
-        int v = d[iref.start];
-        size_t ro = iref.start + 4;
-        int idsz = v == 0 ? 2 : 4;
-        while (next_box(d, &ro, iref.end, &b)) {
-            if (b.end - b.start < (size_t)idsz + 2) continue;
-            uint32_t from = idsz == 2 ? be16(d + b.start) : be32(d + b.start);
-            uint32_t n = be16(d + b.start + idsz);
-            size_t p = b.start + idsz + 2;
-            if (p + (size_t)n * idsz > b.end) goto out;
-            if (b.type == FOURCC("dimg") && from == primary) {
-                if (n > 256) goto out;
-                for (uint32_t k = 0; k < n; k++) info->tile_id[k] = idsz == 2 ? be16(d + p + 2 * k) : be32(d + p + 4 * k);
-                info->ntiles = (int)n;
-            }
-            if (b.type == FOURCC("auxl")) {
-                for (uint32_t k = 0; k < n; k++)
-                    if ((idsz == 2 ? be16(d + p + 2 * k) : be32(d + p + 4 * k)) == primary) {
-                        Item *ax = item(h, from);
-                        const Box *c = ax ? prop(h, ax, "auxC") : NULL;
-                        if (c && c->end - c->start > 4 &&
-                            contains(d + c->start + 4, c->end - c->start - 4, "alpha"))
-                            goto out;
-                        if (c && c->end - c->start > 4 &&
-                            contains(d + c->start + 4, c->end - c->start - 4, "auxid:1"))
-                            goto out;
-                    }
-            }
-        }
-    }
-    if (pi->type == FOURCC("grid")) {
-        size_t n;
-        const uint8_t *g = item_data(h, pi, &n);
-        if (!g || n < 8 || info->ntiles < 1) goto out;
-        int wide = g[1] & 1;
-        info->rows = g[2] + 1;
-        info->cols = g[3] + 1;
-        if (n < (size_t)(wide ? 12 : 8)) goto out;
-        info->width = (int)(wide ? be32(g + 4) : be16(g + 4));
-        info->height = (int)(wide ? be32(g + 8) : be16(g + 6));
-        if (info->rows * info->cols != info->ntiles) goto out;
-    } else if (pi->type == FOURCC("hvc1")) {
-        info->ntiles = 1;
-        info->tile_id[0] = primary;
-        info->rows = info->cols = 1;
-    } else
+    // the tiles: HEVC, one decoder configuration, one size, 8-bit 4:2:0, each in one piece;
+    // alpha planes (auxl to the primary): not handled
+    if (alpha_item(h, &iref, primary)) goto out;
+    if (heif_tiles(h, &iref, pi, "hvc1", info->tile_off, info->tile_len, &info->ntiles, &info->rows, &info->cols,
+                   &info->tile_w, &info->tile_h, &gw, &gh, poff, plen, &npieces, "hvcC", &hvcc_index) ||
+        npieces)
         goto out;
-
-    // the tiles: HEVC, one decoder configuration, one size, 8-bit 4:2:0
-    int hvcc_index = 0;
-    for (int t = 0; t < info->ntiles; t++) {
-        Item *ti = item(h, info->tile_id[t]);
-        if (!ti || ti->type != FOURCC("hvc1")) goto out;
-        int x = prop_index(h, ti, "hvcC");
-        const Box *sz = prop(h, ti, "ispe");
-        if (!x || !sz || sz->end - sz->start < 12) goto out;
-        int w = (int)be32(d + sz->start + 4), hh = (int)be32(d + sz->start + 8);
-        if (t == 0) {
-            hvcc_index = x;
-            info->tile_w = w;
-            info->tile_h = hh;
-        } else if (x != hvcc_index || w != info->tile_w || hh != info->tile_h)
-            goto out;
-        if (ti != pi && (prop(h, ti, "clap") || prop(h, ti, "irot") || prop(h, ti, "imir"))) goto out;
-        size_t n;
-        const uint8_t *td = item_data(h, ti, &n);
-        if (!td || ti->method != 0) goto out;
-        info->tile_off[t] = (size_t)(td - d);
-        info->tile_len[t] = n;
-    }
+    info->width = gw;
+    info->height = gh;
     const Box *hc = &h->props[hvcc_index - 1];
     if (hc->end - hc->start < 23) goto out;
     const uint8_t *c = d + hc->start;
@@ -129,55 +46,35 @@ int nh_read_info(const uint8_t *d, size_t len, nh_info *info) {
     if (info->tile_w < 16 || info->tile_h < 16 || (info->tile_w | info->tile_h) & 1 || info->tile_w > 8192 ||
         info->tile_h > 8192)
         goto out;
-    if (pi->type == FOURCC("hvc1")) {
-        info->width = info->tile_w;
-        info->height = info->tile_h;
-    }
     // clean aperture: only a crop from the top left corner (it then trims the right and bottom
     // edges, like the grid's output size); other crops go to ImageIO
     const Box *cl = prop(h, pi, "clap");
     if (cl) {
-        if (cl->end - cl->start < 32) goto out;
-        const uint8_t *c = d + cl->start;
-        double cw = (double)be32(c) / be32(c + 4), ch = (double)be32(c + 8) / be32(c + 12);
-        double ox = (double)(int32_t)be32(c + 16) / be32(c + 20), oy = (double)(int32_t)be32(c + 24) / be32(c + 28);
-        if (!be32(c + 4) || !be32(c + 12) || !be32(c + 20) || !be32(c + 28)) goto out;
-        double left = ox + (info->width - 1) / 2.0 - (cw - 1) / 2.0, top = oy + (info->height - 1) / 2.0 - (ch - 1) / 2.0;
+        double cw, ch, left, top;
+        if (heif_clap(d, cl, info->width, info->height, &cw, &ch, &left, &top)) goto out;
         if (left != 0 || top != 0 || cw != (int)cw || ch != (int)ch || cw < 1 || ch < 1 || cw > info->width ||
             ch > info->height)
             goto out;
         info->width = (int)cw;
         info->height = (int)ch;
     }
-    int gw = info->cols * info->tile_w, gh = info->rows * info->tile_h;
+    gw = info->cols * info->tile_w;
+    gh = info->rows * info->tile_h;
     if (info->width < 1 || info->height < 1 || info->width > gw || info->height > gh) goto out;
     info->plane_w[0] = gw;
     info->plane_h[0] = gh;
     info->plane_w[1] = info->plane_w[2] = gw / 2;
     info->plane_h[1] = info->plane_h[2] = gh / 2;
 
-    // rotation, mirroring, colour profile (of the primary image)
-    const Box *r = prop(h, pi, "irot"), *m = prop(h, pi, "imir");
-    int irot = r && r->end > r->start ? d[r->start] & 3 : 0;
-    int imir = m && m->end > m->start ? d[m->start] & 1 : -1;
-    info->orientation = orientation(irot, imir);
-    for (int i = 0; i < pi->nprops; i++) {   // colr: an ICC profile and / or nclx
-        int x = pi->props[i];
-        if (x < 1 || x > h->nprops || h->props[x - 1].type != FOURCC("colr")) continue;
-        const Box *col = &h->props[x - 1];
-        if (col->end - col->start <= 4) continue;
-        uint32_t kind = be32(d + col->start);
-        if (kind == FOURCC("prof") || kind == FOURCC("rICC")) {
-            info->icc = d + col->start + 4;
-            info->icc_len = col->end - col->start - 4;
-        } else if (kind == FOURCC("nclx")) {
-            // the planes go to the GPU as full range BT.601 (as JPEG); colours: sRGB without a profile
-            if (col->end - col->start < 11) goto out;
-            uint32_t prim = be16(d + col->start + 4), matrix = be16(d + col->start + 8);
-            int full = d[col->start + 10] >> 7;
-            if (!full || (matrix != 2 && matrix != 5 && matrix != 6)) goto out;   // other YCbCr: ImageIO
-            if (prim != 1 && prim != 2) wide_primaries = 1;   // (P3, BT.2020 ...: fine with an ICC profile)
-        }
+    // rotation and mirroring (in the order of the properties), colour profile (of the primary image)
+    Xf xf[8];
+    info->orientation = heif_orientation(xf, heif_transforms(h, pi, xf, 8));
+    int nclx, prim, matrix, full;
+    heif_colr(h, pi, &info->icc, &info->icc_len, &nclx, &prim, &matrix, &full);
+    if (nclx < 0) goto out;
+    if (nclx) {   // the planes go to the GPU as full range BT.601 (as JPEG); colours: sRGB without a profile
+        if (!full || (matrix != 2 && matrix != 5 && matrix != 6)) goto out;   // other YCbCr: ImageIO
+        if (prim != 1 && prim != 2) wide_primaries = 1;   // (P3, BT.2020 ...: fine with an ICC profile)
     }
     if (wide_primaries && !info->icc) goto out;
     rc = 0;

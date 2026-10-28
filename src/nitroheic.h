@@ -30,7 +30,6 @@ typedef struct {
     size_t icc_len;
     // internal
     int ntiles;
-    uint32_t tile_id[256];
     size_t tile_off[256], tile_len[256];
     const uint8_t *hvcc;        // HEVC decoder configuration of the tiles
     size_t hvcc_len;

@@ -242,18 +242,246 @@ static inline int parse_iprp(Heif *h, const Box *b) {
     return 0;
 }
 
-// EXIF orientation of: rotation by irot * 90 degrees anticlockwise, then mirroring (imir).
-static inline int orientation(int irot, int imir) {
+// ---------------------------------------------------------------------------
+// what nitroheic and nitroavif do alike
+
+// Opens a HEIF file: one of the brands (NULL-terminated) in ftyp, the meta box's items, locations
+// and properties into h; *iref the item references box (end 0: none), *primary the primary item's
+// id (an item of the file). -1 if it is not such a file or is damaged.
+static inline int heif_open(Heif *h, const uint8_t *d, size_t len, const char *const *brands, Box *iref, uint32_t *primary) {
+    h->d = d;
+    h->len = len;
+    Box ftyp, meta, hdlr, pitm, iinf, iloc, iprp;
+    size_t o = 0;
+    memset(iref, 0, sizeof *iref);
+    if (!next_box(d, &o, len, &ftyp) || ftyp.type != FOURCC("ftyp")) return -1;
+    int brand = 0;   // the major brand, or (after the version) a compatible one
+    for (size_t p = ftyp.start; p + 4 <= ftyp.end; p += 4)
+        for (int k = 0; p != ftyp.start + 4 && brands[k]; k++)
+            if (be32(d + p) == FOURCC(brands[k])) brand = 1;
+    if (!brand || !find_box(d, 0, len, "meta", &meta) || meta.end - meta.start < 4) return -1;
+    size_t ms = meta.start + 4;
+    if (!find_box(d, ms, meta.end, "hdlr", &hdlr) || hdlr.end - hdlr.start < 12 ||
+        be32(d + hdlr.start + 8) != FOURCC("pict"))
+        return -1;
+    if (!find_box(d, ms, meta.end, "pitm", &pitm) || !find_box(d, ms, meta.end, "iinf", &iinf) ||
+        !find_box(d, ms, meta.end, "iloc", &iloc) || !find_box(d, ms, meta.end, "iprp", &iprp))
+        return -1;
+    if (find_box(d, ms, meta.end, "iref", iref) && iref->end - iref->start < 4) iref->start = iref->end = 0;   // (empty: none)
+    find_box(d, ms, meta.end, "idat", &h->idat);
+    if (pitm.end - pitm.start < 6 || (d[pitm.start] != 0 && pitm.end - pitm.start < 8)) return -1;   // (v1: a 32-bit id)
+    *primary = d[pitm.start] == 0 ? be16(d + pitm.start + 4) : be32(d + pitm.start + 4);
+    if (parse_iinf(h, &iinf) || parse_iloc(h, &iloc) || parse_iprp(h, &iprp)) return -1;
+    return item(h, *primary) ? 0 : -1;
+}
+
+// the dimg references of item `from` (a grid's tiles); returns their count, -1 if damaged
+static inline int dimg_refs(const uint8_t *d, const Box *iref, uint32_t from, uint32_t *ids, int max) {
+    if (!iref->end) return 0;
+    int v = d[iref->start], idsz = v == 0 ? 2 : 4, n = 0;
+    size_t ro = iref->start + 4;
+    Box b;
+    while (next_box(d, &ro, iref->end, &b)) {
+        if (b.end - b.start < (size_t)idsz + 2) continue;
+        uint32_t f = idsz == 2 ? be16(d + b.start) : be32(d + b.start), k = be16(d + b.start + idsz);
+        size_t p = b.start + idsz + 2;
+        if (p + (size_t)k * idsz > b.end) return -1;
+        if (b.type != FOURCC("dimg") || f != from) continue;
+        if (k > (uint32_t)max) return -1;
+        for (uint32_t i = 0; i < k; i++) ids[i] = idsz == 2 ? be16(d + p + 2 * i) : be32(d + p + 4 * i);
+        n = (int)k;
+    }
+    return n;
+}
+
+// Is there a reference of this type from item `from` to item `to`?
+static inline int has_ref(const uint8_t *d, const Box *iref, const char *type, uint32_t from, uint32_t to) {
+    if (!iref->end) return 0;
+    int v = d[iref->start], idsz = v == 0 ? 2 : 4;
+    size_t ro = iref->start + 4;
+    Box b;
+    while (next_box(d, &ro, iref->end, &b)) {
+        if (b.type != FOURCC(type) || b.end - b.start < (size_t)idsz + 2) continue;
+        uint32_t f = idsz == 2 ? be16(d + b.start) : be32(d + b.start), k = be16(d + b.start + idsz);
+        size_t p = b.start + idsz + 2;
+        if (f != from || p + (size_t)k * idsz > b.end) continue;
+        for (uint32_t i = 0; i < k; i++)
+            if ((idsz == 2 ? be16(d + p + 2 * i) : be32(d + p + 4 * i)) == to) return 1;
+    }
+    return 0;
+}
+
+// the alpha plane of the primary image: the item whose auxl reference points to it (0: none)
+static inline uint32_t alpha_item(Heif *h, const Box *iref, uint32_t primary) {
+    const uint8_t *d = h->d;
+    if (!iref->end) return 0;
+    int v = d[iref->start], idsz = v == 0 ? 2 : 4;
+    size_t ro = iref->start + 4;
+    Box b;
+    while (next_box(d, &ro, iref->end, &b)) {
+        if (b.type != FOURCC("auxl") || b.end - b.start < (size_t)idsz + 2) continue;
+        uint32_t from = idsz == 2 ? be16(d + b.start) : be32(d + b.start), k = be16(d + b.start + idsz);
+        size_t p = b.start + idsz + 2;
+        if (p + (size_t)k * idsz > b.end) return 0;
+        for (uint32_t i = 0; i < k; i++)
+            if ((idsz == 2 ? be16(d + p + 2 * i) : be32(d + p + 4 * i)) == primary) {
+                Item *ax = item(h, from);
+                const Box *c = ax ? prop(h, ax, "auxC") : NULL;
+                if (c && c->end - c->start > 4 && (contains(d + c->start + 4, c->end - c->start - 4, "alpha") ||
+                                                   contains(d + c->start + 4, c->end - c->start - 4, "auxid:1")))
+                    return from;
+            }
+    }
+    return 0;
+}
+
+// The tiles of an image item `it` (a grid of them, or a single one, of type `tile`: "hvc1" /
+// "av01"): their data (off / len; a single image in several pieces - a layered one - in poff /
+// plen instead, *npieces of them, else 0), the grid (rows x cols of tw x th; the image gw x gh:
+// the grid's output size, a single tile's size). The tiles must be of one size and have no
+// transformations of their own; with cfg (a decoder configuration property, "hvcC"), they must
+// share one, *cfg_index its property index. -1 if not so.
+static inline int heif_tiles(Heif *h, const Box *iref, Item *it, const char *tile, size_t *off, size_t *len, int *ntiles,
+                             int *rows, int *cols, int *tw, int *th, int *gw, int *gh, size_t *poff, size_t *plen,
+                             int *npieces, const char *cfg, int *cfg_index) {
+    *npieces = 0;
+    const uint8_t *d = h->d;
+    uint32_t ids[256];
+    int n;
+    if (it->type == FOURCC("grid")) {
+        size_t gl;
+        const uint8_t *g = item_data(h, it, &gl);
+        n = dimg_refs(d, iref, it->id, ids, 256);
+        if (!g || gl < 8 || n < 1) return -1;
+        int wide = g[1] & 1;
+        if (gl < (size_t)(wide ? 12 : 8)) return -1;
+        *rows = g[2] + 1;
+        *cols = g[3] + 1;
+        *gw = (int)(wide ? be32(g + 4) : be16(g + 4));
+        *gh = (int)(wide ? be32(g + 8) : be16(g + 6));
+        if (*rows * *cols != n) return -1;
+    } else if (it->type == FOURCC(tile)) {
+        n = 1;
+        ids[0] = it->id;
+        *rows = *cols = 1;
+        *gw = *gh = 0;
+    } else {
+        return -1;
+    }
+    for (int t = 0; t < n; t++) {
+        Item *ti = item(h, ids[t]);
+        if (!ti || ti->type != FOURCC(tile)) return -1;
+        if (cfg) {
+            int x = prop_index(h, ti, cfg);
+            if (!x || (t > 0 && x != *cfg_index)) return -1;
+            *cfg_index = x;
+        }
+        const Box *sz = prop(h, ti, "ispe");
+        if (!sz || sz->end - sz->start < 12) return -1;
+        int w = (int)be32(d + sz->start + 4), hh = (int)be32(d + sz->start + 8);
+        if (t == 0) {
+            *tw = w;
+            *th = hh;
+        } else if (w != *tw || hh != *th) {
+            return -1;
+        }
+        if (ti != it && (prop(h, ti, "clap") || prop(h, ti, "irot") || prop(h, ti, "imir"))) return -1;
+        size_t k;
+        const uint8_t *td = item_data(h, ti, &k);
+        if (!td && n == 1 && (*npieces = item_extents(h, ti, poff, plen)) > 0) continue;
+        if (!td) return -1;
+        off[t] = (size_t)(td - d);
+        len[t] = k;
+    }
+    if (*tw < 1 || *th < 1 || *tw > 16384 || *th > 16384) return -1;
+    if (n == 1) {
+        *gw = *tw;
+        *gh = *th;
+    }
+    *ntiles = n;
+    return 0;
+}
+
+// The colr properties of an item: an ICC profile (*icc, *icc_len; NULL: none) and / or nclx
+// (*nclx 1: *primaries, *matrix, *full; 0: none; -1: a damaged one).
+static inline void heif_colr(Heif *h, const Item *pi, const uint8_t **icc, size_t *icc_len, int *nclx, int *primaries,
+                             int *matrix, int *full) {
+    const uint8_t *d = h->d;
+    *icc = NULL;
+    *icc_len = 0;
+    *nclx = *primaries = *matrix = *full = 0;
+    for (int i = 0; i < pi->nprops; i++) {
+        int x = pi->props[i];
+        if (x < 1 || x > h->nprops || h->props[x - 1].type != FOURCC("colr")) continue;
+        const Box *col = &h->props[x - 1];
+        if (col->end - col->start <= 4) continue;
+        uint32_t kind = be32(d + col->start);
+        if (kind == FOURCC("prof") || kind == FOURCC("rICC")) {
+            *icc = d + col->start + 4;
+            *icc_len = col->end - col->start - 4;
+        } else if (kind == FOURCC("nclx")) {
+            if (col->end - col->start < 11) {
+                *nclx = -1;
+                continue;
+            }
+            *nclx = 1;
+            *primaries = (int)be16(d + col->start + 4);
+            *matrix = (int)be16(d + col->start + 8);
+            *full = d[col->start + 10] >> 7;
+        }
+    }
+}
+
+// A clean aperture box, for an image of vw x vh: the crop's size and its top left corner (both
+// may be fractional, the corner negative). -1 if damaged.
+static inline int heif_clap(const uint8_t *d, const Box *b, int vw, int vh, double *cw, double *ch, double *left, double *top) {
+    if (b->end - b->start < 32) return -1;
+    const uint8_t *c = d + b->start;
+    if (!be32(c + 4) || !be32(c + 12) || !be32(c + 20) || !be32(c + 28)) return -1;
+    *cw = (double)be32(c) / be32(c + 4);
+    *ch = (double)be32(c + 8) / be32(c + 12);
+    double ox = (double)(int32_t)be32(c + 16) / be32(c + 20), oy = (double)(int32_t)be32(c + 24) / be32(c + 28);
+    *left = ox + (vw - 1) / 2.0 - (*cw - 1) / 2.0;
+    *top = oy + (vh - 1) / 2.0 - (*ch - 1) / 2.0;
+    return 0;
+}
+
+typedef struct { int kind, arg; } Xf;   // 0: irot (arg x 90 degrees anticlockwise), 1: imir (arg 0: top-bottom, 1: left-right)
+
+// An item's irot / imir properties in their order (HEIF applies them so): up to max of them, their count.
+static inline int heif_transforms(Heif *h, const Item *pi, Xf *xf, int max) {
+    int n = 0;
+    for (int i = 0; i < pi->nprops && n < max; i++) {
+        int x = pi->props[i];
+        if (x < 1 || x > h->nprops) continue;
+        const Box *b = &h->props[x - 1];
+        if (b->end <= b->start) continue;
+        if (b->type == FOURCC("irot")) xf[n++] = (Xf){0, h->d[b->start] & 3};
+        else if (b->type == FOURCC("imir")) xf[n++] = (Xf){1, h->d[b->start] & 1};
+    }
+    return n;
+}
+
+// The EXIF orientation of rotations and mirrorings in this order.
+static inline int heif_orientation(const Xf *xf, int n) {
     // 2x2 matrices (x right, y down) of the 8 EXIF orientations, index 1..8
     static const int ex[9][4] = {{0}, {1, 0, 0, 1}, {-1, 0, 0, 1}, {-1, 0, 0, -1}, {1, 0, 0, -1},
                                  {0, 1, 1, 0}, {0, -1, 1, 0}, {0, -1, -1, 0}, {0, 1, -1, 0}};
     int m[4] = {1, 0, 0, 1};
-    for (int k = 0; k < (irot & 3); k++) {   // 90 degrees anticlockwise: (x, y) -> (y, -x)
-        int n[4] = {m[2], m[3], -m[0], -m[1]};
-        memcpy(m, n, sizeof m);
+    for (int k = 0; k < n; k++) {
+        if (xf[k].kind == 0) {
+            for (int r = 0; r < (xf[k].arg & 3); r++) {   // 90 degrees anticlockwise: (x, y) -> (y, -x)
+                int t[4] = {m[2], m[3], -m[0], -m[1]};
+                memcpy(m, t, sizeof m);
+            }
+        } else if (xf[k].arg == 1) {   // left and right exchanged
+            m[0] = -m[0];
+            m[1] = -m[1];
+        } else {   // top and bottom (as libavif / libheif read imir 0)
+            m[2] = -m[2];
+            m[3] = -m[3];
+        }
     }
-    if (imir == 0) { m[2] = -m[2]; m[3] = -m[3]; }   // top and bottom exchanged (as libavif / libheif read it)
-    if (imir == 1) { m[0] = -m[0]; m[1] = -m[1]; }   // left and right
     for (int o = 1; o <= 8; o++)
         if (!memcmp(m, ex[o], sizeof m)) return o;
     return 1;
