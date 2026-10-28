@@ -405,7 +405,8 @@ static void undo_delete(NitroWindow *self) {
 // the image when ready
 typedef struct {
     NitroVector *vector;
-    int page, index;
+    int page;
+    unsigned serial;   // the image the page replaces
 } PageJob;
 
 static void page_job_free(gpointer data) {
@@ -427,8 +428,8 @@ static void page_done(GObject *source, GAsyncResult *result, gpointer user_data)
         nitro_image_free(image);
         return;
     }
-    if (image && nitro_loader_replace_image(self->loader, j->index, j->vector, image) &&
-        j->index == self->index) {   // (zoom and position stay, as when paging images)
+    if (image && nitro_loader_replace_image(self->loader, j->serial, image) == self->index) {
+        // (zoom and position stay, as when paging images)
         nitro_image_free(self->image);
         self->image = NULL;
         show_current(self);
@@ -442,7 +443,7 @@ static void show_page(NitroWindow *self, int delta) {
     PageJob *j = g_new0(PageJob, 1);
     j->vector = nitro_vector_ref(self->image->vector);
     j->page = page;
-    j->index = self->index;
+    j->serial = self->image->serial;
     GTask *task = g_task_new(self, NULL, page_done, NULL);
     g_task_set_task_data(task, j, page_job_free);
     g_task_run_in_thread(task, page_thread);

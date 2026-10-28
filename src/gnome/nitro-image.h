@@ -20,6 +20,7 @@ typedef struct {
     int source_height;
     int dng, ev3;          // a DNG developed by nitrodng, with this exposure correction (1/3 EV)
     double decode_ms;
+    unsigned serial;       // (from nitro_loader_get: the cached image this was copied from)
 } NitroImage;
 
 // GTK < 4.10 draws a texture with a plain linear filter, without mipmaps: a photo reduced a lot

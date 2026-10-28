@@ -1,30 +1,19 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 A'rpi - part of jpeg-nitro (https://github.com/gereoffy/jpeg-nitro)
-// nitro-loader: background decoding with prefetch. See nitro-loader.h.
+// nitro-loader: background decoding with prefetch. See nitro-loader.h. The cache and the decoder
+// thread are nitro_prefetch's (shared with the other viewers); this is its GLib face: GFiles,
+// GError messages, notifications on the main loop.
 #include "nitro-loader.h"
+#include "../nitro_prefetch.h"
 
-#define AHEAD 3       // images decoded ahead in the paging direction
-#define BEHIND 2      // ... and kept / decoded behind
-#define MAX_CACHE 8
-
-typedef struct {
-    int index;
-    NitroImage *image;
-} Entry;
+#include <stdlib.h>
+#include <string.h>
 
 struct _NitroLoader {
     gint refs;                 // the owner + one per pending main-thread notification
     gint quit;                 // set by nitro_loader_free: no more callbacks
-    GMutex lock;
-    GCond cond;
-    GThread *thread;
-    GPtrArray *files;          // of GFile
-    Entry cache[MAX_CACHE];
-    int ncache;
-    GHashTable *failed;        // index + 1 -> reason (char *)
-    int cur, dir;
-    guint gen;                 // bumped when the file list changes: in-flight decodes are dropped
-    GPtrArray *grave;          // evicted images: freed on the main thread, where GTK uses textures
+    NvLoader *L;
+    GPtrArray *files;          // of GFile: the viewer's list, kept in step with the loader's
     NitroLoaderReady ready;
     gpointer user_data;
 };
@@ -34,37 +23,25 @@ typedef struct {
     int index;                 // -1: nothing to report (only images to free)
 } Notify;
 
-static void free_images(GPtrArray *images) {
-    for (guint i = 0; i < images->len; i++) nitro_image_free(g_ptr_array_index(images, i));
-    g_ptr_array_set_size(images, 0);
-}
-
 static void reap(NitroLoader *l) {   // main thread
-    GPtrArray *dead = g_ptr_array_new();
-    g_mutex_lock(&l->lock);
-    for (guint i = 0; i < l->grave->len; i++) g_ptr_array_add(dead, g_ptr_array_index(l->grave, i));
-    g_ptr_array_set_size(l->grave, 0);
-    g_mutex_unlock(&l->lock);
-    free_images(dead);
-    g_ptr_array_unref(dead);
+    void *dead[64];
+    int n;
+    while ((n = nv_loader_reap(l->L, dead, 64)) > 0)
+        for (int i = 0; i < n; i++) nitro_image_free(dead[i]);
 }
 
 static void loader_unref(NitroLoader *l) {   // main thread
     if (!g_atomic_int_dec_and_test(&l->refs)) return;
-    for (int i = 0; i < l->ncache; i++) nitro_image_free(l->cache[i].image);
-    free_images(l->grave);
-    g_ptr_array_unref(l->grave);
-    g_hash_table_unref(l->failed);
-    if (l->files) g_ptr_array_unref(l->files);
-    g_mutex_clear(&l->lock);
-    g_cond_clear(&l->cond);
     g_free(l);
 }
 
 static gboolean notify_cb(gpointer data) {
     Notify *n = data;
-    reap(n->loader);
-    if (n->index >= 0 && !g_atomic_int_get(&n->loader->quit)) n->loader->ready(n->loader->user_data, n->index);
+    NitroLoader *l = n->loader;
+    if (!g_atomic_int_get(&l->quit)) {
+        reap(l);
+        if (n->index >= 0) l->ready(l->user_data, n->index);
+    }
     return G_SOURCE_REMOVE;
 }
 
@@ -74,227 +51,107 @@ static void notify_free(gpointer data) {
     g_free(n);
 }
 
-// Priority order: current, then AHEAD in the paging direction, then BEHIND. Locked.
-static int wanted_locked(NitroLoader *l, int *w) {
-    int n = 0, nfiles = l->files ? (int)l->files->len : 0;
-    for (int k = 0; k <= MAX(AHEAD, BEHIND); k++) {
-        int cand[2] = {l->cur + l->dir * k, l->cur - l->dir * k};
-        for (int c = 0; c < 2; c++) {
-            int i = cand[c];
-            if (k > 0 && ((c == 0 && k > AHEAD) || (c == 1 && k > BEHIND))) continue;
-            if (i < 0 || i >= nfiles) continue;
-            int dup = 0;
-            for (int q = 0; q < n; q++) dup |= w[q] == i;
-            if (!dup) w[n++] = i;
-        }
-    }
-    return n;
+// the callbacks
+static void *ld_decode(void *path, char **error, void *ctx) {
+    GError *e = NULL;
+    NitroImage *image = nitro_image_load(path, &e);
+    if (!image) *error = strdup(e ? e->message : "Cannot decode the image");
+    g_clear_error(&e);
+    return image;
 }
-
-static gboolean cached_locked(NitroLoader *l, int index) {
-    for (int i = 0; i < l->ncache; i++)
-        if (l->cache[i].index == index) return TRUE;
-    return FALSE;
+static void ld_free(void *image, void *ctx) { nitro_image_free(image); }
+static int ld_stale(const void *image, void *ctx) {
+    const NitroImage *i = image;
+    return i->dng && i->ev3 != nitro_image_get_dng_ev3();
 }
-
-static gpointer run(gpointer data) {
-    NitroLoader *l = data;
-    g_mutex_lock(&l->lock);
-    for (;;) {
-        int w[2 * (AHEAD + BEHIND) + 2], nw = 0, next = -1;
-        while (!g_atomic_int_get(&l->quit)) {
-            nw = wanted_locked(l, w);
-            for (int k = 0; k < nw && next < 0; k++)
-                if (!cached_locked(l, w[k]) && !g_hash_table_contains(l->failed, GINT_TO_POINTER(w[k] + 1)))
-                    next = w[k];
-            if (next >= 0) break;
-            g_cond_wait(&l->cond, &l->lock);
-        }
-        if (g_atomic_int_get(&l->quit)) break;
-        for (int c = 0; c < l->ncache;) {   // evict everything outside the window
-            gboolean in = FALSE;
-            for (int k = 0; k < nw; k++) in |= l->cache[c].index == w[k];
-            if (in) { c++; continue; }
-            g_ptr_array_add(l->grave, l->cache[c].image);
-            l->cache[c] = l->cache[--l->ncache];
-        }
-        GFile *file = g_object_ref(g_ptr_array_index(l->files, next));
-        guint gen = l->gen;
-        g_mutex_unlock(&l->lock);
-
-        GError *error = NULL;
-        NitroImage *image = nitro_image_load(file, &error);
-        g_object_unref(file);
-
-        g_mutex_lock(&l->lock);
-        // the file list (index no longer valid) or the DNG exposure correction changed meanwhile
-        gboolean stale = gen != l->gen || (image && image->dng && image->ev3 != nitro_image_get_dng_ev3());
-        if (image && (stale || l->ncache == MAX_CACHE)) {
-            g_ptr_array_add(l->grave, image);
-        } else if (image) {
-            l->cache[l->ncache].index = next;
-            l->cache[l->ncache].image = image;
-            l->ncache++;
-        } else if (!stale) {
-            g_hash_table_insert(l->failed, GINT_TO_POINTER(next + 1),
-                                g_strdup(error ? error->message : "Cannot decode the image"));
-        }
-        g_clear_error(&error);
-        if (!g_atomic_int_get(&l->quit)) {
-            Notify *n = g_new(Notify, 1);
-            n->loader = l;
-            n->index = stale ? -1 : next;
-            g_atomic_int_inc(&l->refs);
-            g_idle_add_full(G_PRIORITY_DEFAULT, notify_cb, n, notify_free);
-        }
-    }
-    g_mutex_unlock(&l->lock);
-    return NULL;
+static void *ld_path_dup(void *path, void *ctx) { return g_object_ref(path); }
+static void ld_path_free(void *path, void *ctx) { g_object_unref(path); }
+static const char *ld_path_name(void *path, void *ctx) { return g_file_peek_path(path); }
+static void ld_notify(int index, void *ctx) {   // decoder thread -> the main loop
+    NitroLoader *l = ctx;
+    Notify *n = g_new(Notify, 1);
+    n->loader = l;
+    n->index = index;
+    g_atomic_int_inc(&l->refs);
+    g_idle_add_full(G_PRIORITY_DEFAULT, notify_cb, n, notify_free);
 }
 
 NitroLoader *nitro_loader_new(NitroLoaderReady ready, gpointer user_data) {
     NitroLoader *l = g_new0(NitroLoader, 1);
     l->refs = 1;
-    g_mutex_init(&l->lock);
-    g_cond_init(&l->cond);
-    l->failed = g_hash_table_new_full(g_direct_hash, g_direct_equal, NULL, g_free);
-    l->grave = g_ptr_array_new();
-    l->dir = 1;
     l->ready = ready;
     l->user_data = user_data;
-    l->thread = g_thread_new("nitro-loader", run, l);
+    NvLoaderOps ops = {ld_decode, ld_free, ld_stale, ld_path_dup, ld_path_free, ld_path_name, ld_notify, NULL, l};
+    void **none = malloc(sizeof *none);   // (an empty list until nitro_loader_set_files)
+    l->L = none ? nv_loader_new(&ops, none, 0) : NULL;
+    if (!l->L) g_error("cannot start the decoder thread");
     return l;
 }
 
 void nitro_loader_free(NitroLoader *l) {
     if (!l) return;
-    g_mutex_lock(&l->lock);
     g_atomic_int_set(&l->quit, 1);
-    g_cond_broadcast(&l->cond);
-    g_mutex_unlock(&l->lock);
-    g_thread_join(l->thread);   // (waits for a decode in progress)
-    loader_unref(l);            // pending notifications hold their own references
+    nv_loader_stop(l->L);   // (waits for a decode in progress, frees the images)
+    l->L = NULL;
+    g_clear_pointer(&l->files, g_ptr_array_unref);
+    loader_unref(l);        // pending notifications hold their own references
+}
+
+static void **refs_of(GPtrArray *files) {   // the list as the loader takes it
+    void **p = malloc(MAX(files ? files->len : 0, 1u) * sizeof *p);
+    if (!p) return NULL;
+    for (guint i = 0; files && i < files->len; i++) p[i] = g_object_ref(g_ptr_array_index(files, i));
+    return p;
 }
 
 void nitro_loader_set_files(NitroLoader *l, GPtrArray *files, int keep_index, int new_index) {
-    g_mutex_lock(&l->lock);
-    NitroImage *keep = NULL;
-    for (int i = 0; i < l->ncache; i++) {
-        if (keep_index >= 0 && l->cache[i].index == keep_index) keep = l->cache[i].image;
-        else g_ptr_array_add(l->grave, l->cache[i].image);
-    }
-    l->ncache = 0;
-    if (keep) {
-        l->cache[0].index = new_index;
-        l->cache[0].image = keep;
-        l->ncache = 1;
-    }
-    char *keep_failed = keep_index >= 0 ? g_strdup(g_hash_table_lookup(l->failed, GINT_TO_POINTER(keep_index + 1))) : NULL;
-    g_hash_table_remove_all(l->failed);
-    if (keep_failed) g_hash_table_insert(l->failed, GINT_TO_POINTER(new_index + 1), keep_failed);
+    void **p = refs_of(files);
+    if (!p) return;
+    nv_loader_replace(l->L, p, files ? (int)files->len : 0, keep_index, new_index);
     if (files) g_ptr_array_ref(files);
     if (l->files) g_ptr_array_unref(l->files);
     l->files = files;
-    l->cur = new_index >= 0 ? new_index : 0;
-    l->gen++;
-    g_cond_signal(&l->cond);
-    g_mutex_unlock(&l->lock);
-}
-
-static void shift_locked(NitroLoader *l, int from, int delta) {   // indices >= from move by delta
-    for (int c = 0; c < l->ncache; c++)
-        if (l->cache[c].index >= from) l->cache[c].index += delta;
-    GHashTable *failed = g_hash_table_new_full(g_direct_hash, g_direct_equal, NULL, g_free);
-    GHashTableIter it;
-    gpointer key, value;
-    g_hash_table_iter_init(&it, l->failed);
-    while (g_hash_table_iter_next(&it, &key, &value)) {
-        int i = GPOINTER_TO_INT(key) - 1;
-        g_hash_table_iter_steal(&it);
-        g_hash_table_insert(failed, GINT_TO_POINTER((i >= from ? i + delta : i) + 1), value);
-    }
-    g_hash_table_unref(l->failed);
-    l->failed = failed;
-    l->gen++;   // (a decode in flight would land at the old index)
-    g_cond_signal(&l->cond);
 }
 
 void nitro_loader_remove_file(NitroLoader *l, int index) {
-    g_mutex_lock(&l->lock);
-    for (int c = 0; c < l->ncache; c++)
-        if (l->cache[c].index == index) {
-            g_ptr_array_add(l->grave, l->cache[c].image);
-            l->cache[c] = l->cache[--l->ncache];
-            break;
-        }
-    g_hash_table_remove(l->failed, GINT_TO_POINTER(index + 1));
-    if (l->files && index >= 0 && index < (int)l->files->len) g_ptr_array_remove_index(l->files, (guint)index);
-    shift_locked(l, index + 1, -1);
-    g_mutex_unlock(&l->lock);
+    if (!l->files || index < 0 || index >= (int)l->files->len) return;
+    nv_loader_remove(l->L, index);
+    g_ptr_array_remove_index(l->files, (guint)index);
 }
 
 void nitro_loader_insert_file(NitroLoader *l, int index, GFile *file) {
-    g_mutex_lock(&l->lock);
-    shift_locked(l, index, 1);
-    if (l->files) g_ptr_array_insert(l->files, index, g_object_ref(file));
-    g_mutex_unlock(&l->lock);
+    if (!l->files || index < 0 || index > (int)l->files->len) return;
+    if (nv_loader_insert(l->L, index, g_object_ref(file))) {
+        g_object_unref(file);
+        return;
+    }
+    g_ptr_array_insert(l->files, index, g_object_ref(file));
 }
 
-gboolean nitro_loader_replace_image(NitroLoader *l, int index, NitroVector *old, NitroImage *image) {
-    gboolean done = FALSE;
-    g_mutex_lock(&l->lock);
-    for (int c = 0; c < l->ncache && !done; c++)
-        if (l->cache[c].index == index && l->cache[c].image->vector == old) {
-            g_ptr_array_add(l->grave, l->cache[c].image);
-            l->cache[c].image = image;
-            done = TRUE;
-        }
-    if (!done) g_ptr_array_add(l->grave, image);
-    g_mutex_unlock(&l->lock);
-    return done;
+int nitro_loader_replace_image(NitroLoader *l, unsigned serial, NitroImage *image) {
+    return nv_loader_replace_image(l->L, serial, image);
 }
 
-void nitro_loader_dng_changed(NitroLoader *l) {
-    int ev3 = nitro_image_get_dng_ev3();
-    g_mutex_lock(&l->lock);
-    for (int c = 0; c < l->ncache;)
-        if (l->cache[c].image->dng && l->cache[c].image->ev3 != ev3) {
-            g_ptr_array_add(l->grave, l->cache[c].image);
-            l->cache[c] = l->cache[--l->ncache];
-        } else {
-            c++;
-        }
-    g_cond_signal(&l->cond);
-    g_mutex_unlock(&l->lock);
-}
+void nitro_loader_dng_changed(NitroLoader *l) { nv_loader_drop(l->L, ld_stale, NULL, 0, NULL, NULL); }
 
-void nitro_loader_focus(NitroLoader *l, int index, int direction) {
-    g_mutex_lock(&l->lock);
-    l->cur = index;
-    l->dir = direction < 0 ? -1 : 1;
-    g_cond_signal(&l->cond);
-    g_mutex_unlock(&l->lock);
-}
+void nitro_loader_focus(NitroLoader *l, int index, int direction) { nv_loader_focus(l->L, index, direction); }
 
 NitroImage *nitro_loader_get(NitroLoader *l, int index) {
-    NitroImage *copy = NULL;
-    g_mutex_lock(&l->lock);
-    for (int i = 0; i < l->ncache; i++)
-        if (l->cache[i].index == index) {
-            copy = g_new(NitroImage, 1);
-            *copy = *l->cache[i].image;
-            if (copy->texture) g_object_ref(copy->texture);
-            nitro_vector_ref(copy->vector);
-            break;
-        }
-    g_mutex_unlock(&l->lock);
+    unsigned serial = 0;
+    const NitroImage *image = nv_loader_get(l->L, index, &serial);   // (stays until reaped, which is on this thread)
+    if (!image) return NULL;
+    NitroImage *copy = g_new(NitroImage, 1);
+    *copy = *image;
+    if (copy->texture) g_object_ref(copy->texture);
+    nitro_vector_ref(copy->vector);
+    copy->serial = serial;
     return copy;
 }
 
 gboolean nitro_loader_failed(NitroLoader *l, int index, char **message) {
-    g_mutex_lock(&l->lock);
-    const char *m = g_hash_table_lookup(l->failed, GINT_TO_POINTER(index + 1));
-    if (m && message) *message = g_strdup(m);
-    g_mutex_unlock(&l->lock);
-    return m != NULL;
+    char *m = NULL;
+    int failed = nv_loader_failed(l->L, index, &m);
+    if (message) *message = m ? g_strdup(m) : failed ? g_strdup("Cannot decode the image") : NULL;
+    free(m);
+    return failed != 0;
 }

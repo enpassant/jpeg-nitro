@@ -28,9 +28,10 @@ void nitro_loader_set_files(NitroLoader *loader, GPtrArray *files, int keep_inde
 void nitro_loader_remove_file(NitroLoader *loader, int index);
 void nitro_loader_insert_file(NitroLoader *loader, int index, GFile *file);
 
-// Another page of image index's drawing (takes image): replaces the decoded image if it is
-// still old's (FALSE: it is not there any more, image freed).
-gboolean nitro_loader_replace_image(NitroLoader *loader, int index, NitroVector *old, NitroImage *image);
+// An image decoded again (another page of its drawing, a DNG developed again; takes image):
+// replaces the cached image with that serial (NitroImage.serial of the one it was made from) if
+// it is still there. Returns its index now, -1 if it is not there any more (image freed).
+int nitro_loader_replace_image(NitroLoader *loader, unsigned serial, NitroImage *image);
 
 // The DNG exposure correction changed (nitro_image_set_dng_ev3): DNGs decoded with another one
 // are dropped and decoded again.
@@ -39,8 +40,8 @@ void nitro_loader_dng_changed(NitroLoader *loader);
 // The image shown now and the paging direction (+1 / -1): decides what is decoded next.
 void nitro_loader_focus(NitroLoader *loader, int index, int direction);
 
-// A new NitroImage (own texture / SVG references, free with nitro_image_free) or NULL if not
-// decoded yet. Main thread.
+// A new NitroImage (own texture / SVG references, free with nitro_image_free; its serial set) or
+// NULL if not decoded yet. Main thread.
 NitroImage *nitro_loader_get(NitroLoader *loader, int index);
 
 // TRUE if the image could not be decoded; *message (optional) gets a copy of the reason.

@@ -48,7 +48,8 @@
 #include "nitrodng.h"
 #include "nitrowebp.h"
 #include "nitrotiff.h"
-#include "nitro_load.h"   // reading image files, the image extensions (shared by the viewers)
+#include "nitro_load.h"       // reading and decoding image files (shared by the viewers)
+#include "nitro_prefetch.h"   // the image cache and background decoder (shared too)
 #ifdef NV_DAV1D
 #include "nitroavif.h"   // AVIF: AV1 through dav1d
 #endif
@@ -70,8 +71,7 @@
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 
 #define MAX_TEX 16384
-#define AHEAD 3     // images decoded ahead in the paging direction
-#define BEHIND 2    // ... and kept / decoded behind
+
 #define WM_APP_DECODED (WM_APP + 1)
 #define WM_APP_DETAIL (WM_APP + 2)   // a vector image's sharp detail is rendered
 #define WM_APP_PAGE (WM_APP + 3)     // another page of a multi-page document is drawn
@@ -170,7 +170,7 @@ typedef struct {
     ID3D11ShaderResourceView *texsrv;
     double read_ms, decode_ms, upload_ms, conv_ms;
     int mode, bands;
-    unsigned serial;              // (unique: the image a page / DNG job's result replaces)
+
     int ev3;                           // a DNG: the exposure correction it was developed with (1/3 EV)
     int limited;                       // KIND_YUV: limited range (Y 16..235, as WebP), not full range
 #ifdef NV_VECTOR
@@ -183,8 +183,6 @@ typedef struct {
 #endif
 } Decoded;
 
-static volatile LONG g_serial;
-static unsigned next_serial(void) { return (unsigned)InterlockedIncrement(&g_serial); }
 
 static const char *mode_name(int m) {
     const char *n = nv_mode_name(m);
@@ -907,7 +905,6 @@ static Decoded *decode_file(const wchar_t *wpath) {
         free(data);
         return NULL;
     }
-    d->serial = next_serial();
     d->read_ms = t1 - t0;
     d->orientation = 1;
 #ifdef NV_VECTOR
@@ -970,289 +967,83 @@ static Decoded *decode_file(const wchar_t *wpath) {
 }
 
 // ---------------------------------------------------------------------------
-// image cache + background decoder
 
-typedef struct {
-    wchar_t **files;
-    int nfiles;
-    struct { int index; Decoded *d; } cache[16];
-    int ncache;
-    char *failed;                 // per file
-    int cur, dir;
-    unsigned gen;                 // bumped when the file list changes: in-flight decodes are dropped
-    Decoded *grave[64];           // evicted, freed by the main thread (textures live there)
-    int ngrave;
-    SRWLOCK lock;
-    CONDITION_VARIABLE cv;
-    HWND notify;
-} Loader;
+// image cache + background decoder: nitro_prefetch, with these callbacks
 
-static Loader L;
+static NvLoader *L;
+static HWND g_notify;   // the window the decoder thread posts WM_APP_DECODED / WM_APP_DNG to
 
-static Decoded *loader_get(int i) {
-    AcquireSRWLockExclusive(&L.lock);
-    Decoded *d = NULL;
-    for (int k = 0; k < L.ncache; k++)
-        if (L.cache[k].index == i) d = L.cache[k].d;
-    ReleaseSRWLockExclusive(&L.lock);
-    return d;
+static int stale_dng(const Decoded *d) { return d && d->mode == MODE_NITRODNG && d->ev3 != (int)g_dng_ev3; }
+
+static void *ld_decode(void *path, char **error, void *ctx) { return decode_file(path); }
+static void ld_free(void *image, void *ctx) { decoded_free(image); }
+static int ld_stale(const void *image, void *ctx) { return stale_dng(image); }
+static void *ld_path_dup(void *path, void *ctx) { return _wcsdup(path); }
+static void ld_path_free(void *path, void *ctx) { free(path); }
+static const char *ld_path_name(void *path, void *ctx) { return utf8(path); }
+static void ld_notify(int index, void *ctx) { PostMessageW(g_notify, WM_APP_DECODED, (WPARAM)index, 0); }
+static void ld_thread_started(void *ctx) { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL); }
+
+static int loader_start(wchar_t **files, int n) {   // (the loader owns the list from now on)
+    static const NvLoaderOps ops = {ld_decode, ld_free, ld_stale, ld_path_dup, ld_path_free, ld_path_name, ld_notify,
+                                    ld_thread_started, NULL};
+    L = nv_loader_new(&ops, (void **)files, n);
+    return L ? 0 : -1;
 }
 
-static int loader_failed(int i) {
-    AcquireSRWLockExclusive(&L.lock);
-    int f = i >= 0 && i < L.nfiles && L.failed[i];
-    ReleaseSRWLockExclusive(&L.lock);
-    return f;
-}
+static Decoded *loader_get(int i) { return nv_loader_get(L, i, NULL); }
+static int loader_failed(int i) { return nv_loader_failed(L, i, NULL); }
 
-static void bury_locked(Decoded *d) {
-    if (!d) return;
-    if (L.ngrave < 64) L.grave[L.ngrave++] = d;   // (never full: the main thread empties it on every message)
-}
-
-static void loader_reap(void) {   // main thread
-    Decoded *g[64];
-    AcquireSRWLockExclusive(&L.lock);
-    int n = L.ngrave;
-    memcpy(g, L.grave, (size_t)n * sizeof *g);
-    L.ngrave = 0;
-    ReleaseSRWLockExclusive(&L.lock);
-    for (int i = 0; i < n; i++) decoded_free(g[i]);
-}
-
-static void loader_focus(int cur, int dir) {
-    AcquireSRWLockExclusive(&L.lock);
-    L.cur = cur;
-    L.dir = dir;
-    WakeConditionVariable(&L.cv);
-    ReleaseSRWLockExclusive(&L.lock);
-}
-
-// New file list (takes ownership); the decoded image of old_index (if any) is kept as new_index.
-static void loader_replace(wchar_t **files, int n, int old_index, int new_index) {
-    AcquireSRWLockExclusive(&L.lock);
-    Decoded *keep = NULL;
-    for (int k = 0; k < L.ncache; k++) {
-        if (L.cache[k].index == old_index && old_index >= 0) keep = L.cache[k].d;
-        else bury_locked(L.cache[k].d);
-    }
-    int keep_failed = old_index >= 0 && old_index < L.nfiles && L.failed[old_index];
-    L.ncache = 0;
-    if (keep) { L.cache[0].index = new_index; L.cache[0].d = keep; L.ncache = 1; }
-    for (int i = 0; i < L.nfiles; i++) free(L.files[i]);
-    free(L.files);
-    free(L.failed);
-    L.files = files;
-    L.nfiles = n;
-    L.failed = calloc((size_t)MAX(n, 1), 1);
-    if (keep_failed) L.failed[new_index] = 1;
-    L.cur = new_index;
-    L.gen++;
-    WakeConditionVariable(&L.cv);
-    ReleaseSRWLockExclusive(&L.lock);
-}
-
-// File i left the list (deleted): later images move up one place, decoded ones with them. (Main
-// thread only: the viewer's list is this same array.)
-static void loader_remove(int i) {
-    AcquireSRWLockExclusive(&L.lock);
-    for (int c = 0; c < L.ncache;) {
-        if (L.cache[c].index == i) {
-            bury_locked(L.cache[c].d);
-            L.cache[c] = L.cache[--L.ncache];
-            continue;
-        }
-        if (L.cache[c].index > i) L.cache[c].index--;
-        c++;
-    }
-    free(L.files[i]);
-    memmove(L.files + i, L.files + i + 1, (size_t)(L.nfiles - i - 1) * sizeof *L.files);
-    memmove(L.failed + i, L.failed + i + 1, (size_t)(L.nfiles - i - 1));
-    L.nfiles--;
-    L.gen++;   // (a decode in flight would land at the old index)
-    WakeConditionVariable(&L.cv);
-    ReleaseSRWLockExclusive(&L.lock);
-}
-
-// A file came back at i (undo; takes path). Returns -1 if out of memory.
-static int loader_insert(int i, wchar_t *path) {
-    AcquireSRWLockExclusive(&L.lock);
-    wchar_t **f = realloc(L.files, (size_t)(L.nfiles + 1) * sizeof *f);
-    if (f) L.files = f;
-    char *fl = f ? realloc(L.failed, (size_t)L.nfiles + 1) : NULL;
-    if (fl) L.failed = fl;
-    if (!f || !fl) {
-        ReleaseSRWLockExclusive(&L.lock);
-        return -1;
-    }
-    for (int c = 0; c < L.ncache; c++)
-        if (L.cache[c].index >= i) L.cache[c].index++;
-    memmove(L.files + i + 1, L.files + i, (size_t)(L.nfiles - i) * sizeof *L.files);
-    memmove(L.failed + i + 1, L.failed + i, (size_t)(L.nfiles - i));
-    L.files[i] = path;
-    L.failed[i] = 0;
-    L.nfiles++;
-    L.gen++;
-    WakeConditionVariable(&L.cv);
-    ReleaseSRWLockExclusive(&L.lock);
-    return 0;
+static void loader_reap(void) {   // main thread (textures live here)
+    void *dead[64];
+    int n;
+    while ((n = nv_loader_reap(L, dead, 64)) > 0)
+        for (int i = 0; i < n; i++) decoded_free(dead[i]);
 }
 
 #ifdef NV_VECTOR
 // The size vector images are rendered for changed (g_vec_tw): prefetched ones too small for it
 // are dropped and rendered again (the current one is sharpened by the detail render).
-static void loader_vector_target_changed(void) {
+static int vec_too_small(const void *image, void *ctx) {
+    const Decoded *d = image;
     LONG tw = g_vec_tw, th = g_vec_th;
-    AcquireSRWLockExclusive(&L.lock);
-    for (int c = 0; c < L.ncache;) {
-        Decoded *d = L.cache[c].d;
-        if (d->vec && L.cache[c].index != L.cur && tw > 0 && th > 0 &&
-            MIN((double)tw / d->width, (double)th / d->height) > 1.01 && MAX(d->width, d->height) < MAX_TEX) {
-            bury_locked(d);
-            L.cache[c] = L.cache[--L.ncache];
-        } else {
-            c++;
-        }
-    }
-    WakeConditionVariable(&L.cv);
-    ReleaseSRWLockExclusive(&L.lock);
+    return d->vec && tw > 0 && th > 0 && MIN((double)tw / d->width, (double)th / d->height) > 1.01 &&
+           MAX(d->width, d->height) < MAX_TEX;
 }
-
+static void loader_vector_target_changed(void) { nv_loader_drop(L, vec_too_small, NULL, 1, NULL, NULL); }
 #endif
-
-static int stale_dng(const Decoded *d) { return d && d->mode == MODE_NITRODNG && d->ev3 != (int)g_dng_ev3; }
-
-// An image decoded again (another page, another DNG exposure): d replaces the one with that serial if
-// it is still in the cache - wherever it is now (Del / U may have moved it) - and d is not outdated by
-// a later key press. Returns its index, -1 if it did not.
-static int loader_replace_image(unsigned serial, Decoded *d) {
-    int at = -1;
-    AcquireSRWLockExclusive(&L.lock);
-    for (int c = 0; c < L.ncache; c++)
-        if (L.cache[c].d && L.cache[c].d->serial == serial && !stale_dng(d)) {
-            bury_locked(L.cache[c].d);
-            L.cache[c].d = d;
-            at = L.cache[c].index;
-            break;
-        }
-    if (at < 0) bury_locked(d);
-    ReleaseSRWLockExclusive(&L.lock);
-    return at;
-}
 
 typedef struct {
     Decoded *d;
     unsigned old_serial;          // the image it replaces (matched by serial: it may be freed meanwhile)
     wchar_t *path;
-    int index;
 } DngJob;
 
 static DWORD WINAPI dng_run(void *arg) {
     DngJob *j = arg;
     j->d = decode_file(j->path);
-    PostMessageW(L.notify, WM_APP_DNG, (WPARAM)j, 0);
+    PostMessageW(g_notify, WM_APP_DNG, (WPARAM)j, 0);
     return 0;
 }
 
 // The DNG exposure correction changed (g_dng_ev3): prefetched DNGs are dropped and developed again,
 // the current one is replaced when its new development is ready (it stays on screen until then).
 static void loader_dng_exposure_changed(void) {
-    DngJob *j = NULL;
-    AcquireSRWLockExclusive(&L.lock);
-    for (int c = 0; c < L.ncache;) {
-        Decoded *d = L.cache[c].d;
-        if (L.cache[c].index == L.cur) {
-            if (stale_dng(d) && (j = calloc(1, sizeof *j)) && (j->path = _wcsdup(L.files[L.cur]))) {
-                j->old_serial = d->serial;
-                j->index = L.cur;
-            }
-            c++;
-        } else if (stale_dng(d)) {
-            bury_locked(d);
-            L.cache[c] = L.cache[--L.ncache];
-        } else {
-            c++;
-        }
-    }
-    WakeConditionVariable(&L.cv);
-    ReleaseSRWLockExclusive(&L.lock);
-    if (j && j->path) {
+    DngJob *j = calloc(1, sizeof *j);
+    void *path = NULL;
+    unsigned serial = 0;
+    if (nv_loader_drop(L, ld_stale, NULL, j != NULL, &serial, &path) && path) {   // (no job: dropped, decoded again)
+        j->old_serial = serial;
+        j->path = path;
         HANDLE th = CreateThread(NULL, 0, dng_run, j, 0, NULL);
         if (th) {
             CloseHandle(th);
             return;
         }
+        j->path = NULL;
     }
-    if (j) free(j->path);
+    free(path);
     free(j);
-}
-
-// Priority order: current, then AHEAD in the paging direction, then BEHIND.
-static int wanted_locked(int *w) {
-    int n = 0;
-#define ADD(i) do { int _i = (i); int dup = 0; for (int q = 0; q < n; q++) dup |= w[q] == _i; \
-                    if (_i >= 0 && _i < L.nfiles && !dup) w[n++] = _i; } while (0)
-    ADD(L.cur);
-    for (int k = 1; k <= MAX(AHEAD, BEHIND); k++) {
-        if (k <= AHEAD) ADD(L.cur + L.dir * k);
-        if (k <= BEHIND) ADD(L.cur - L.dir * k);
-    }
-#undef ADD
-    return n;
-}
-
-static DWORD WINAPI loader_run(void *arg) {
-    (void)arg;
-    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
-    for (;;) {
-        AcquireSRWLockExclusive(&L.lock);
-        int w[16], nw, next = -1;
-        for (;;) {
-            nw = wanted_locked(w);
-            for (int k = 0; k < nw && next < 0; k++) {
-                int have = 0;
-                for (int c = 0; c < L.ncache; c++) have |= L.cache[c].index == w[k];
-                if (!have && !L.failed[w[k]]) next = w[k];
-            }
-            if (next >= 0) break;
-            SleepConditionVariableSRW(&L.cv, &L.lock, INFINITE, 0);
-        }
-        for (int c = 0; c < L.ncache;) {   // evict everything outside the window
-            int in = 0;
-            for (int k = 0; k < nw; k++) in |= L.cache[c].index == w[k];
-            if (in) { c++; continue; }
-            bury_locked(L.cache[c].d);
-            L.cache[c] = L.cache[--L.ncache];
-        }
-        wchar_t *path = _wcsdup(L.files[next]);
-        unsigned gen = L.gen;
-        ReleaseSRWLockExclusive(&L.lock);
-
-        Decoded *d = decode_file(path);
-
-        AcquireSRWLockExclusive(&L.lock);
-        int stale = gen != L.gen || stale_dng(d);   // the file list or the DNG exposure changed meanwhile
-        if (stale) bury_locked(d);
-        else if (d && L.ncache < 16) { L.cache[L.ncache].index = next; L.cache[L.ncache].d = d; L.ncache++; }
-        else if (d) bury_locked(d);
-        else L.failed[next] = 1;
-        HWND hw = L.notify;
-        ReleaseSRWLockExclusive(&L.lock);
-        if (!stale && !d) fprintf(stderr, "cannot decode %s\n", utf8(path));
-        free(path);
-        if (hw) PostMessageW(hw, WM_APP_DECODED, (WPARAM)(stale ? -1 : next), 0);
-    }
-    return 0;
-}
-
-static void loader_start(wchar_t **files, int n) {
-    InitializeSRWLock(&L.lock);
-    InitializeConditionVariable(&L.cv);
-    L.files = files;
-    L.nfiles = n;
-    L.failed = calloc((size_t)MAX(n, 1), 1);
-    L.dir = 1;
-    CloseHandle(CreateThread(NULL, 0, loader_run, NULL, 0, NULL));
 }
 
 // ---------------------------------------------------------------------------
@@ -1535,7 +1326,7 @@ static void go(int i, int dir) {
     V.reported = 0;
     Decoded *ready = loader_get(i);
     V.was_ready = ready != NULL;
-    loader_focus(i, dir);
+    nv_loader_focus(L, i, dir);
     if (ready) fit_window_to(ready);
     update_title();
     redraw();
@@ -1561,7 +1352,7 @@ static void expand_directory(void) {
     free(l.v[k]);
     l.v[k] = _wcsdup(path);   // keep the path exactly as given
     if (V.shown_index == V.index) V.shown_index = k;
-    loader_replace(l.v, l.n, V.index, k);
+    nv_loader_replace(L, (void **)l.v, l.n, V.index, k);
     V.files = l.v;
     V.nfiles = l.n;
     V.index = k;
@@ -1607,7 +1398,7 @@ static void delete_current(void) {
     V.deleted[V.ndeleted].to = to;
     V.deleted[V.ndeleted].index = i;
     V.ndeleted++;
-    loader_remove(i);   // (frees path)
+    nv_loader_remove(L, i);   // (frees path)
     V.nfiles--;
     V.shown_index = V.shown_index == i ? -1 : V.shown_index > i ? V.shown_index - 1 : V.shown_index;
     V.started = 0;
@@ -1626,14 +1417,14 @@ static void undo_delete(void) {
         MessageBeep(MB_OK);   // (something is there again, or it was moved away)
         return;
     }
-    if (loader_insert(i, path)) {
+    if (nv_loader_insert(L, i, path)) {
         MoveFileW(path, to);
         MessageBeep(MB_OK);
         return;
     }
     free(to);
     V.ndeleted--;
-    V.files = L.files;
+    V.files = (wchar_t **)nv_loader_files(L, NULL);
     V.nfiles++;
     if (V.shown_index >= i) V.shown_index++;
     if (V.index >= i) V.index++;
@@ -1656,7 +1447,7 @@ static void open_files(FileList *l, int lazy) {   // drag & drop
     V.started = 0;
     V.index = 0;
     V.shown_index = -1;
-    loader_replace(l->v, l->n, -1, 0);
+    nv_loader_replace(L, (void **)l->v, l->n, -1, 0);
     l->v = NULL;
     l->n = l->cap = 0;
     go(0, 1);
@@ -1836,7 +1627,6 @@ typedef struct {
 static DWORD WINAPI page_run(void *arg) {
     PageJob *j = arg;
     Decoded *d = calloc(1, sizeof *d);
-    if (d) d->serial = next_serial();
     size_t cap = 0;
     double t1 = now_ms();
     uint8_t *buf = d ? decode_vector_page(j->vec, j->page, d, &cap) : NULL;
@@ -1861,11 +1651,12 @@ static DWORD WINAPI page_run(void *arg) {
 }
 
 static void show_page(int delta) {
-    Decoded *d = loader_get(V.index);
+    unsigned serial;
+    Decoded *d = nv_loader_get(L, V.index, &serial);
     if (!d || !d->vec || d->page + delta < 0 || d->page + delta >= d->vec->pages) return;
     PageJob *j = calloc(1, sizeof *j);
     if (!j) return;
-    j->old_serial = d->serial;
+    j->old_serial = serial;
     j->vec = vec_ref(d->vec);
     j->page = d->page + delta;
     j->index = V.index;
@@ -1879,7 +1670,7 @@ static void show_page(int delta) {
 }
 
 static void page_done(PageJob *j) {   // WM_APP_PAGE
-    if (j->d && loader_replace_image(j->old_serial, j->d) == V.index) {
+    if (j->d && nv_loader_replace_image(L, j->old_serial, j->d) == V.index) {
         fit_window_to(j->d);   // (zoomed in: zoom and position stay, as when paging images)
         update_title();
         redraw();
@@ -2173,7 +1964,7 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_APP_DNG: {
         DngJob *j = (DngJob *)wp;
-        if (j->d && loader_replace_image(j->old_serial, j->d) == V.index) {
+        if (j->d && nv_loader_replace_image(L, j->old_serial, j->d) == V.index) {
             update_title();
             redraw();
         }
@@ -2603,12 +2394,12 @@ int wmain(int argc, wchar_t **argv) {
     CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);   // (the open dialog; the decoder threads have their own)
     timeBeginPeriod(1);   // slideshow timers with 1 ms resolution
 
-    loader_start(fl.v, fl.n);   // (the loader owns the list from now on)
+    if (loader_start(fl.v, fl.n)) { fprintf(stderr, "cannot start the decoder thread\n"); return 1; }
     V.files = fl.v;
     V.nfiles = fl.n;
     V.shown_index = -1;
     if (create_window(fl.n ? fl.v[0] : NULL)) return 1;
-    L.notify = V.hwnd;
+    g_notify = V.hwnd;
     if (fl.n) {
         V.lazy_dir = nargs == 1 && !wcspbrk(args[0], L"*?") && !(GetFileAttributesW(args[0]) & FILE_ATTRIBUTE_DIRECTORY);
         go(0, 1);

@@ -34,7 +34,8 @@
 #include "nitrodng.h"
 #include "nitrowebp.h"
 #include "nitrotiff.h"
-#include "nitro_load.h"   // reading image files, the image extensions (shared by the viewers)
+#include "nitro_load.h"       // reading and decoding image files (shared by the viewers)
+#include "nitro_prefetch.h"   // the image cache and background decoder (shared too)
 #ifdef NV_DAV1D
 #include "nitroavif.h"   // AVIF: AV1 through dav1d
 #endif
@@ -65,8 +66,7 @@
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 
-#define AHEAD 3     // images decoded ahead in the paging direction
-#define BEHIND 2    // ... and kept / decoded behind
+
 static int g_max_tex = 16384;   // (the GPU's limit, if lower)
 
 static double now_ms(void) {
@@ -246,7 +246,6 @@ typedef struct {
     GLuint tex;                        // converted RGBA + mips (main thread)
     double read_ms, decode_ms, upload_ms, conv_ms;
     int mode, bands;
-    unsigned serial;              // (unique: the image a page / DNG job's result replaces)
     int ev3;                           // a DNG: the exposure correction it was developed with (1/3 EV)
     int limited;                       // KIND_YUV: limited range (Y 16..235, as WebP), not full range
 #ifdef NV_VECTOR
@@ -258,8 +257,6 @@ typedef struct {
 #endif
 } Decoded;
 
-static SDL_AtomicInt g_serial;
-static unsigned next_serial(void) { return (unsigned)SDL_AddAtomicInt(&g_serial, 1) + 1; }
 
 static const char *mode_name(int m) {
     const char *n = nv_mode_name(m);
@@ -944,7 +941,6 @@ static Decoded *decode_file(const char *path) {
         free(data);
         return NULL;
     }
-    d->serial = next_serial();
     d->read_ms = t1 - t0;
     d->orientation = 1;
 #ifdef NV_VECTOR
@@ -1006,186 +1002,37 @@ static void post(int ev, int code, void *data) {
 }
 
 // ---------------------------------------------------------------------------
-// image cache + background decoder
 
-typedef struct {
-    char **files;
-    int nfiles;
-    struct { int index; Decoded *d; } cache[16];
-    int ncache;
-    char *failed;                 // per file
-    int cur, dir;
-    unsigned gen;                 // bumped when the file list changes: in-flight decodes are dropped
-    Decoded *grave[64];           // evicted, freed by the main thread (textures live there)
-    int ngrave;
-    SDL_Mutex *lock;
-    SDL_Condition *cv;
-} Loader;
+// image cache + background decoder: nitro_prefetch, with these callbacks
 
-static Loader L;
-
-static Decoded *loader_get(int i) {
-    SDL_LockMutex(L.lock);
-    Decoded *d = NULL;
-    for (int k = 0; k < L.ncache; k++)
-        if (L.cache[k].index == i) d = L.cache[k].d;
-    SDL_UnlockMutex(L.lock);
-    return d;
-}
-
-static int loader_failed(int i) {
-    SDL_LockMutex(L.lock);
-    int f = i >= 0 && i < L.nfiles && L.failed[i];
-    SDL_UnlockMutex(L.lock);
-    return f;
-}
-
-static void bury_locked(Decoded *d) {
-    if (!d) return;
-    if (L.ngrave < 64) L.grave[L.ngrave++] = d;   // (never full: the main thread empties it on every event)
-}
-
-static void loader_reap(void) {   // main thread
-    Decoded *g[64];
-    SDL_LockMutex(L.lock);
-    int n = L.ngrave;
-    memcpy(g, L.grave, (size_t)n * sizeof *g);
-    L.ngrave = 0;
-    SDL_UnlockMutex(L.lock);
-    for (int i = 0; i < n; i++) decoded_free(g[i]);
-}
-
-static void loader_focus(int cur, int dir) {
-    SDL_LockMutex(L.lock);
-    L.cur = cur;
-    L.dir = dir;
-    SDL_SignalCondition(L.cv);
-    SDL_UnlockMutex(L.lock);
-}
-
-// New file list (takes ownership); the decoded image of old_index (if any) is kept as new_index.
-static void loader_replace(char **files, int n, int old_index, int new_index) {
-    SDL_LockMutex(L.lock);
-    Decoded *keep = NULL;
-    for (int k = 0; k < L.ncache; k++) {
-        if (L.cache[k].index == old_index && old_index >= 0) keep = L.cache[k].d;
-        else bury_locked(L.cache[k].d);
-    }
-    int keep_failed = old_index >= 0 && old_index < L.nfiles && L.failed[old_index];
-    L.ncache = 0;
-    if (keep) { L.cache[0].index = new_index; L.cache[0].d = keep; L.ncache = 1; }
-    for (int i = 0; i < L.nfiles; i++) SDL_free(L.files[i]);
-    free(L.files);
-    free(L.failed);
-    L.files = files;
-    L.nfiles = n;
-    L.failed = calloc((size_t)MAX(n, 1), 1);
-    if (keep_failed) L.failed[new_index] = 1;
-    L.cur = new_index;
-    L.gen++;
-    SDL_SignalCondition(L.cv);
-    SDL_UnlockMutex(L.lock);
-}
-
-// File i left the list (deleted): later images move up one place, decoded ones with them. (Main
-// thread only: the viewer's list is this same array.)
-static void loader_remove(int i) {
-    SDL_LockMutex(L.lock);
-    for (int c = 0; c < L.ncache;) {
-        if (L.cache[c].index == i) {
-            bury_locked(L.cache[c].d);
-            L.cache[c] = L.cache[--L.ncache];
-            continue;
-        }
-        if (L.cache[c].index > i) L.cache[c].index--;
-        c++;
-    }
-    SDL_free(L.files[i]);
-    memmove(L.files + i, L.files + i + 1, (size_t)(L.nfiles - i - 1) * sizeof *L.files);
-    memmove(L.failed + i, L.failed + i + 1, (size_t)(L.nfiles - i - 1));
-    L.nfiles--;
-    L.gen++;   // (a decode in flight would land at the old index)
-    SDL_SignalCondition(L.cv);
-    SDL_UnlockMutex(L.lock);
-}
-
-// A file came back at i (undo; takes path). Returns -1 if out of memory.
-static int loader_insert(int i, char *path) {
-    SDL_LockMutex(L.lock);
-    char **f = realloc(L.files, (size_t)(L.nfiles + 1) * sizeof *f);
-    if (f) L.files = f;
-    char *fl = f ? realloc(L.failed, (size_t)L.nfiles + 1) : NULL;
-    if (fl) L.failed = fl;
-    if (!f || !fl) {
-        SDL_UnlockMutex(L.lock);
-        return -1;
-    }
-    for (int c = 0; c < L.ncache; c++)
-        if (L.cache[c].index >= i) L.cache[c].index++;
-    memmove(L.files + i + 1, L.files + i, (size_t)(L.nfiles - i) * sizeof *L.files);
-    memmove(L.failed + i + 1, L.failed + i, (size_t)(L.nfiles - i));
-    L.files[i] = path;
-    L.failed[i] = 0;
-    L.nfiles++;
-    L.gen++;
-    SDL_SignalCondition(L.cv);
-    SDL_UnlockMutex(L.lock);
-    return 0;
-}
-
-#ifdef NV_VECTOR
-// The size vector images are rendered for changed (g_vec_tw): prefetched ones too small for it
-// are dropped and rendered again (the current one is sharpened by the detail render).
-static void loader_vector_target_changed(void) {
-    int tw = SDL_GetAtomicInt(&g_vec_tw), th = SDL_GetAtomicInt(&g_vec_th);
-    SDL_LockMutex(L.lock);
-    for (int c = 0; c < L.ncache;) {
-        Decoded *d = L.cache[c].d;
-        if (d->vec && L.cache[c].index != L.cur && tw > 0 && th > 0 &&
-            MIN((double)tw / d->width, (double)th / d->height) > 1.01 && MAX(d->width, d->height) < g_max_tex) {
-            bury_locked(d);
-            L.cache[c] = L.cache[--L.ncache];
-        } else {
-            c++;
-        }
-    }
-    SDL_SignalCondition(L.cv);
-    SDL_UnlockMutex(L.lock);
-}
-#endif
+static NvLoader *L;
 
 static int stale_dng(const Decoded *d) { return d && d->mode == MODE_NITRODNG && d->ev3 != SDL_GetAtomicInt(&g_dng_ev3); }
 
-// An image decoded again (another page, another DNG exposure): d replaces the one with that serial if
-// it is still in the cache - wherever it is now (Del / U may have moved it) - and d is not outdated by
-// a later key press. Returns its index, -1 if it did not.
-static int loader_replace_image(unsigned serial, Decoded *d) {
-    int at = -1;
-    SDL_LockMutex(L.lock);
-    for (int c = 0; c < L.ncache; c++)
-        if (L.cache[c].d && L.cache[c].d->serial == serial && !stale_dng(d)) {
-            bury_locked(L.cache[c].d);
-            L.cache[c].d = d;
-            at = L.cache[c].index;
-            break;
-        }
-    if (at < 0) bury_locked(d);
-    SDL_UnlockMutex(L.lock);
-    return at;
+static void *ld_decode(void *path, char **error, void *ctx) { return decode_file(path); }
+static void ld_free(void *image, void *ctx) { decoded_free(image); }
+static int ld_stale(const void *image, void *ctx) { return stale_dng(image); }
+static void *ld_path_dup(void *path, void *ctx) { return SDL_strdup(path); }
+static void ld_path_free(void *path, void *ctx) { SDL_free(path); }
+static const char *ld_path_name(void *path, void *ctx) { return path; }
+static void ld_notify(int index, void *ctx) { post(EV_DECODED, index, NULL); }
+static void ld_thread_started(void *ctx) { SDL_SetCurrentThreadPriority(SDL_THREAD_PRIORITY_HIGH); }
+
+static int loader_start(char **files, int n) {   // (the loader owns the list from now on)
+    static const NvLoaderOps ops = {ld_decode, ld_free, ld_stale, ld_path_dup, ld_path_free, ld_path_name, ld_notify,
+                                    ld_thread_started, NULL};
+    L = nv_loader_new(&ops, (void **)files, n);
+    return L ? 0 : -1;
 }
 
-typedef struct {
-    Decoded *d;
-    unsigned old_serial;          // the image it replaces (matched by serial: it may be freed meanwhile)
-    char *path;
-    int index;
-} DngJob;
+static Decoded *loader_get(int i) { return nv_loader_get(L, i, NULL); }
+static int loader_failed(int i) { return nv_loader_failed(L, i, NULL); }
 
-static int SDLCALL dng_run(void *arg) {
-    DngJob *j = arg;
-    j->d = decode_file(j->path);
-    post(EV_DNG, 0, j);
-    return 0;
+static void loader_reap(void) {   // main thread (textures live here)
+    void *dead[64];
+    int n;
+    while ((n = nv_loader_reap(L, dead, 64)) > 0)
+        for (int i = 0; i < n; i++) decoded_free(dead[i]);
 }
 
 static int start_thread(SDL_ThreadFunction fn, const char *name, void *arg) {
@@ -1195,98 +1042,45 @@ static int start_thread(SDL_ThreadFunction fn, const char *name, void *arg) {
     return 0;
 }
 
-// The DNG exposure correction changed (g_dng_ev3): prefetched DNGs are dropped and developed again,
-// the current one is replaced when its new development is ready (it stays on screen until then).
-static void loader_dng_exposure_changed(void) {
-    DngJob *j = NULL;
-    SDL_LockMutex(L.lock);
-    for (int c = 0; c < L.ncache;) {
-        Decoded *d = L.cache[c].d;
-        if (L.cache[c].index == L.cur) {
-            if (stale_dng(d) && (j = calloc(1, sizeof *j)) && (j->path = SDL_strdup(L.files[L.cur]))) {
-                j->old_serial = d->serial;
-                j->index = L.cur;
-            }
-            c++;
-        } else if (stale_dng(d)) {
-            bury_locked(d);
-            L.cache[c] = L.cache[--L.ncache];
-        } else {
-            c++;
-        }
-    }
-    SDL_SignalCondition(L.cv);
-    SDL_UnlockMutex(L.lock);
-    if (j && j->path && !start_thread(dng_run, "dng", j)) return;
-    if (j) SDL_free(j->path);
-    free(j);
+#ifdef NV_VECTOR
+// The size vector images are rendered for changed (g_vec_tw): prefetched ones too small for it
+// are dropped and rendered again (the current one is sharpened by the detail render).
+static int vec_too_small(const void *image, void *ctx) {
+    const Decoded *d = image;
+    int tw = SDL_GetAtomicInt(&g_vec_tw), th = SDL_GetAtomicInt(&g_vec_th);
+    return d->vec && tw > 0 && th > 0 && MIN((double)tw / d->width, (double)th / d->height) > 1.01 &&
+           MAX(d->width, d->height) < g_max_tex;
 }
+static void loader_vector_target_changed(void) { nv_loader_drop(L, vec_too_small, NULL, 1, NULL, NULL); }
+#endif
 
-// Priority order: current, then AHEAD in the paging direction, then BEHIND.
-static int wanted_locked(int *w) {
-    int n = 0;
-#define ADD(i) do { int _i = (i); int dup = 0; for (int q = 0; q < n; q++) dup |= w[q] == _i; \
-                    if (_i >= 0 && _i < L.nfiles && !dup) w[n++] = _i; } while (0)
-    ADD(L.cur);
-    for (int k = 1; k <= MAX(AHEAD, BEHIND); k++) {
-        if (k <= AHEAD) ADD(L.cur + L.dir * k);
-        if (k <= BEHIND) ADD(L.cur - L.dir * k);
-    }
-#undef ADD
-    return n;
-}
+typedef struct {
+    Decoded *d;
+    unsigned old_serial;          // the image it replaces (matched by serial: it may be freed meanwhile)
+    char *path;
+} DngJob;
 
-static int SDLCALL loader_run(void *arg) {
-    (void)arg;
-    SDL_SetCurrentThreadPriority(SDL_THREAD_PRIORITY_HIGH);
-    for (;;) {
-        SDL_LockMutex(L.lock);
-        int w[16], nw, next = -1;
-        for (;;) {
-            nw = wanted_locked(w);
-            for (int k = 0; k < nw && next < 0; k++) {
-                int have = 0;
-                for (int c = 0; c < L.ncache; c++) have |= L.cache[c].index == w[k];
-                if (!have && !L.failed[w[k]]) next = w[k];
-            }
-            if (next >= 0) break;
-            SDL_WaitCondition(L.cv, L.lock);
-        }
-        for (int c = 0; c < L.ncache;) {   // evict everything outside the window
-            int in = 0;
-            for (int k = 0; k < nw; k++) in |= L.cache[c].index == w[k];
-            if (in) { c++; continue; }
-            bury_locked(L.cache[c].d);
-            L.cache[c] = L.cache[--L.ncache];
-        }
-        char *path = SDL_strdup(L.files[next]);
-        unsigned gen = L.gen;
-        SDL_UnlockMutex(L.lock);
-
-        Decoded *d = decode_file(path);
-
-        SDL_LockMutex(L.lock);
-        int stale = gen != L.gen || stale_dng(d);   // the file list or the DNG exposure changed meanwhile
-        if (stale) bury_locked(d);
-        else if (d && L.ncache < 16) { L.cache[L.ncache].index = next; L.cache[L.ncache].d = d; L.ncache++; }
-        else if (d) bury_locked(d);
-        else L.failed[next] = 1;
-        SDL_UnlockMutex(L.lock);
-        if (!stale && !d) fprintf(stderr, "cannot decode %s\n", path);
-        SDL_free(path);
-        post(EV_DECODED, stale ? -1 : next, NULL);
-    }
+static int SDLCALL dng_run(void *arg) {
+    DngJob *j = arg;
+    j->d = decode_file(j->path);
+    post(EV_DNG, 0, j);
     return 0;
 }
 
-static void loader_start(char **files, int n) {
-    L.lock = SDL_CreateMutex();
-    L.cv = SDL_CreateCondition();
-    L.files = files;
-    L.nfiles = n;
-    L.failed = calloc((size_t)MAX(n, 1), 1);
-    L.dir = 1;
-    start_thread(loader_run, "loader", NULL);
+// The DNG exposure correction changed (g_dng_ev3): prefetched DNGs are dropped and developed again,
+// the current one is replaced when its new development is ready (it stays on screen until then).
+static void loader_dng_exposure_changed(void) {
+    DngJob *j = calloc(1, sizeof *j);
+    void *path = NULL;
+    unsigned serial = 0;
+    if (nv_loader_drop(L, ld_stale, NULL, j != NULL, &serial, &path) && path) {   // (no job: dropped, decoded again)
+        j->old_serial = serial;
+        j->path = path;
+        if (!start_thread(dng_run, "dng", j)) return;
+        j->path = NULL;
+    }
+    SDL_free(path);
+    free(j);
 }
 
 // ---------------------------------------------------------------------------
@@ -1576,7 +1370,7 @@ static void go(int i, int dir) {
     V.reported = 0;
     Decoded *ready = loader_get(i);
     V.was_ready = ready != NULL;
-    loader_focus(i, dir);
+    nv_loader_focus(L, i, dir);
     if (ready) fit_window_to(ready);
     update_title();
     redraw();
@@ -1599,7 +1393,7 @@ static void expand_directory(void) {
     SDL_free(l.v[k]);
     l.v[k] = SDL_strdup(path);   // keep the path exactly as given
     if (V.shown_index == V.index) V.shown_index = k;
-    loader_replace(l.v, l.n, V.index, k);
+    nv_loader_replace(L, (void **)l.v, l.n, V.index, k);
     V.files = l.v;
     V.nfiles = l.n;
     V.index = k;
@@ -1644,7 +1438,7 @@ static void delete_current(void) {
     V.deleted[V.ndeleted].to = to;
     V.deleted[V.ndeleted].index = i;
     V.ndeleted++;
-    loader_remove(i);   // (frees path)
+    nv_loader_remove(L, i);   // (frees path)
     V.nfiles--;
     V.shown_index = V.shown_index == i ? -1 : V.shown_index > i ? V.shown_index - 1 : V.shown_index;
     V.started = 0;
@@ -1658,13 +1452,13 @@ static void undo_delete(void) {
     int i = MIN(V.deleted[V.ndeleted - 1].index, V.nfiles);
     SDL_PathInfo info;
     if (!path || SDL_GetPathInfo(path, &info) || !SDL_RenamePath(to, path)) return;   // (something is there again, or it was moved away)
-    if (loader_insert(i, path)) {
+    if (nv_loader_insert(L, i, path)) {
         SDL_RenamePath(path, to);
         return;
     }
     SDL_free(to);
     V.ndeleted--;
-    V.files = L.files;
+    V.files = (char **)nv_loader_files(L, NULL);
     V.nfiles++;
     if (V.shown_index >= i) V.shown_index++;
     if (V.index >= i) V.index++;
@@ -1687,7 +1481,7 @@ static void open_files(FileList *l, int lazy) {   // drag & drop, the Open dialo
     V.started = 0;
     V.index = 0;
     V.shown_index = -1;
-    loader_replace(l->v, l->n, -1, 0);
+    nv_loader_replace(L, (void **)l->v, l->n, -1, 0);
     l->v = NULL;
     l->n = l->cap = 0;
     go(0, 1);
@@ -1901,7 +1695,6 @@ typedef struct {
 static int SDLCALL page_run(void *arg) {
     PageJob *j = arg;
     Decoded *d = calloc(1, sizeof *d);
-    if (d) d->serial = next_serial();
     size_t cap = 0;
     double t1 = now_ms();
     uint8_t *buf = d ? decode_vector_page(j->vec, j->page, d, &cap) : NULL;
@@ -1919,11 +1712,12 @@ static int SDLCALL page_run(void *arg) {
 }
 
 static void show_page(int delta) {
-    Decoded *d = loader_get(V.index);
+    unsigned serial;
+    Decoded *d = nv_loader_get(L, V.index, &serial);
     if (!d || !d->vec || d->page + delta < 0 || d->page + delta >= d->vec->pages) return;
     PageJob *j = calloc(1, sizeof *j);
     if (!j) return;
-    j->old_serial = d->serial;
+    j->old_serial = serial;
     j->vec = vec_ref(d->vec);
     j->page = d->page + delta;
     j->index = V.index;
@@ -1934,7 +1728,7 @@ static void show_page(int delta) {
 }
 
 static void page_done(PageJob *j) {
-    if (j->d && loader_replace_image(j->old_serial, j->d) == V.index) {
+    if (j->d && nv_loader_replace_image(L, j->old_serial, j->d) == V.index) {
         fit_window_to(j->d);   // (zoomed in: zoom and position stay, as when paging images)
         update_title();
         redraw();
@@ -2137,7 +1931,7 @@ static void handle(const SDL_Event *e) {
             break;
         case EV_DNG: {
             DngJob *j = e->user.data1;
-            if (j->d && loader_replace_image(j->old_serial, j->d) == V.index) {
+            if (j->d && nv_loader_replace_image(L, j->old_serial, j->d) == V.index) {
                 update_title();
                 redraw();
             }
@@ -2537,7 +2331,7 @@ int main(int argc, char **argv) {
     if (bench) return run_bench(&fl);
     if (selftest) return run_selftest(&fl);
 
-    loader_start(fl.v, fl.n);   // (the loader owns the list from now on)
+    if (loader_start(fl.v, fl.n)) { fprintf(stderr, "cannot start the decoder thread\n"); return 1; }
     V.files = fl.v;
     V.nfiles = fl.n;
     V.shown_index = -1;

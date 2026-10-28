@@ -35,7 +35,9 @@
 #include "nitrodng.h"
 #include "nitrowebp.h"
 #include "nitrotiff.h"
-#include "nitro_load.h"   // reading image files, the image extensions (shared by the viewers)
+#include "nitro_load.h"       // reading and decoding image files (shared by the viewers)
+#include "nitro_prefetch.h"   // the image cache and background decoder (shared too)
+#include <pthread/qos.h>
 #ifdef NV_DAV1D
 #include "nitroavif.h"    // optional AVIF decoding (dav1d)
 #endif
@@ -68,8 +70,6 @@ static double now_ms(void) {
 static MTLResourceOptions g_storage = MTLResourceStorageModeShared;
 
 #define MAX_TEX 16384
-#define AHEAD 3     // images decoded ahead in the paging direction
-#define BEHIND 2    // ... and kept / decoded behind
 
 // ---------------------------------------------------------------------------
 // decoded image
@@ -683,7 +683,7 @@ typedef struct {
 @end
 
 // ---------------------------------------------------------------------------
-// image cache + background decoder
+// image cache + background decoder: nitro_prefetch, with these callbacks
 
 @interface Loader : NSObject
 - (instancetype)initWithFiles:(NSArray<NSString *> *)files pool:(BufferPool *)pool align:(size_t)align;
@@ -707,217 +707,128 @@ typedef struct {
 @property(nonatomic, copy) void (^onDecoded)(NSInteger index);
 @end
 
+
 @implementation Loader {
-    NSArray<NSString *> *_files;
+    NvLoader *_L;
     BufferPool *_pool;
     size_t _align;
-    NSMutableDictionary<NSNumber *, Decoded *> *_cache;
-    NSMutableSet<NSNumber *> *_failed;
-    NSInteger _cur;
-    int _dir;
-    NSCondition *_cond;
-    unsigned _gen;   // bumped when the file list changes: in-flight decodes are dropped
 }
-- (instancetype)initWithFiles:(NSArray<NSString *> *)files pool:(BufferPool *)pool align:(size_t)align {
-    if (!(self = [super init])) return nil;
-    _files = files;
-    _pool = pool;
-    _align = align;
-    _cache = [NSMutableDictionary dictionary];
-    _failed = [NSMutableSet set];
-    _dir = 1;
-    _cond = [NSCondition new];
-    NSThread *th = [[NSThread alloc] initWithTarget:self selector:@selector(run) object:nil];
-    th.qualityOfService = NSQualityOfServiceUserInteractive;
-    [th start];
-    return self;
+static BOOL stale_dng(Decoded *d) { return d.mode == MODE_NITRODNG && d.ev3 != atomic_load(&g_dng_ev3); }
+
+// the callbacks (paths: NSStrings, images: Decodeds, both retained for the loader)
+static void *ld_decode(void *path, char **error, void *ctx) {
+    Loader *l = (__bridge Loader *)ctx;
+    Decoded *d;
+    @autoreleasepool { d = decode_file((__bridge NSString *)path, l->_pool, l->_align); }
+    return (__bridge_retained void *)d;
 }
-- (BOOL)failed:(NSInteger)i {
-    [_cond lock];
-    BOOL f = [_failed containsObject:@(i)];
-    [_cond unlock];
-    return f;
+static void ld_free(void *image, void *ctx) {   // main thread: buffers and textures back to the pool
+    Loader *l = (__bridge Loader *)ctx;
+    Decoded *d = (__bridge_transfer Decoded *)image;
+    [l->_pool putTexture:d.texture];
+    d.texture = nil;
+    [l->_pool put:d.buffer];
+    d.buffer = nil;
 }
-- (Decoded *)get:(NSInteger)i {
-    [_cond lock];
-    Decoded *d = _cache[@(i)];
-    [_cond unlock];
-    return d;
-}
-- (void)recycle:(Decoded *)old {   // buffers back to the pool (textures live on the main thread)
-    id<MTLBuffer> b = old.buffer;
+static int ld_stale(const void *image, void *ctx) { return stale_dng((__bridge Decoded *)image); }
+static void *ld_path_dup(void *path, void *ctx) { return (__bridge_retained void *)(__bridge NSString *)path; }
+static void ld_path_free(void *path, void *ctx) { CFRelease(path); }
+static const char *ld_path_name(void *path, void *ctx) { return ((__bridge NSString *)path).fileSystemRepresentation; }
+static void ld_notify(int index, void *ctx) {
+    Loader *l = (__bridge Loader *)ctx;
     dispatch_async(dispatch_get_main_queue(), ^{
-        [self->_pool putTexture:old.texture];
-        old.texture = nil;
-        [self->_pool put:b];
+        [l reap];
+        void (^cb)(NSInteger) = l.onDecoded;
+        if (index >= 0 && cb) cb(index);
     });
 }
+static void ld_thread_started(void *ctx) { pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0); }
+
+static void **retained_paths(NSArray<NSString *> *files) {   // the list as the loader takes it
+    void **p = malloc(MAX(files.count, 1) * sizeof *p);
+    if (!p) return NULL;
+    for (NSUInteger i = 0; i < files.count; i++) p[i] = (__bridge_retained void *)files[i];
+    return p;
+}
+
+- (instancetype)initWithFiles:(NSArray<NSString *> *)files pool:(BufferPool *)pool align:(size_t)align {
+    if (!(self = [super init])) return nil;
+    _pool = pool;
+    _align = align;
+    NvLoaderOps ops = {ld_decode, ld_free, ld_stale, ld_path_dup, ld_path_free, ld_path_name, ld_notify, ld_thread_started,
+                       (__bridge void *)self};
+    void **p = retained_paths(files);
+    _L = p ? nv_loader_new(&ops, p, (int)files.count) : NULL;
+    if (!_L) {
+        fprintf(stderr, "cannot start the decoder thread\n");
+        return nil;
+    }
+    return self;
+}
+- (void)reap {   // main thread: the evicted images' buffers and textures back to the pool
+    void *dead[64];
+    int n;
+    while ((n = nv_loader_reap(_L, dead, 64)) > 0)
+        for (int i = 0; i < n; i++) ld_free(dead[i], (__bridge void *)self);
+}
+- (BOOL)failed:(NSInteger)i { return nv_loader_failed(_L, (int)i, NULL) != 0; }
+- (Decoded *)get:(NSInteger)i { return (__bridge Decoded *)nv_loader_get(_L, (int)i, NULL); }
 - (void)replaceFiles:(NSArray<NSString *> *)files keep:(NSInteger)oldIndex as:(NSInteger)newIndex {
-    [_cond lock];
-    Decoded *keep = oldIndex >= 0 ? _cache[@(oldIndex)] : nil;
-    for (NSNumber *k in _cache.allKeys)
-        if (_cache[k] != keep) [self recycle:_cache[k]];
-    _cache = [NSMutableDictionary dictionary];
-    if (keep) _cache[@(newIndex)] = keep;
-    BOOL keepFailed = oldIndex >= 0 && [_failed containsObject:@(oldIndex)];
-    _failed = [NSMutableSet set];
-    if (keepFailed) [_failed addObject:@(newIndex)];
-    _files = [files copy];
-    _cur = newIndex;
-    _gen++;
-    [_cond signal];
-    [_cond unlock];
+    void **p = retained_paths(files);
+    if (p) nv_loader_replace(_L, p, (int)files.count, (int)oldIndex, (int)newIndex);
 }
-- (void)shiftFrom:(NSInteger)i by:(NSInteger)delta {   // indices >= i move by delta (locked)
-    NSMutableDictionary *c = [NSMutableDictionary dictionary];
-    for (NSNumber *k in _cache) c[@(k.integerValue >= i ? k.integerValue + delta : k.integerValue)] = _cache[k];
-    _cache = c;
-    NSMutableSet *f = [NSMutableSet set];
-    for (NSNumber *k in _failed) [f addObject:@(k.integerValue >= i ? k.integerValue + delta : k.integerValue)];
-    _failed = f;
-    _gen++;   // (a decode in flight would land at the old index)
-    [_cond signal];
-}
-- (void)removeFile:(NSInteger)i {
-    [_cond lock];
-    if (_cache[@(i)]) [self recycle:_cache[@(i)]];
-    [_cache removeObjectForKey:@(i)];
-    [_failed removeObject:@(i)];
-    NSMutableArray *files = [_files mutableCopy];
-    [files removeObjectAtIndex:(NSUInteger)i];
-    _files = files;
-    [self shiftFrom:i + 1 by:-1];
-    [_cond unlock];
-}
+- (void)removeFile:(NSInteger)i { nv_loader_remove(_L, (int)i); }
 - (void)insertFile:(NSString *)path at:(NSInteger)i {
-    [_cond lock];
-    [self shiftFrom:i by:1];
-    NSMutableArray *files = [_files mutableCopy];
-    [files insertObject:path atIndex:(NSUInteger)i];
-    _files = files;
-    [_cond unlock];
+    void *p = (__bridge_retained void *)path;
+    if (nv_loader_insert(_L, (int)i, p)) CFRelease(p);
+}
+- (void)focus:(NSInteger)cur direction:(int)dir { nv_loader_focus(_L, (int)cur, dir); }
+// A decoded image of the current one again (another page, another exposure) is ready: it replaces the
+// one it was made from if that is still cached, and onDecoded reports it.
+- (void)replaceSerial:(unsigned)serial with:(Decoded *)n {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        int at = nv_loader_replace_image(self->_L, serial, (__bridge_retained void *)n);
+        [self reap];
+        void (^cb)(NSInteger) = self.onDecoded;
+        if (at >= 0 && cb) cb(at);
+    });
 }
 - (void)showPage:(int)page of:(NSInteger)i {
 #ifdef NV_CDR
-    Decoded *d = [self get:i];
+    unsigned serial;
+    Decoded *d = (__bridge Decoded *)nv_loader_get(_L, (int)i, &serial);
     if (!d || page == d.page || page < 0 || page >= d.pages) return;
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), ^{
         Decoded *n;
         @autoreleasepool { n = cdr_page(d, page, self->_pool, self->_align); }
-        if (!n) return;
-        [self->_cond lock];
-        BOOL current = self->_cache[@(i)] == d;
-        if (current) self->_cache[@(i)] = n;
-        [self->_cond unlock];
-        [self recycle:current ? d : n];
-        void (^cb)(NSInteger) = self.onDecoded;
-        if (current && cb) dispatch_async(dispatch_get_main_queue(), ^{ cb(i); });
+        if (n) [self replaceSerial:serial with:n];
     });
 #endif
 }
+#ifdef NV_VECTOR
+static int vec_too_small(const void *image, void *ctx) {
+    Decoded *d = (__bridge Decoded *)image;
+    return d.vector && !vector_fits(d, atomic_load(&g_vector_tw), atomic_load(&g_vector_th));
+}
+#endif
 - (void)vectorTargetChanged {
 #ifdef NV_VECTOR
-    int tw = atomic_load(&g_vector_tw), th = atomic_load(&g_vector_th);
-    [_cond lock];
-    for (NSNumber *k in _cache.allKeys) {
-        Decoded *d = _cache[k];
-        if (d.vector && k.integerValue != _cur && !vector_fits(d, tw, th)) {
-            [self recycle:d];
-            [_cache removeObjectForKey:k];
-        }
-    }
-    [_cond signal];
-    [_cond unlock];
+    nv_loader_drop(_L, vec_too_small, NULL, 1, NULL, NULL);
 #endif
 }
-static BOOL stale_dng(Decoded *d) { return d.mode == MODE_NITRODNG && d.ev3 != atomic_load(&g_dng_ev3); }
 - (void)dngExposureChanged {
-    [_cond lock];
-    NSInteger ci = _cur;
-    Decoded *cur = _cache[@(ci)];
-    for (NSNumber *k in _cache.allKeys) {
-        Decoded *d = _cache[k];
-        if (d != cur && stale_dng(d)) {
-            [self recycle:d];
-            [_cache removeObjectForKey:k];
-        }
+    unsigned serial = 0;
+    void *p = NULL;
+    if (!nv_loader_drop(_L, ld_stale, NULL, 1, &serial, &p) || !p) {
+        if (p) CFRelease(p);
+        return;
     }
-    NSString *path = cur && stale_dng(cur) ? _files[ci] : nil;
-    unsigned gen = _gen;
-    [_cond signal];
-    [_cond unlock];
-    if (!path) return;
+    NSString *path = (__bridge_transfer NSString *)p;
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), ^{
         Decoded *n;
         @autoreleasepool { n = decode_file(path, self->_pool, self->_align); }
-        if (!n) return;
-        [self->_cond lock];
-        Decoded *old = self->_cache[@(ci)];
-        BOOL use = gen == self->_gen && old && stale_dng(old) && !stale_dng(n);   // (a later key press wins)
-        if (use) self->_cache[@(ci)] = n;
-        [self->_cond unlock];
-        [self recycle:use ? old : n];
-        void (^cb)(NSInteger) = self.onDecoded;
-        if (use && cb) dispatch_async(dispatch_get_main_queue(), ^{ cb(ci); });
+        if (n) [self replaceSerial:serial with:n];
     });
-}
-- (void)focus:(NSInteger)cur direction:(int)dir {
-    [_cond lock];
-    _cur = cur;
-    _dir = dir;
-    [_cond signal];
-    [_cond unlock];
-}
-// Priority order: current, then AHEAD in the paging direction, then BEHIND.
-- (NSArray<NSNumber *> *)wantedLocked {
-    NSMutableArray *w = [NSMutableArray array];
-    NSInteger n = (NSInteger)_files.count;
-    void (^add)(NSInteger) = ^(NSInteger i) {   // no wrap-around past the first/last image
-        if (i >= 0 && i < n && ![w containsObject:@(i)]) [w addObject:@(i)];
-    };
-    add(_cur);
-    for (int k = 1; k <= MAX(AHEAD, BEHIND); k++) {
-        if (k <= AHEAD) add(_cur + _dir * k);
-        if (k <= BEHIND) add(_cur - _dir * k);
-    }
-    return w;
-}
-- (void)run {
-    for (;;) {
-        [_cond lock];
-        NSNumber *next = nil;
-        NSArray *wanted;
-        for (;;) {
-            wanted = [self wantedLocked];
-            for (NSNumber *i in wanted)
-                if (!_cache[i] && ![_failed containsObject:i]) { next = i; break; }
-            if (next) break;
-            [_cond wait];
-        }
-        // evict everything outside the window
-        for (NSNumber *k in _cache.allKeys)
-            if (![wanted containsObject:k]) {
-                [self recycle:_cache[k]];
-                [_cache removeObjectForKey:k];
-            }
-        NSString *path = _files[next.integerValue];
-        unsigned gen = _gen;
-        [_cond unlock];
-
-        Decoded *d;
-        @autoreleasepool { d = decode_file(path, _pool, _align); }
-
-        [_cond lock];
-        BOOL stale = gen != _gen || (d && stale_dng(d));   // the file list or the DNG exposure changed meanwhile
-        if (stale) { if (d) [self recycle:d]; }
-        else if (d) _cache[next] = d;
-        else [_failed addObject:next];
-        [_cond unlock];
-        if (stale) continue;
-        if (!d) fprintf(stderr, "cannot decode %s\n", path.fileSystemRepresentation);
-        void (^cb)(NSInteger) = self.onDecoded;
-        if (cb) dispatch_async(dispatch_get_main_queue(), ^{ cb(next.integerValue); });
-    }
 }
 @end
 
