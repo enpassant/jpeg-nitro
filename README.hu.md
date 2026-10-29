@@ -237,7 +237,9 @@ fejlesztői csomagok ott vannak felsorolva). macOS-en is lefordul, de csak teszt
 lassú; a valódi néző a Metal-os marad). A `make sdl-dist` készíti a továbbadható egyetlen fájlt, a
 `nitroview-linux-x64.tar.gz`-t (4 MB): a fordító gép processzora helyett x86-64-v3-ra (AVX2) fordítva,
 a libstdc++-szal, a zlibbel és a dav1d-vel együtt, csak a glibc kell hozzá (Ubuntu 22.04-en fordítva
-2.35-ös vagy újabb). A `nitroview-sdl --register` az aktuális felhasználónak felveszi az asztal alkalmazásai közé
+2.35-ös vagy újabb). 64 bites ARM-os Linuxon (Asahi Linux Apple M1 / M2-n, Raspberry Pi 4 / 5) ugyanez
+a `nitroview-linux-arm64.tar.gz`-t készíti, armv8-a-ra fordítva (a NEON-os kódágak ugyanazok, mint a Mac
+arm64-es buildjében; a HEIC-et a nitrohevc bontja ki, mint x86-os Linuxon). A `nitroview-sdl --register` az aktuális felhasználónak felveszi az asztal alkalmazásai közé
 (desktop fájl és ikon a `~/.local/share`-ben: „Megnyitás ezzel” a fájlkezelőben), az `--unregister`
 eltávolítja.
 

@@ -26,7 +26,8 @@
 #   make gnome           GNOME/libadwaita viewer: nitroview-gnome (the decoders linked in statically)
 #   make sdl             SDL3 + OpenGL viewer for Linux: nitroview-sdl (SDL3 from scripts/get-deps.sh;
 #                        builds on macOS too, for testing)
-#   make sdl-dist        nitroview-linux-x64.tar.gz: it as one portable file (x86-64-v3, no libstdc++)
+#   make sdl-dist        nitroview-linux-x64.tar.gz: it as one portable file (x86-64-v3, no libstdc++);
+#                        on 64-bit ARM (e.g. Asahi Linux on Apple M1 / M2): nitroview-linux-arm64.tar.gz (armv8-a)
 #   make flatpak         GNOME 50 Flatpak bundle: nitroview-gnome.flatpak
 #   make linux           Linux (also the default there): library + portable tools - nbench,
 #                        pngverify, psdverify, the ASan robustness tests, and verify / robust
@@ -260,10 +261,19 @@ sdl: $(SDL_BIN)
 # Portable Linux build of it (make sdl-dist): x86-64-v3 (AVX2; DIST_ARCH=x86-64-v2 for older CPUs)
 # instead of -march=native, libstdc++ / libgcc and zlib linked in. One file that needs only the build
 # system's glibc (or newer) and, at run time, OpenGL and Wayland / X11; --register adds it to the
-# desktop. nitroview-linux-x64.tar.gz: just that file (keeping its execute permission).
-DIST_ARCH  ?= x86-64-v3
+# desktop. nitroview-linux-x64.tar.gz: just that file (keeping its execute permission). Built on
+# 64-bit ARM: armv8-a (any of them: Apple M1 / M2 under Asahi Linux, Raspberry Pi 4 / 5, ARM servers;
+# NEON is part of it), nitroview-linux-arm64.tar.gz.
 DIST_DIR   := build/dist
+ifeq ($(ARCH),aarch64)
+DIST_ARCH  ?= armv8-a
+DIST_CPU    = -march=$(DIST_ARCH)
+DIST_TGZ   := nitroview-linux-arm64.tar.gz
+else
+DIST_ARCH  ?= x86-64-v3
+DIST_CPU    = -march=$(DIST_ARCH) $(X86JCC)
 DIST_TGZ   := nitroview-linux-x64.tar.gz
+endif
 DIST_VEC   := $(if $(filter 1,$(CDR)),$(DIST_DIR)/libnitrocdr.a) $(if $(filter 1,$(SVG)),$(DIST_DIR)/libnitrosvg.a)
 $(DIST_DIR)/libnitrosvg.a: src/nitrosvg.cpp src/nitrosvg.h $(SVG_STAMP)
 	$(call svg_lib,-march=$(DIST_ARCH))
@@ -272,12 +282,12 @@ $(DIST_DIR)/libnitrocdr.a: CDR_DEFS += -I$(ZLIB)
 $(DIST_DIR)/libnitrocdr.a: src/nitrocdr.cpp src/nitrocdr.h $(CDR_STAMP)
 	$(call cdr_lib,-march=$(DIST_ARCH) -I$(ZLIB))
 $(DIST_DIR)/libnitro.a: $(LIB_SRC) $(LIB_AVIF) $(LIB_HDR)
-	$(call nitro_lib,-O3 -march=$(DIST_ARCH) $(X86JCC) $(DEFS) -fblocks)
+	$(call nitro_lib,-O3 $(DIST_CPU) $(DEFS) -fblocks)
 $(DIST_DIR)/nitroview-sdl: src/nitroview_sdl.c $(VIEWER_SRC) $(VIEWER_HDR) build/icon.inc $(DIST_DIR)/libnitro.a $(LIB_HDR) src/nitrosvg.h \
                            src/nitrocdr.h $(DIST_VEC)
 	@test -f $(SDL3_DIR)/lib/libSDL3.a -a -f third_party/stb_image.h || { echo "missing SDL3 / stb_image: run scripts/get-deps.sh first"; exit 1; }
 	@mkdir -p $(@D)
-	$(CC) -O3 -march=$(DIST_ARCH) $(X86JCC) $(DEFS) -fblocks -Wall -Wextra -Wno-unused-parameter \
+	$(CC) -O3 $(DIST_CPU) $(DEFS) -fblocks -Wall -Wextra -Wno-unused-parameter \
 	  $(if $(filter %libnitrosvg.a,$(DIST_VEC)),-DNV_SVG) $(if $(filter %libnitrocdr.a,$(DIST_VEC)),-DNV_CDR) \
 	  $(if $(filter 1,$(DAV1D)),-DNV_DAV1D -I$(DAV1D_DIR)/include) \
 	  -Isrc -Ibuild -Ithird_party -I$(SDL3_DIR)/include src/nitroview_sdl.c $(VIEWER_SRC) $(DIST_DIR)/libnitro.a \
@@ -530,7 +540,7 @@ linux: linux-lib $(LINUX_TOOLS)
 	@echo "built $(LIB_SHARED) $(LIB_STATIC) $(LINUX_TOOLS)$(if $(wildcard $(LJT)/lib/libturbojpeg.a),, (verify / robust: run scripts/get-deps.sh first))"
 
 clean:
-	rm -rf build nitroview nitroview-gnome nitroview-sdl nitroview-linux-x64.tar.gz nitroview-gnome.flatpak nitroview.app nitroview.exe nitroview.zip nitroview.dmg \
+	rm -rf build nitroview nitroview-gnome nitroview-sdl nitroview-linux-x64.tar.gz nitroview-linux-arm64.tar.gz nitroview-gnome.flatpak nitroview.app nitroview.exe nitroview.zip nitroview.dmg \
 	  bench/bench bench/verify bench/robust bench/freqprobe bench/sustain bench/pngbench bench/pngsplit \
 	  bench/pngverify bench/pngrobust bench/psdverify bench/psdrobust bench/nbench bench/rgbverify bench/bgrxverify bench/*.exe
 

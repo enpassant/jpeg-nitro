@@ -155,7 +155,9 @@ SDL3 (the window systems' development packages it needs are listed there). It bu
 only for testing (there OpenGL is slow; the Metal viewer stays the real one). `make sdl-dist` makes
 the one file to give away, `nitroview-linux-x64.tar.gz` (4 MB): built for x86-64-v3 (AVX2) instead
 of the build machine's CPU, libstdc++, zlib and dav1d linked in, it needs only glibc (2.35+ when built
-on Ubuntu 22.04). `nitroview-sdl --register` adds it to the desktop's applications for the current user
+on Ubuntu 22.04). On 64-bit ARM Linux (Asahi Linux on Apple M1 / M2, Raspberry Pi 4 / 5) the same
+makes `nitroview-linux-arm64.tar.gz`, built for armv8-a (the NEON code paths are the ones the Mac's arm64
+build uses; HEIC is decoded by nitrohevc, as on x86 Linux). `nitroview-sdl --register` adds it to the desktop's applications for the current user
 (a desktop file and the icon in `~/.local/share`: "Open with" in the file manager), `--unregister`
 removes it.
 
