@@ -753,11 +753,65 @@ static void init_dct(void) {
 }
 
 static const int8_t dst4[4][4] = {{29, 55, 74, 84}, {74, 74, 0, -74}, {84, -29, -74, 55}, {55, -84, 74, -29}};
+static const int8_t dct4[4][4] = {{64, 64, 64, 64}, {83, 36, -36, -83}, {64, -64, -64, 64}, {36, -83, 83, -36}};
+
+// a 4x4 block (DST or DCT, matrix m[frequency][sample]) with all its coefficients: the photos'
+// 4x4 blocks are dense (84% of them coded), so no zero skipping; fixed loops over whole rows
+static void inverse4(const int32_t *c, const int8_t m[4][4], int16_t *res) {
+    int32_t t[16];
+    for (int y = 0; y < 4; y++)   // columns: t[y][x] = sum over j of m[j][y] * c[j][x]
+        for (int x = 0; x < 4; x++) {
+            int32_t a = m[0][y] * c[x] + m[1][y] * c[4 + x] + m[2][y] * c[8 + x] + m[3][y] * c[12 + x];
+            t[y * 4 + x] = CLIP3(-32768, 32767, (a + 64) >> 7);
+        }
+    for (int y = 0; y < 4; y++)   // rows
+        for (int x = 0; x < 4; x++) {
+            int32_t a = m[0][x] * t[y * 4] + m[1][x] * t[y * 4 + 1] + m[2][x] * t[y * 4 + 2] + m[3][x] * t[y * 4 + 3];
+            res[y * 4 + x] = (int16_t)((a + 2048) >> 12);
+        }
+}
+
+// out[k * 32 + x] (k < n, x < cols) = the sum over j < rows of M_n[j][k] * in[j * is + x]: the
+// inverse DCT of all columns at once, so the loops run over whole rows (and vectorize). Even / odd
+// recursion: M_n's even rows are M_(n/2) (sample k and n - 1 - k alike), its odd rows antisymmetric,
+// so a 32-point column takes 16 * 16 + 8 * 8 + 4 * 4 + 16 products instead of 32 * 32.
+static void idct_cols(const int32_t *in, int is, int n, int rows, int cols, int32_t *out) {
+    if (n == 4) {
+        for (int k = 0; k < 4; k++) {
+            int32_t *o = out + k * 32;
+            for (int x = 0; x < cols; x++) o[x] = 0;
+            for (int j = 0; j < rows; j++) {
+                int m = dct4[j][k];
+                const int32_t *r = in + j * is;
+                for (int x = 0; x < cols; x++) o[x] += m * r[x];
+            }
+        }
+        return;
+    }
+    int h = n / 2, step = 32 / n;
+    int32_t e[16 * 32];
+    idct_cols(in, 2 * is, h, (rows + 1) / 2, cols, e);
+    for (int k = 0; k < h; k++) {
+        int32_t od[32];
+        for (int x = 0; x < cols; x++) od[x] = 0;
+        for (int j = 1; j < rows; j += 2) {
+            int m = dct32[j * step][k];
+            const int32_t *r = in + j * is;
+            for (int x = 0; x < cols; x++) od[x] += m * r[x];
+        }
+        int32_t *lo = out + k * 32, *hi = out + (n - 1 - k) * 32;
+        const int32_t *ek = e + k * 32;
+        for (int x = 0; x < cols; x++) {
+            lo[x] = ek[x] + od[x];
+            hi[x] = ek[x] - od[x];
+        }
+    }
+}
 
 // inverse transform of an n x n block (coefficients c[y * n + x], zero outside columns 0..maxx and
-// rows 0..maxy) into residuals; the loops over a matrix row vectorize
+// rows 0..maxy) into residuals
 static void inverse_transform(const int32_t *c, int log2, int dst, int maxx, int maxy, int16_t *res) {
-    int n = 1 << log2, step = 32 >> log2;
+    int n = 1 << log2;
     if (!dst && maxx == 0 && maxy == 0) {   // DC only: a constant
         int g = (64 * c[0] + 64) >> 7;
         g = CLIP3(-32768, 32767, g);
@@ -765,57 +819,20 @@ static void inverse_transform(const int32_t *c, int log2, int dst, int maxx, int
         for (int i = 0; i < n * n; i++) res[i] = v;
         return;
     }
-    int32_t tmp[32 * 32];   // [y * n + x]
-    if (dst) {   // 4x4 DST: directly
-        int32_t acc[4];
-        for (int x = 0; x <= maxx; x++) {
-            for (int y = 0; y < 4; y++) acc[y] = 0;
-            for (int j = 0; j <= maxy; j++)
-                for (int y = 0; y < 4; y++) acc[y] += dst4[j][y] * c[j * 4 + x];
-            for (int y = 0; y < 4; y++) tmp[y * 4 + x] = CLIP3(-32768, 32767, (acc[y] + 64) >> 7);
-        }
-        for (int y = 0; y < 4; y++) {
-            for (int x = 0; x < 4; x++) acc[x] = 0;
-            for (int j = 0; j <= maxx; j++)
-                for (int x = 0; x < 4; x++) acc[x] += dst4[j][x] * tmp[y * 4 + j];
-            for (int x = 0; x < 4; x++) res[y * 4 + x] = (int16_t)((acc[x] + 2048) >> 12);
-        }
+    if (n == 4) {
+        inverse4(c, dst ? dst4 : dct4, res);
         return;
     }
-    // DCT: the even basis functions are symmetric, the odd ones antisymmetric, so only the first
-    // half is computed: out[i] = E[i] + O[i], out[n - 1 - i] = E[i] - O[i]
-    int h = n / 2;
-    int32_t ev[16], od[16];
-    // columns: e[x][y] = sum over j of M[j][y] * d[x][j], then (e + 64) >> 7, clipped to 16 bits
-    for (int x = 0; x <= maxx; x++) {
-        for (int y = 0; y < h; y++) ev[y] = od[y] = 0;
-        for (int j = 0; j <= maxy; j++) {
-            int32_t v = c[j * n + x];
-            if (!v) continue;
-            const int8_t *m = dct32[j * step];
-            int32_t *a = j & 1 ? od : ev;
-            for (int y = 0; y < h; y++) a[y] += m[y] * v;
-        }
-        for (int y = 0; y < h; y++) {
-            tmp[y * n + x] = CLIP3(-32768, 32767, (ev[y] + od[y] + 64) >> 7);
-            tmp[(n - 1 - y) * n + x] = CLIP3(-32768, 32767, (ev[y] - od[y] + 64) >> 7);
-        }
-    }
-    // rows (only columns 0..maxx are not zero), then (r + 2048) >> 12 (bdShift = 20 - BitDepth)
-    for (int y = 0; y < n; y++) {
-        for (int x = 0; x < h; x++) ev[x] = od[x] = 0;
-        for (int j = 0; j <= maxx; j++) {
-            int32_t v = tmp[y * n + j];
-            if (!v) continue;
-            const int8_t *m = dct32[j * step];
-            int32_t *a = j & 1 ? od : ev;
-            for (int x = 0; x < h; x++) a[x] += m[x] * v;
-        }
-        for (int x = 0; x < h; x++) {
-            res[y * n + x] = (int16_t)((ev[x] + od[x] + 2048) >> 12);
-            res[y * n + n - 1 - x] = (int16_t)((ev[x] - od[x] + 2048) >> 12);
-        }
-    }
+    // columns (only 0..maxx are not zero), (e + 64) >> 7 clipped to 16 bits, stored transposed
+    // (t[x][y]) so that the rows are the same column transform; then (r + 2048) >> 12 (bdShift
+    // = 20 - BitDepth)
+    int32_t out[32 * 32], t[32 * 32];
+    idct_cols(c, n, n, maxy + 1, maxx + 1, out);
+    for (int y = 0; y < n; y++)
+        for (int x = 0; x <= maxx; x++) t[x * 32 + y] = CLIP3(-32768, 32767, (out[y * 32 + x] + 64) >> 7);
+    idct_cols(t, 32, n, maxx + 1, n, out);
+    for (int y = 0; y < n; y++)
+        for (int x = 0; x < n; x++) res[y * n + x] = (int16_t)((out[x * 32 + y] + 2048) >> 12);
 }
 
 // ---------------------------------------------------------------------------
