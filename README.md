@@ -785,6 +785,17 @@ wildcards (`*.jpg`) are expanded by the program, directories work as arguments t
 
 ## Build
 
+### Nix development environment
+
+Run `nix-shell` in the repository root to load `shell.nix`, which provides the
+compilation environment. Then follow [Native builds](#native-builds) for dependency
+setup and build commands.
+
+A configured `nixpkgs` channel is required; alternatively, use
+`nix-shell -I nixpkgs=/path/to/nixpkgs`.
+
+### Native builds
+
 Linux: `make linux` builds the shared/static decoder library and portable tools; `make gnome`
 builds the GTK4/libadwaita viewer, and `make gnome-register` registers it for the current user.
 

@@ -709,6 +709,17 @@ is fut; a `*.jpg`-t maga a program bontja ki, és könyvtárnevet is elfogad.
 
 ## Build
 
+### Nix fejlesztői környezet
+
+A projekt gyökerében indított `nix-shell` a `shell.nix` alapján biztosítja a
+fordításhoz szükséges környezetet. Ezután a függőségek előkészítéséhez és a
+fordításhoz kövesd a [Natív build](#natív-build) szekciót.
+
+Beállított `nixpkgs` csatorna szükséges, vagy megadható saját csomagkészlet:
+`nix-shell -I nixpkgs=/útvonal/nixpkgs`.
+
+### Natív build
+
 Linuxon a `make linux` a megosztott/statikus dekóderkönyvtárat és a hordozható eszközöket, a
 `make gnome` a GTK4/libadwaita nézőt fordítja; a `make gnome-register` az aktuális felhasználónak
 regisztrálja.
