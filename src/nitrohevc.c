@@ -533,12 +533,19 @@ static const uint8_t range_lps[64][4] = {
 // value >> bits, the bits below it come after it in the stream. Renormalizing only lowers bits
 // (value stays), 4 bytes are loaded at once when fewer than 16 bits are left, and range and
 // ivlOffset are compared as range << bits: a bin is a few instructions, without a loop or a
-// branch per bit.
+// branch per bit. The engine (CabacEngine) is apart from the context states, so a parsing loop
+// can keep it in a local copy, in registers: the states are stored through a uint8_t pointer,
+// which may alias anything, and would make the compiler reload the engine from memory after
+// every bin.
 typedef struct {
     const uint8_t *p, *end;
     uint64_t value;
     uint32_t range;
     int bits;
+} CabacEngine;
+
+typedef struct {
+    CabacEngine e;
     uint8_t state[NUM_CTX];   // pStateIdx << 1 | valMps
 } Cabac;
 
@@ -563,7 +570,7 @@ static const uint8_t next_state[128][2] = {
     {122, 74}, {123, 75}, {124, 76}, {125, 77}, {124, 76}, {125, 77}, {126, 126}, {127, 127},
 };
 
-static inline void cabac_refill(Cabac *c) {
+static inline void cabac_refill(CabacEngine *c) {
     uint32_t w = 0;
     if (c->end - c->p >= 4) {
         w = (uint32_t)c->p[0] << 24 | (uint32_t)c->p[1] << 16 | (uint32_t)c->p[2] << 8 | c->p[3];
@@ -575,7 +582,8 @@ static inline void cabac_refill(Cabac *c) {
     c->bits += 32;
 }
 
-static void cabac_start(Cabac *c, const uint8_t *p, const uint8_t *end) {   // 9.3.2.5
+static void cabac_start(Cabac *cabac, const uint8_t *p, const uint8_t *end) {   // 9.3.2.5
+    CabacEngine *c = &cabac->e;
     c->p = p;
     c->end = end;
     c->range = 510;
@@ -594,8 +602,8 @@ static void cabac_init_contexts(Cabac *c, int qp) {   // 9.3.2.2
     }
 }
 
-static inline __attribute__((always_inline)) int cabac_decision(Cabac *c, int ctx) {   // 9.3.4.3.2
-    unsigned s = c->state[ctx];
+static inline __attribute__((always_inline)) int cabac_dec(CabacEngine *c, uint8_t *state, int ctx) {   // 9.3.4.3.2
+    unsigned s = state[ctx];
     uint32_t lps = range_lps[s >> 1][(c->range >> 6) & 3];
     uint32_t r = c->range - lps;
     uint64_t scaled = (uint64_t)r << c->bits;
@@ -604,7 +612,7 @@ static inline __attribute__((always_inline)) int cabac_decision(Cabac *c, int ct
         c->value -= scaled;
         r = lps;
     }
-    c->state[ctx] = next_state[s][is_lps];
+    state[ctx] = next_state[s][is_lps];
     int shift = __builtin_clz(r) - 23;   // back to >= 256: at most 1 bit after an MPS, up to 6 after an LPS
     c->range = r << shift;
     c->bits -= shift;
@@ -612,7 +620,7 @@ static inline __attribute__((always_inline)) int cabac_decision(Cabac *c, int ct
     return (int)(s & 1) ^ is_lps;
 }
 
-static inline __attribute__((always_inline)) int cabac_bypass(Cabac *c) {   // 9.3.4.3.4: ivlOffset = ivlOffset << 1 | the next bit
+static inline __attribute__((always_inline)) int cabac_byp(CabacEngine *c) {   // 9.3.4.3.4: ivlOffset = ivlOffset << 1 | the next bit
     c->bits--;
     uint64_t scaled = (uint64_t)c->range << c->bits;
     int bin = c->value >= scaled;
@@ -623,7 +631,7 @@ static inline __attribute__((always_inline)) int cabac_bypass(Cabac *c) {   // 9
 
 // n bypass bins at once (MSB first): ivlOffset << k | the next k bits, divided by the range, gives
 // k bins and the remainder the new ivlOffset; k <= 16 (refills keep at least 16 bits)
-static inline uint32_t cabac_bypass_bits(Cabac *c, int n) {
+static inline uint32_t cabac_bits(CabacEngine *c, int n) {
     uint32_t v = 0;
     while (n > 0) {
         int k = n < 16 ? n : 16;
@@ -638,7 +646,13 @@ static inline uint32_t cabac_bypass_bits(Cabac *c, int n) {
     return v;
 }
 
-static int cabac_terminate(Cabac *c) {   // 9.3.4.3.5
+// on the decoder's own engine (outside the residual loop)
+static inline __attribute__((always_inline)) int cabac_decision(Cabac *c, int ctx) { return cabac_dec(&c->e, c->state, ctx); }
+static inline __attribute__((always_inline)) int cabac_bypass(Cabac *c) { return cabac_byp(&c->e); }
+static inline uint32_t cabac_bypass_bits(Cabac *c, int n) { return cabac_bits(&c->e, n); }
+
+static int cabac_terminate(Cabac *cabac) {   // 9.3.4.3.5
+    CabacEngine *c = &cabac->e;
     c->range -= 2;
     uint64_t scaled = (uint64_t)c->range << c->bits;
     if (c->value >= scaled) return 1;
@@ -988,12 +1002,13 @@ static int chroma_qp_table(int qpi) {   // Table 8-10 (ChromaArrayType 1)
 // decodes the coefficients of a transform block, dequantizes, transforms and adds them
 // to the prediction at (x0, y0) of component c (in that component's samples)
 static int residual(Dec *d, int x0, int y0, int log2, int c, int pred_mode) {
-    Cabac *cb = &d->cabac;
+    CabacEngine e = d->cabac.e;   // (in registers: see CabacEngine; back to d->cabac after the parsing)
+    uint8_t *st = d->cabac.state;
     int n = 1 << log2;
     int32_t *coef = d->coeff;   // (all zero between blocks: cleared after use)
     int transform_skip = 0;     // (4x4 blocks only: Log2MaxTransformSkipSize is 2 without range extensions)
     if (d->pps->transform_skip && !d->cu_transquant_bypass && log2 == 2)
-        transform_skip = cabac_decision(cb, CTX_TS_FLAG + (c ? 1 : 0));
+        transform_skip = cabac_dec(&e, st, CTX_TS_FLAG + (c ? 1 : 0));
 
     // scanIdx (7.4.9.11)
     int scan = 0;
@@ -1011,16 +1026,16 @@ static int residual(Dec *d, int x0, int y0, int log2, int c, int pred_mode) {
         ctx_shift = log2 - 2;
     }
     int max = (log2 << 1) - 1, px = 0, py = 0;
-    while (px < max && cabac_decision(cb, CTX_LAST_X + ctx_off + (px >> ctx_shift))) px++;
-    while (py < max && cabac_decision(cb, CTX_LAST_Y + ctx_off + (py >> ctx_shift))) py++;
+    while (px < max && cabac_dec(&e, st, CTX_LAST_X + ctx_off + (px >> ctx_shift))) px++;
+    while (py < max && cabac_dec(&e, st, CTX_LAST_Y + ctx_off + (py >> ctx_shift))) py++;
     int last_x = px, last_y = py;
     if (px > 3) {
         int k = (px >> 1) - 1;
-        last_x = (1 << k) * (2 + (px & 1)) + (int)cabac_bypass_bits(cb, k);
+        last_x = (1 << k) * (2 + (px & 1)) + (int)cabac_bits(&e, k);
     }
     if (py > 3) {
         int k = (py >> 1) - 1;
-        last_y = (1 << k) * (2 + (py & 1)) + (int)cabac_bypass_bits(cb, k);
+        last_y = (1 << k) * (2 + (py & 1)) + (int)cabac_bits(&e, k);
     }
     if (scan == 2) {
         int t = last_x;
@@ -1058,7 +1073,7 @@ static int residual(Dec *d, int x0, int y0, int log2, int c, int pred_mode) {
             int ctx = 0;
             if (xs < nsb - 1) ctx += csbf[xs + 1][ys];
             if (ys < nsb - 1) ctx += csbf[xs][ys + 1];
-            csbf[xs][ys] = (uint8_t)cabac_decision(cb, CTX_CSBF + MIN(ctx, 1) + (c ? 2 : 0));
+            csbf[xs][ys] = (uint8_t)cabac_dec(&e, st, CTX_CSBF + MIN(ctx, 1) + (c ? 2 : 0));
             infer_dc = 1;
         } else {
             csbf[xs][ys] = 1;
@@ -1093,7 +1108,7 @@ static int residual(Dec *d, int x0, int y0, int log2, int c, int pred_mode) {
                         sctx += log2 == 3 ? 9 : 12;
                     }
                 }
-                if (cabac_decision(cb, CTX_SIG + (c ? 27 + sctx : sctx))) {
+                if (cabac_dec(&e, st, CTX_SIG + (c ? 27 + sctx : sctx))) {
                     sig[nsig++] = p;
                     infer_dc = 0;
                 }
@@ -1108,7 +1123,7 @@ static int residual(Dec *d, int x0, int y0, int log2, int c, int pred_mode) {
         int ng1 = MIN(nsig, 8);
         for (int k = 0; k < ng1; k++) {
             int ctx = ctx_set * 4 + greater1_state + (c ? 16 : 0);
-            g1[k] = cabac_decision(cb, CTX_GT1 + ctx);
+            g1[k] = cabac_dec(&e, st, CTX_GT1 + ctx);
             if (g1[k]) {
                 greater1_state = 0;
                 if (g2_pos < 0) g2_pos = k;
@@ -1117,9 +1132,9 @@ static int residual(Dec *d, int x0, int y0, int log2, int c, int pred_mode) {
             }
         }
         int g2 = 0;
-        if (g2_pos >= 0) g2 = cabac_decision(cb, CTX_GT2 + ctx_set + (c ? 4 : 0));
+        if (g2_pos >= 0) g2 = cabac_dec(&e, st, CTX_GT2 + ctx_set + (c ? 4 : 0));
         int hidden = sign_hiding && sig[0] - sig[nsig - 1] > 3;
-        uint32_t signs = cabac_bypass_bits(cb, hidden ? nsig - 1 : nsig) << (hidden ? 1 : 0);   // sig[0] first
+        uint32_t signs = cabac_bits(&e, hidden ? nsig - 1 : nsig) << (hidden ? 1 : 0);   // sig[0] first
         int rice = 0, sum = 0;
         for (int k = 0; k < nsig; k++) {
             int base = 1 + (k < 8 ? g1[k] : 0) + (k == g2_pos ? g2 : 0);
@@ -1127,11 +1142,11 @@ static int residual(Dec *d, int x0, int y0, int log2, int c, int pred_mode) {
             if (base == (k < 8 ? (k == g2_pos ? 3 : 2) : 1)) {
                 // coeff_abs_level_remaining (9.3.3.11)
                 int prefix = 0;
-                while (prefix < 32 && cabac_bypass(cb)) prefix++;
+                while (prefix < 32 && cabac_byp(&e)) prefix++;
                 if (prefix > 24) return -1;   // (more would not fit the 16-bit coefficient range)
                 int rem;
-                if (prefix <= 3) rem = (prefix << rice) + (int)cabac_bypass_bits(cb, rice);
-                else rem = (((1 << (prefix - 3)) + 3 - 1) << rice) + (int)cabac_bypass_bits(cb, prefix - 3 + rice);
+                if (prefix <= 3) rem = (prefix << rice) + (int)cabac_bits(&e, rice);
+                else rem = (((1 << (prefix - 3)) + 3 - 1) << rice) + (int)cabac_bits(&e, prefix - 3 + rice);
                 level = base + rem;
                 if (level > 3 * (1 << rice)) rice = MIN(rice + 1, 4);
             }
@@ -1146,6 +1161,8 @@ static int residual(Dec *d, int x0, int y0, int log2, int c, int pred_mode) {
             if (yc > maxy) maxy = yc;
         }
     }
+
+    d->cabac.e = e;
 
     // dequantization
     int qp;
