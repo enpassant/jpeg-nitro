@@ -239,7 +239,7 @@ SDL_VEC   := $(if $(filter 1,$(CDR)),build/libnitrocdr.a) $(if $(filter 1,$(SVG)
 SDL_VLIBS := $(if $(filter 1,$(CDR)),-liconv -lz) $(if $(filter 1,$(SVG)),-lc++) -framework VideoToolbox   # (HEIC: hardware decoding)
 else
 SDL_DEC   := $(LIB_STATIC)
-SDL_VEC   := $(GNOME_CDR) $(GNOME_SVG)
+SDL_VEC   := $(GNOME_CDR) $(GNOME_SVG) $(if $(and $(GNOME_SVG),$(filter 1,$(MIMALLOC))),build/mimalloc.o build/nitroalloc.o)
 SDL_VLIBS := $(if $(GNOME_CDR),-lz) $(if $(GNOME_SVG),-lstdc++)
 endif
 SDL_AVIF  := $(if $(filter 1,$(DAV1D)),$(DAV1D_LIB))
@@ -275,6 +275,10 @@ DIST_CPU    = -march=$(DIST_ARCH) $(X86JCC)
 DIST_TGZ   := nitroview-linux-x64.tar.gz
 endif
 DIST_VEC   := $(if $(filter 1,$(CDR)),$(DIST_DIR)/libnitrocdr.a) $(if $(filter 1,$(SVG)),$(DIST_DIR)/libnitrosvg.a)
+# their new / delete through mimalloc, as on macOS (CorelDRAW on the M1 under Linux: ~10% faster than glibc's malloc)
+DIST_MI    := $(if $(and $(DIST_VEC),$(filter 1,$(MIMALLOC))),$(DIST_DIR)/mimalloc.o $(DIST_DIR)/nitroalloc.o)
+$(DIST_DIR)/mimalloc.o $(DIST_DIR)/nitroalloc.o: src/nitroalloc.cpp $(wildcard $(MI)/.version-*)
+	$(call mimalloc_objs,-march=$(DIST_ARCH))
 $(DIST_DIR)/libnitrosvg.a: src/nitrosvg.cpp src/nitrosvg.h $(SVG_STAMP)
 	$(call svg_lib,-march=$(DIST_ARCH))
 $(DIST_DIR)/libnitrocdr.a: CDR_C += $(addprefix $(ZLIB)/,adler32.c crc32.c inflate.c inffast.c inftrees.c zutil.c)
@@ -284,14 +288,14 @@ $(DIST_DIR)/libnitrocdr.a: src/nitrocdr.cpp src/nitrocdr.h $(CDR_STAMP)
 $(DIST_DIR)/libnitro.a: $(LIB_SRC) $(LIB_AVIF) $(LIB_HDR)
 	$(call nitro_lib,-O3 $(DIST_CPU) $(DEFS) -fblocks)
 $(DIST_DIR)/nitroview-sdl: src/nitroview_sdl.c $(VIEWER_SRC) $(VIEWER_HDR) build/icon.inc $(DIST_DIR)/libnitro.a $(LIB_HDR) src/nitrosvg.h \
-                           src/nitrocdr.h $(DIST_VEC)
+                           src/nitrocdr.h $(DIST_VEC) $(DIST_MI)
 	@test -f $(SDL3_DIR)/lib/libSDL3.a -a -f third_party/stb_image.h || { echo "missing SDL3 / stb_image: run scripts/get-deps.sh first"; exit 1; }
 	@mkdir -p $(@D)
 	$(CC) -O3 $(DIST_CPU) $(DEFS) -fblocks -Wall -Wextra -Wno-unused-parameter \
 	  $(if $(filter %libnitrosvg.a,$(DIST_VEC)),-DNV_SVG) $(if $(filter %libnitrocdr.a,$(DIST_VEC)),-DNV_CDR) \
 	  $(if $(filter 1,$(DAV1D)),-DNV_DAV1D -I$(DAV1D_DIR)/include) \
 	  -Isrc -Ibuild -Ithird_party -I$(SDL3_DIR)/include src/nitroview_sdl.c $(VIEWER_SRC) $(DIST_DIR)/libnitro.a \
-	  $(if $(filter 1,$(DAV1D)),$(DAV1D_LIB)) $(DIST_VEC) $(SDL_LIBS) $(if $(DIST_VEC),-Wl$(COMMA)-Bstatic -lstdc++ -Wl$(COMMA)-Bdynamic) -static-libgcc \
+	  $(if $(filter 1,$(DAV1D)),$(DAV1D_LIB)) $(DIST_VEC) $(DIST_MI) $(SDL_LIBS) $(if $(DIST_VEC),-Wl$(COMMA)-Bstatic -lstdc++ -Wl$(COMMA)-Bdynamic) -static-libgcc \
 	  -lpthread -lm -o $@
 	@echo "$@ needs: $$(objdump -p $@ | sed -n 's/ *NEEDED *//p' | tr '\n' ' ')(glibc $$(objdump -T $@ | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1 | cut -d_ -f2))"
 $(DIST_TGZ): $(DIST_DIR)/nitroview-sdl

@@ -160,10 +160,11 @@ BT”, a családra képződnek le); hiányzó font helyett hasonlót használ, i
 hosszabb vagy rövidebb lehet. A vonalak legalább egy képpont szélesek, mint a CorelDRAW-ban. Amit nem tud: nyílhegyek, a Corel saját vektoros és
 bitképes mintakitöltései. Egy Macről összegyűjtött 216 CDR (ArchiCAD-PDF-ből készült alaprajzok,
 hálózati térképek, logók) mind megnyílik; egy Intel i9-en a medián 20 ms, a 76 darab 1 MB-nál nagyobb
-fájl átlagosan 230 ms, a legnagyobb tervrajz 1,8 s (nagyrészt a libcdr feldolgozása). macOS-en a C++ kód (libcdr,
+fájl átlagosan 230 ms, a legnagyobb tervrajz 1,8 s (nagyrészt a libcdr feldolgozása). macOS-en és a Linuxos SDL-nézőben a C++ kód (libcdr,
 librevenge, lunasvg) a [mimalloc](https://github.com/microsoft/mimalloc)-kal foglal memóriát: egy nagy
 terv betöltése több millió apró foglalással jár, és így Intelen és Apple Siliconon is 20–25%-kal
-gyorsabban töltődnek be a tervek (`make MIMALLOC=0`: a rendszer malloc-ja).
+gyorsabban töltődnek be a tervek (`make MIMALLOC=0`: a rendszer malloc-ja); 193 CDR az M1-en Linux
+alatt 16%-kal gyorsabb, mint a glibc malloc-jával.
 
 **Színkezelés:** a beágyazott ICC-profilokat minden formátumnál figyelembe veszi (pl. Display P3 az
 iPhone-okról és a Mac-es képernyőképekből, Adobe RGB a szkennelésekből); a profil nélküli képeket
