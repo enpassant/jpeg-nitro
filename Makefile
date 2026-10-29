@@ -562,9 +562,15 @@ clean:
 WINCC   ?= x86_64-w64-mingw32-clang
 WINARCH ?= x86-64-v3
 WINFLAGS = -O3 -march=$(WINARCH) $(X86JCC) $(DEFS) -fblocks -Wall -Wextra -Wno-unused-parameter -static
-bench/nbench.exe: bench/nbench.c build/win/libnitro.a $(LIB_HDR)
+# everything Windows is built again when WINARCH changes (the v2 and v3 builds share build/win/)
+WIN_STAMP := build/win/.arch-$(WINARCH)
+$(WIN_STAMP):
+	@mkdir -p build/win
+	@rm -f build/win/.arch-*
+	@touch $@
+bench/nbench.exe: bench/nbench.c build/win/libnitro.a $(LIB_HDR) $(WIN_STAMP)
 	$(WINCC) $(WINFLAGS) -Isrc bench/nbench.c build/win/libnitro.a -lpthread -o $@
-bench/psdverify.exe: bench/psdverify.c build/win/libnitro.a $(LIB_HDR)
+bench/psdverify.exe: bench/psdverify.c build/win/libnitro.a $(LIB_HDR) $(WIN_STAMP)
 	$(WINCC) $(WINFLAGS) -w -Isrc bench/psdverify.c build/win/libnitro.a -lpthread -o $@
 WINRES  ?= $(patsubst %clang,%windres,$(WINCC))
 WINLIBS := -ld3d11 -ldxgi -ld3dcompiler -lwindowscodecs -lole32 -loleaut32 -lshlwapi -lshell32 -luser32 \
@@ -596,22 +602,22 @@ build/win/libnitro.a: CC = $(WINCC)
 build/win/libnitro.a: AR = $(WINAR)
 build/win/libnitro.a: LIB_AVIF = $(if $(WIN_DAV1D),src/nitroavif.c)
 build/win/libnitro.a: LIB_DEFS = $(WIN_AVIF)
-build/win/libnitro.a: $(LIB_SRC) src/nitroavif.c $(LIB_HDR) build/.config-$(CONFIG)
+build/win/libnitro.a: $(LIB_SRC) src/nitroavif.c $(LIB_HDR) build/.config-$(CONFIG) $(WIN_STAMP)
 	$(call nitro_lib,$(WINFLAGS))
 build/win/libnitrosvg.a: CC = $(WINCC)
 build/win/libnitrosvg.a: CXX = $(WINCXX)
 build/win/libnitrosvg.a: AR = $(WINAR)
-build/win/libnitrosvg.a: src/nitrosvg.cpp src/nitrosvg.h $(SVG_STAMP)
+build/win/libnitrosvg.a: src/nitrosvg.cpp src/nitrosvg.h $(SVG_STAMP) $(WIN_STAMP)
 	$(call svg_lib,-march=$(WINARCH))
 build/win/libnitrocdr.a: CC = $(WINCC)
 build/win/libnitrocdr.a: CXX = $(WINCXX)
 build/win/libnitrocdr.a: AR = $(WINAR)
 build/win/libnitrocdr.a: CDR_C += $(addprefix $(ZLIB)/,adler32.c crc32.c inflate.c inffast.c inftrees.c zutil.c)
 build/win/libnitrocdr.a: CDR_DEFS += -I$(ZLIB)
-build/win/libnitrocdr.a: src/nitrocdr.cpp src/nitrocdr.h $(CDR_STAMP)
+build/win/libnitrocdr.a: src/nitrocdr.cpp src/nitrocdr.h $(CDR_STAMP) $(WIN_STAMP)
 	$(call cdr_lib,-march=$(WINARCH) -I$(ZLIB))
 nitroview.exe: src/nitroview_win.c $(VIEWER_SRC) $(VIEWER_HDR) build/win/libnitro.a $(LIB_HDR) build/nitroview_res.o $(WIN_OBJS) \
-               src/nitrosvg.h src/nitrocdr.h
+               src/nitrosvg.h src/nitrocdr.h $(WIN_STAMP)
 	$(WINCC) $(WINFLAGS) $(WIN_DEFS) $(WIN_AVIF) -Ibuild -Isrc -municode src/nitroview_win.c $(VIEWER_SRC) build/win/libnitro.a \
 	  $(if $(WIN_DAV1D),$(DAV1D_WIN)/lib/libdav1d.a) build/nitroview_res.o $(WIN_OBJS) $(WINLIBS) $(WIN_CXXLIBS) -o $@
 windows: nitroview.exe bench/nbench.exe bench/psdverify.exe
