@@ -1116,6 +1116,7 @@ typedef struct {
     int dragging;
     double drag_x, drag_y;
     double page_accum;            // Ctrl + wheel (touchpad): accumulated distance
+    double pinch_last;            // touchpad pinch: the scale of the previous update (see SDL_EVENT_PINCH_UPDATE)
     // window sizing
     int user_sized, fullscreen;
     double self_resize_time;      // our own resizes arrive later as events: ignored for a while
@@ -2004,14 +2005,24 @@ static void handle(const SDL_Event *e) {
         }
         break;
     case SDL_EVENT_MOUSE_WHEEL: on_wheel(&e->wheel); break;
-    case SDL_EVENT_PINCH_UPDATE:   // touchpad pinch: zoom around the cursor
-        if (V.nfiles && (d = loader_get(V.index)) && e->pinch.scale > 0) {
+    case SDL_EVENT_PINCH_BEGIN: V.pinch_last = 1; break;
+    case SDL_EVENT_PINCH_UPDATE: {   // touchpad pinch: zoom around the cursor
+        // SDL documents the scale as the change since the previous update, and so it is on macOS;
+        // its Wayland and X11 backends pass the protocol's scale since the pinch began (taken as
+        // a change, every update multiplied the zoom again: a small pinch zoomed in 3x)
+        double f = e->pinch.scale;
+        if (!strcmp(SDL_GetCurrentVideoDriver(), "wayland") || !strcmp(SDL_GetCurrentVideoDriver(), "x11")) {
+            f = V.pinch_last > 0 ? e->pinch.scale / V.pinch_last : 1;
+            V.pinch_last = e->pinch.scale;
+        }
+        if (V.nfiles && (d = loader_get(V.index)) && f > 0) {
             float x, y;
             SDL_GetMouseState(&x, &y);
             anchor_of(x, y, &ax, &ay);
-            zoom_by(e->pinch.scale, d, ax, ay, 1);
+            zoom_by(f, d, ax, ay, 1);
         }
         break;
+    }
     case SDL_EVENT_DROP_BEGIN: fl_free(&V.dropped); break;
     case SDL_EVENT_DROP_FILE: if (e->drop.data) fl_add(&V.dropped, e->drop.data); break;
     case SDL_EVENT_DROP_COMPLETE:
