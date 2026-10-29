@@ -582,7 +582,9 @@ A PNG deflate (LZ77 + Huffman) és soronkénti szűrők, mindkettő eredendően 
    összegeiből, AVX2) egyeznie kell, különben a néző tartalékdekóderre vált.
 2. **Párhuzamos szűrő-visszaállítás („hullámfront”):** a None/Sub sorok függetlenek; az Up/
    Average/Paeth sorok szakaszonként (1 KB) követik az előző sort, 16-ból 12 szálon (a várakozó
-   hyperthread-ek lassítanák a dolgozó testvérszálukat).
+   hyperthread-ek lassítanák a dolgozó testvérszálukat). Teljesítmény- és hatékonysági magokkal
+   (Apple M1, Intel 12. generáció) csak a teljesítménymagokon: egy lassabb magon futó sor minden
+   utána következőt feltart (az M1-en Linux alatt 6 helyett 4 szál, +16%).
 3. A visszaszűrt sorokat a GPU közvetlenül olvassa (a szűrőbájtot átugorva), előszorozza az
    alfát és RGBA-ra alakít — a CPU-n nincs színkonverzió.
 

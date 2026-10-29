@@ -2,7 +2,7 @@
 // Copyright (c) 2026 A'rpi - part of jpeg-nitro (https://github.com/gereoffy/jpeg-nitro)
 //
 // nitro_os.h: the little the decoders need from the OS - a parallel loop, a
-// clock, the CPU count, yield. Header-only, included by every decoder (nitrojpeg,
+// clock, the CPU count (and of the fast ones, on a CPU with performance and efficiency cores), yield. Header-only, included by every decoder (nitrojpeg,
 // nitropng, nitropsd, nitroheic / nitrohevc, nitrodng, nitrowebp, nitrotiff,
 // nitroavif) and the GNOME viewer's converter.
 //
@@ -15,6 +15,9 @@
 #pragma once
 #include <stddef.h>
 #include <stdint.h>
+#ifdef __APPLE__
+#include <sys/sysctl.h>   // nitro_ncpu_fast
+#endif
 
 #ifndef __BLOCKS__
 #error "nitrojpeg / nitropng / nitropsd use blocks: compile with clang -fblocks"
@@ -44,6 +47,8 @@ static inline double nitro_now_ms(void) {
 // ---------------------------------------------------------------------------
 #include <pthread.h>
 #include <sched.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <time.h>
 #include <unistd.h>
 #ifdef _WIN32
@@ -164,6 +169,67 @@ static inline int nitro_ncpu(void) {
     long n = sysconf(_SC_NPROCESSORS_ONLN);
 #endif
     return n > 0 ? (int)n : 8;
+}
+
+// The CPUs of the fastest kind on a CPU with performance and efficiency cores (Apple M1 and later,
+// Intel 12th generation and later, ARM big.LITTLE), 0 when they are all alike. A loop whose
+// workers wait for each other runs at the pace of its slowest core: such a loop uses only these
+// (nitropng's filter reversal on the M1 under Linux: 4 threads 16% faster than 6).
+static inline int nitro_ncpu_fast(void) {
+    static int known = -1;
+    int n = __atomic_load_n(&known, __ATOMIC_RELAXED);
+    if (n >= 0) return n;
+    n = 0;
+#if defined(__APPLE__)
+    int levels = 0, fast = 0;   // perflevel0: the fastest
+    size_t len = sizeof levels;
+    if (!sysctlbyname("hw.nperflevels", &levels, &len, NULL, 0) && levels > 1) {
+        len = sizeof fast;
+        if (!sysctlbyname("hw.perflevel0.logicalcpu", &fast, &len, NULL, 0) && fast > 0) n = fast;
+    }
+#else
+    int best = -1, nbest = 0, all = 0;
+#if defined(_WIN32)   // the CPU sets' efficiency class: higher is faster (Windows 10: looked up,
+    // the headers declare it only for _WIN32_WINNT >= 0x0A00)
+    typedef BOOL(WINAPI * cpu_sets_fn)(PSYSTEM_CPU_SET_INFORMATION, ULONG, PULONG, HANDLE, ULONG);
+    cpu_sets_fn cpu_sets = (cpu_sets_fn)(void (*)(void))GetProcAddress(GetModuleHandleA("kernel32.dll"), "GetSystemCpuSetInformation");
+    ULONG len = 0;
+    if (cpu_sets) cpu_sets(NULL, 0, &len, GetCurrentProcess(), 0);
+    char *buf = len ? malloc(len) : NULL;
+    if (buf && cpu_sets((PSYSTEM_CPU_SET_INFORMATION)buf, len, &len, GetCurrentProcess(), 0)) {
+        for (ULONG off = 0; off + sizeof(DWORD) * 2 <= len;) {
+            const SYSTEM_CPU_SET_INFORMATION *s = (const SYSTEM_CPU_SET_INFORMATION *)(buf + off);
+            if (!s->Size) break;
+            if (s->Type == CpuSetInformation) {
+                int c = s->CpuSet.EfficiencyClass;
+                all++;
+                if (c > best) best = c, nbest = 0;
+                if (c == best) nbest++;
+            }
+            off += s->Size;
+        }
+    }
+    free(buf);
+#else   // Linux: the scheduler's relative capacity of each CPU (absent where they are all alike)
+    long conf = sysconf(_SC_NPROCESSORS_CONF);
+    for (long cpu = 0; cpu < conf && cpu < 4096; cpu++) {
+        char path[64];
+        snprintf(path, sizeof path, "/sys/devices/system/cpu/cpu%ld/cpu_capacity", cpu);
+        FILE *f = fopen(path, "r");
+        int c;
+        if (!f) continue;
+        if (fscanf(f, "%d", &c) == 1) {
+            all++;
+            if (c > best) best = c, nbest = 0;
+            if (c == best) nbest++;
+        }
+        fclose(f);
+    }
+#endif
+    if (nbest < all) n = nbest;
+#endif
+    __atomic_store_n(&known, n, __ATOMIC_RELAXED);
+    return n;
 }
 
 static inline void nitro_yield(void) { sched_yield(); }

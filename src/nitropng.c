@@ -550,8 +550,10 @@ static int unfilter_parallel(uint8_t *out, const np_info *fi, int nthreads) {
     uint32_t *progress = calloc((size_t)H, sizeof *progress);
     if (!progress) return -1;
     volatile long next = 0, *const pnext = &next;
-    // not all hyper-threads: waiting ones would slow down their working siblings (measured: 12 of 16 best)
-    int W = nthreads > 0 ? nthreads : (nitro_ncpu() * 3 + 3) / 4;
+    // not all hyper-threads: waiting ones would slow down their working siblings (measured: 12 of 16 best);
+    // with efficiency cores only the performance cores: a row on a slow one holds up all after it
+    int fast = nitro_ncpu_fast();
+    int W = nthreads > 0 ? nthreads : fast > 0 ? fast : (nitro_ncpu() * 3 + 3) / 4;
     if (getenv("NP_UW")) W = atoi(getenv("NP_UW"));
     const size_t seg = (SEG / bpp) * bpp;
     nitro_parallel((size_t)W, ^(size_t w) {
