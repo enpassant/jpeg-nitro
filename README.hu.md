@@ -584,7 +584,9 @@ A PNG deflate (LZ77 + Huffman) és soronkénti szűrők, mindkettő eredendően 
    Average/Paeth sorok szakaszonként (1 KB) követik az előző sort, 16-ból 12 szálon (a várakozó
    hyperthread-ek lassítanák a dolgozó testvérszálukat). Teljesítmény- és hatékonysági magokkal
    (Apple M1, Intel 12. generáció) csak a teljesítménymagokon: egy lassabb magon futó sor minden
-   utána következőt feltart (az M1-en Linux alatt 6 helyett 4 szál, +16%).
+   utána következőt feltart (az M1-en Linux alatt 6 helyett 4 szál, kb. +20%). Linux alatt a
+   dekóderek minden olyan párhuzamos ciklusa, amelynek legfeljebb annyi eleme van, ahány
+   teljesítménymag, azokon fut (`src/nitro_os.h`; a WebP három feladata is: +15% az M1-en).
 3. A visszaszűrt sorokat a GPU közvetlenül olvassa (a szűrőbájtot átugorva), előszorozza az
    alfát és RGBA-ra alakít — a CPU-n nincs színkonverzió.
 

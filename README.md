@@ -617,7 +617,9 @@ PNG = deflate (LZ77 + Huffman) + per-row filters, both sequential by design:
    Paeth rows follow the previous row segment by segment (1 KB), on 12 of the 16 threads
    (waiting hyper-threads would slow down their working siblings). With performance and efficiency
    cores (Apple M1, Intel 12th generation) only on the performance cores: a row on a slower core
-   holds up every row after it (the M1 under Linux: 4 threads instead of 6, +16%).
+   holds up every row after it (the M1 under Linux: 4 threads instead of 6, about +20%). Under
+   Linux every parallel loop of the decoders with no more items than performance cores runs on
+   those (`src/nitro_os.h`; also WebP's three jobs: +15% on the M1).
 3. The unfiltered rows go straight to the GPU, which reads them in place (skipping the filter
    byte), premultiplies alpha and converts to RGBA — no CPU colour conversion.
 

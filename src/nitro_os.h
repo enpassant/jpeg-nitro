@@ -51,6 +51,9 @@ static inline double nitro_now_ms(void) {
 #include <stdlib.h>
 #include <time.h>
 #include <unistd.h>
+#ifdef __linux__
+#include <sys/syscall.h>   // nitro_pin_fast
+#endif
 #ifdef _WIN32
 #include <windows.h>
 #endif
@@ -73,11 +76,12 @@ NITRO_ONE_DEF void *_NSConcreteGlobalBlock[32] = {0};
 
 // One pool per decoder file (static): workers sleep on a condition variable
 // between loops. Calls from several threads at once take turns; a call from
-// inside a loop body runs sequentially.
+// inside a loop body runs sequentially. A loop of no more items than performance
+// cores (see nitro_ncpu_fast) runs on those: an efficiency core could only slow it down.
 static struct {
     pthread_mutex_t mu, submit;
     pthread_cond_t go, done;
-    int nthreads, active;
+    int nthreads, active, fast;
     unsigned gen;
     nitro_body body;
     size_t n;
@@ -87,13 +91,18 @@ static struct {
 static __thread int nitro_in_loop;
 
 static inline int nitro_ncpu(void);
+static inline int nitro_ncpu_fast(void);
+static inline int nitro_pin_fast(int on);
 
 static inline void nitro_run_items(void) {
+    int pinned = 0;
     for (;;) {
         long i = __atomic_fetch_add(&nitro_pool.next, 1, __ATOMIC_RELAXED);
         if (i >= (long)nitro_pool.n) break;
+        if (nitro_pool.fast && !pinned) pinned = nitro_pin_fast(1);   // (only threads that got an item)
         nitro_pool.body((size_t)i);
     }
+    if (pinned) nitro_pin_fast(0);
 }
 
 static void *nitro_worker(void *arg) {
@@ -134,9 +143,11 @@ static inline void nitro_parallel(size_t n, nitro_body body) {
         for (size_t i = 0; i < n; i++) body(i);
         return;
     }
+    int fast = nitro_ncpu_fast();
     pthread_mutex_lock(&nitro_pool.mu);
     nitro_pool.body = body;
     nitro_pool.n = n;
+    nitro_pool.fast = n <= (size_t)fast;
     nitro_pool.next = 0;
     nitro_pool.active = nitro_pool.nthreads;
     nitro_pool.gen++;
@@ -175,9 +186,13 @@ static inline int nitro_ncpu(void) {
 // Intel 12th generation and later, ARM big.LITTLE), 0 when they are all alike. A loop whose
 // workers wait for each other runs at the pace of its slowest core: such a loop uses only these
 // (nitropng's filter reversal on the M1 under Linux: 4 threads 16% faster than 6).
+static struct {
+    int n;                    // nitro_ncpu_fast(), -1 until known
+    unsigned long mask[16];   // Linux: which CPUs those are (CPU 0..1023)
+} nitro_fast_cpus = {-1, {0}};
+
 static inline int nitro_ncpu_fast(void) {
-    static int known = -1;
-    int n = __atomic_load_n(&known, __ATOMIC_RELAXED);
+    int n = __atomic_load_n(&nitro_fast_cpus.n, __ATOMIC_ACQUIRE);
     if (n >= 0) return n;
     n = 0;
 #if defined(__APPLE__)
@@ -212,24 +227,43 @@ static inline int nitro_ncpu_fast(void) {
     free(buf);
 #else   // Linux: the scheduler's relative capacity of each CPU (absent where they are all alike)
     long conf = sysconf(_SC_NPROCESSORS_CONF);
-    for (long cpu = 0; cpu < conf && cpu < 4096; cpu++) {
+    int cap[1024];
+    for (long cpu = 0; cpu < conf && cpu < 1024; cpu++) {
         char path[64];
         snprintf(path, sizeof path, "/sys/devices/system/cpu/cpu%ld/cpu_capacity", cpu);
         FILE *f = fopen(path, "r");
-        int c;
+        cap[cpu] = -1;
         if (!f) continue;
-        if (fscanf(f, "%d", &c) == 1) {
+        if (fscanf(f, "%d", &cap[cpu]) == 1) {
             all++;
-            if (c > best) best = c, nbest = 0;
-            if (c == best) nbest++;
+            if (cap[cpu] > best) best = cap[cpu], nbest = 0;
+            if (cap[cpu] == best) nbest++;
         }
         fclose(f);
     }
+    for (long cpu = 0; nbest < all && cpu < conf && cpu < 1024; cpu++)
+        if (cap[cpu] == best) nitro_fast_cpus.mask[cpu / 64] |= 1ul << (cpu % 64);
 #endif
     if (nbest < all) n = nbest;
 #endif
-    __atomic_store_n(&known, n, __ATOMIC_RELAXED);
+    __atomic_store_n(&nitro_fast_cpus.n, n, __ATOMIC_RELEASE);
     return n;
+}
+
+// on: the calling thread to the performance cores (those of them it may run on); 0 when it was not
+// moved. off: back to the CPUs it had. Only Linux: macOS's GCD and Windows place threads themselves.
+static inline int nitro_pin_fast(int on) {
+#if defined(__linux__)
+    static __thread unsigned long saved[16];
+    if (!on) return syscall(SYS_sched_setaffinity, 0, sizeof saved, saved) == 0;
+    unsigned long want[16], any = 0;
+    if (nitro_ncpu_fast() <= 0 || syscall(SYS_sched_getaffinity, 0, sizeof saved, saved) <= 0) return 0;
+    for (int k = 0; k < 16; k++) any |= want[k] = saved[k] & nitro_fast_cpus.mask[k];
+    return any && syscall(SYS_sched_setaffinity, 0, sizeof want, want) == 0;
+#else
+    (void)on;
+    return 0;
+#endif
 }
 
 static inline void nitro_yield(void) { sched_yield(); }
