@@ -344,6 +344,7 @@ static int cmp_names(const void *a, const void *b) {
     return natcmp(base_name(*(char *const *)a), base_name(*(char *const *)b));
 }
 
+static const char *const heic_exts[] = {"heic", "heif", NULL};   // (only with an HEVC decoder: make NITROHEVC=1)
 static const char *const g_more_exts[] = {"tga",   // (stb_image reads these too)
 #ifdef NV_SVG
                                           "svg",
@@ -374,6 +375,7 @@ static void list_dir(FileList *out, const char *dir, const char *pattern, int an
     int first = out->n;
     for (int i = 0; i < n; i++) {
         if (!any_ext && !nv_is_image_name(names[i]) && !nv_has_ext(names[i], g_more_exts)) continue;
+        if (!any_ext && !nh_decoder() && nv_has_ext(names[i], heic_exts)) continue;   // (no HEVC decoder in this build)
         char *p = *dir ? join_path(dir, names[i]) : SDL_strdup(names[i]);
         SDL_PathInfo info;
         if (p && SDL_GetPathInfo(p, &info) && info.type == SDL_PATHTYPE_FILE) fl_add(out, p);
@@ -937,7 +939,8 @@ static uint8_t *pool_get(size_t len, size_t *cap, void *ctx) { return buf_get(le
 static void pool_put(uint8_t *p, size_t cap, void *ctx) { buf_put(p, cap); }
 
 // Decodes one file into host memory (nitro_load's decoders, else stb_image). NULL: cannot be decoded.
-static Decoded *decode_file(const char *path) {
+// error (optional): why it could not be decoded, if our decoders said (from strdup)
+static Decoded *decode_file(const char *path, char **error) {
     double t0 = now_ms();
     size_t len = 0, cap = 0;
     int raw_orientation, raw_read;
@@ -951,6 +954,7 @@ static Decoded *decode_file(const char *path) {
     }
     d->read_ms = t1 - t0;
     d->orientation = 1;
+    const char *why = NULL;
 #ifdef NV_VECTOR
     VectorDoc *vec = load_vector(path, data, len);
     if (vec) {
@@ -983,11 +987,16 @@ static Decoded *decode_file(const char *path) {
             d->ev3 = img.ev3;
         } else {
             d->orientation = img.orientation;   // (a JPEG's, a camera raw's: known from the header)
+            why = img.error;
         }
     }
     if (!buf) buf = decode_stb(data, len, d, &cap);   // everything else, and what the own decoders could not handle
     free(data);
-    if (!buf) { free(d); return NULL; }
+    if (!buf) {
+        if (error && why) *error = strdup(why);
+        free(d);
+        return NULL;
+    }
     d->buf = buf;
     d->cap = cap;
     d->decode_ms = now_ms() - t1;
@@ -1017,7 +1026,7 @@ static NvLoader *L;
 
 static int stale_dng(const Decoded *d) { return d && d->mode == MODE_NITRODNG && d->ev3 != SDL_GetAtomicInt(&g_dng_ev3); }
 
-static void *ld_decode(void *path, char **error, void *ctx) { return decode_file(path); }
+static void *ld_decode(void *path, char **error, void *ctx) { return decode_file(path, error); }
 static void ld_free(void *image, void *ctx) { decoded_free(image); }
 static int ld_stale(const void *image, void *ctx) { return stale_dng(image); }
 static void *ld_path_dup(void *path, void *ctx) { return SDL_strdup(path); }
@@ -1070,7 +1079,7 @@ typedef struct {
 
 static int SDLCALL dng_run(void *arg) {
     DngJob *j = arg;
-    j->d = decode_file(j->path);
+    j->d = decode_file(j->path, NULL);
     post(EV_DNG, 0, j);
     return 0;
 }
@@ -1210,9 +1219,13 @@ static void update_title(void) {
     if (d)
         snprintf(t, sizeof t, "%s  %.0f%%%s  (%d/%d)  %dx%d  decode %.1f ms", name, 100 * current_scale(d),
                  V.zoomed ? "" : " (fit)", V.index + 1, V.nfiles, d->width, d->height, d->decode_ms);
-    else
-        snprintf(t, sizeof t, "%s  (%d/%d)  %s", name, V.index + 1, V.nfiles,
-                 loader_failed(V.index) ? "CANNOT DECODE (unsupported or damaged)" : "loading...");
+    else {
+        char *why = NULL;
+        int failed = nv_loader_failed(L, V.index, &why);
+        snprintf(t, sizeof t, "%s  (%d/%d)  %s%s", name, V.index + 1, V.nfiles,
+                 failed ? "CANNOT DECODE: " : "loading...", failed ? (why && *why ? why : "unsupported or damaged") : "");
+        free(why);
+    }
     size_t n = strlen(t);
 #ifdef NV_VECTOR
     if (d && d->vec && d->vec->pages > 1) n += (size_t)snprintf(t + n, sizeof t - n, "  [page %d/%d]", d->page + 1, d->vec->pages);
@@ -2091,7 +2104,7 @@ static int run_bench(FileList *fl) {
     double tr = 0, td = 0, tu = 0, tg = 0, tc = 0, t0 = now_ms();
     g_bench_split = 1;
     for (int i = 0; i < fl->n; i++) {
-        Decoded *d = decode_file(fl->v[i]);
+        Decoded *d = decode_file(fl->v[i], NULL);
         if (!d) { printf("FAILED %s\n", fl->v[i]); continue; }
         double g0 = now_ms();
         texture_for(d);
@@ -2120,7 +2133,7 @@ static int run_selftest(FileList *fl) {
     int bad = 0;
     for (int i = 0; i < fl->n; i++) {
         const char *name = base_name(fl->v[i]);
-        Decoded *d = decode_file(fl->v[i]);
+        Decoded *d = decode_file(fl->v[i], NULL);
         if (!d) { printf("%-30.30s FAILED to decode\n", name); bad++; continue; }
         int kind = d->kind, mode = d->mode;   // (texture_for may make PNG rows BGRA)
         int alpha = kind == KIND_PNG ? d->ncomp == 2 || d->ncomp == 4 : kind == KIND_PLANAR ? d->hasa : 1;   // transparency?
@@ -2223,7 +2236,7 @@ static int do_register(int on) {
             "Icon=" APP_ID "\n"
             "Terminal=false\n"
             "Categories=Graphics;Viewer;\n"
-            "MimeType=image/jpeg;image/png;image/tiff;image/gif;image/bmp;image/webp;image/heic;image/heif;image/avif;image/x-tga;"
+            "MimeType=image/jpeg;image/png;image/tiff;image/gif;image/bmp;image/webp;%simage/avif;image/x-tga;"
             "image/vnd.adobe.photoshop;image/x-adobe-dng;image/x-canon-cr2;image/x-nikon-nef;image/x-sony-arw;image/x-fuji-raf;"
 #ifdef NV_SVG
             "image/svg+xml;"
@@ -2232,7 +2245,7 @@ static int do_register(int on) {
             "image/x-coreldraw;"
 #endif
             "\n"
-            "StartupNotify=true\n", q);
+            "StartupNotify=true\n", q, nh_decoder() ? "image/heic;image/heif;" : "");
         bad = !text || !SDL_CreateDirectory(apps) || !SDL_CreateDirectory(icons) || !SDL_SaveFile(desktop, text, strlen(text)) ||
               !SDL_SaveFile(icon, icon_png, icon_png_len);
         SDL_free(text);

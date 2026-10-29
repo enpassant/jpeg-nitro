@@ -450,9 +450,12 @@ int nv_decode(uint8_t *data, size_t *len, int raw_orientation, int raw_read, con
             img->error = "JPEG decode failed";
         }
     } else if (n >= 12 && !memcmp(data + 4, "ftyp", 4)) {
-        nh_info hi;   // HEIC: its HEVC tiles decoded in parallel (nitroheic: VideoToolbox on macOS, else nitrohevc)
+        nh_info hi;   // HEIC: its HEVC tiles decoded in parallel (nitroheic: VideoToolbox on macOS, else
+                      // nitrohevc if built with it: make NITROHEVC=1)
         if (nh_read_info(data, n, &hi)) {
             img->error = "Unsupported HEIC";
+        } else if (!nh_decoder()) {
+            img->error = "HEIC: no HEVC decoder in this build (make NITROHEVC=1)";   // (the system's then)
         } else if (hi.plane_w[0] > mt || hi.plane_h[0] > mt) {
             img->error = "Unsupported HEIC (too large)";
         } else {

@@ -16,6 +16,7 @@
         np_free_buffers;
         ps_read_info;
         ps_decode;
+        nh_decoder;
         nh_read_info;
         nh_decode_planes;
         ndng_read_info;

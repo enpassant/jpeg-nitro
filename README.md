@@ -112,9 +112,8 @@ icon or its window, or chosen with nitroview → Open… (⌘O); a running viewe
 the same viewer: the same keys, mouse, zoom and window behaviour, full screen, slideshow, one file →
 its folder, drag & drop, O / Shift+O: open files / a folder (the dialog also comes up when started
 without files). JPEG / PNG / PSD go through the three decoders and a compute shader,
-HEIC photos through our own HEVC decoder (`src/nitrohevc.c`, written from the H.265 specification:
-Windows has no HEVC decoder without a Store extension; its tiles in parallel, ~55 ms for 12 MP; no
-deblocking / SAO yet, which is hard to see), DNG raw images through nitrodng, lossy WebP through nitrowebp, TIFF through
+HEIC photos through WIC (Microsoft's HEVC extension; built with `make NITROHEVC=1` through our own
+HEVC decoder, see **HEIC and the HEVC patents** below), DNG raw images through nitrodng, lossy WebP through nitrowebp, TIFF through
 nitrotiff, AVIF through nitroavif + dav1d (Windows needs a Store extension for AV1 too), everything else (JPEG-compressed TIFF, lossless or transparent WebP, GIF, BMP)
 through Windows' own WIC codecs;
 SVG and CorelDRAW CDR / CMX as on macOS (sharp when zoomed in, [ / ] for the pages of a drawing).
@@ -128,8 +127,8 @@ colour management (images are shown as sRGB); touchpad gestures are untested.
 **GNOME / Linux:** `nitroview-gnome` ([src/gnome/](src/gnome), GTK 4 + libadwaita, contributed by
 Ferenc Czirok) has the same keys, mouse and trackpad gestures, zoom and pan, full screen, slideshow
 (`-s`), one file → its folder, drag & drop and an Open dialog, Del / U and E / Shift+E. JPEG, PNG,
-PSD, HEIC (through nitrohevc), lossy WebP, DNG and the JPEG of camera raw files go through our
-decoders (linked in statically), SVG and CorelDRAW CDR / CMX through nitrosvg / nitrocdr (sharp when
+PSD, lossy WebP, DNG and the JPEG of camera raw files go through our decoders (linked in
+statically), HEIC through GTK's loaders (built with `make NITROHEVC=1`: through nitrohevc), SVG and CorelDRAW CDR / CMX through nitrosvg / nitrocdr (sharp when
 zoomed in, [ / ] for the pages, when `scripts/get-deps.sh` has fetched them); the JPEG colour conversion is multi-threaded and gives exactly
 libjpeg-turbo's RGB (`bench/rgbverify`), PNG rows go to GTK without a copy, and the EXIF
 orientation is applied when drawing. Images are decoded on a background thread with the same
@@ -149,7 +148,8 @@ is the Windows viewer's structure on SDL3 + OpenGL 3.3 instead of Win32 + Direct
 mouse (+ O: open files, Shift+O: a folder), window behaviour, prefetch, Del / U, E / Shift+E, SVG / CorelDRAW with sharp
 zoom, `--bench` and `--selftest`, and the same GPU path (planes as textures, YCbCr→RGB in a shader,
 mipmaps, trilinear drawing; pixel-exact 200–800%). Whatever our decoders don't take (interlaced
-PNG, GIF, BMP, damaged or CMYK JPEG) goes to stb_image. SDL3 is linked in statically;
+PNG, GIF, BMP, damaged or CMYK JPEG) goes to stb_image; HEIC only when built with
+`make NITROHEVC=1` (below). SDL3 is linked in statically;
 OpenGL and Wayland / X11 are loaded at run time, so it needs no GTK. `scripts/get-deps.sh` builds
 SDL3 (the window systems' development packages it needs are listed there). It builds on macOS too,
 only for testing (there OpenGL is slow; the Metal viewer stays the real one). `make sdl-dist` makes
@@ -157,10 +157,23 @@ the one file to give away, `nitroview-linux-x64.tar.gz` (4 MB): built for x86-64
 of the build machine's CPU, libstdc++, zlib and dav1d linked in, it needs only glibc (2.35+ when built
 on Ubuntu 22.04). On 64-bit ARM Linux (Asahi Linux on Apple M1 / M2, Raspberry Pi 4 / 5) the same
 makes `nitroview-linux-arm64.tar.gz`, built for armv8-a (the NEON code paths are the ones the Mac's arm64
-build uses; HEIC is decoded by nitrohevc, as on x86 Linux); tried on an M1 MacBook Air under Fedora Asahi Remix 44
+build uses; HEIC only with `make NITROHEVC=1`, as on x86 Linux); tried on an M1 MacBook Air under Fedora Asahi Remix 44
 (KDE Plasma on Wayland, Mesa's OpenGL 4.6 driver for the M1 GPU): 100% stays pixel-exact at 200% and 300% display scaling too. `nitroview-sdl --register` adds it to the desktop's applications for the current user
 (a desktop file and the icon in `~/.local/share`: "Open with" in the file manager), `--unregister`
 removes it.
+
+**HEIC and the HEVC patents:** HEIC photos are HEVC (H.265) pictures, and HEVC is covered by patents that need a licence: the
+systems' decoders come with one, our own does not. So the binaries we distribute decode HEIC with
+the system's decoder: VideoToolbox on macOS (nitroheic, the tiles in parallel), WIC on Windows
+(Microsoft's HEVC extension: a freshly installed Windows 11 opened them, Windows 10 LTSC did not),
+GTK's loaders in the GNOME viewer (the GNOME runtime's glycin + libheif, with the HEVC decoder of the
+Freedesktop codecs-extra extension); the SDL viewer then shows no HEIC files at all.
+nitrohevc (`src/nitrohevc.c`), our own HEVC intra decoder written from the H.265 specification, is
+only in a build made with `make NITROHEVC=1`, for your own use (the patents are then your concern).
+The Windows, GNOME and SDL viewers decode HEIC with it, the tiles in parallel (a 12 MP iPhone photo:
+~37 ms on the Intel i9, ~67 ms on the M1; VideoToolbox: ~36 ms and ~31 ms); on macOS VideoToolbox
+stays, `NITROHEVC=1` in the environment switches to nitrohevc. It leaves out the deblocking and SAO
+filters, which cannot be seen on photos.
 
 **AVIF** (nitroavif, `src/nitroavif.c`): AV1 stills in a HEIF container, as webshops and
 CDNs send them more and more. The HEIF structure is read by our own code (`src/heif.h`, shared with
@@ -835,7 +848,8 @@ symlink). The measurements above were made on 50 private photos that are not in 
 - `src/nitropng.c/.h`: self-contained parallel PNG decoder
 - `src/nitropsd.c/.h`: parallel PSD/PSB merged-image decoder
 - `src/nitroheic.c/.h`: HEIC (HEIF) reading, the tiles decoded in parallel (VideoToolbox on macOS,
-  else nitrohevc); `src/nitrohevc.c/.h`: our HEVC intra decoder
+  else nitrohevc); `src/nitrohevc.c/.h`: our HEVC intra decoder (only with `make NITROHEVC=1`, see
+  **HEIC and the HEVC patents** above)
 - `src/nitrodng.c/.h`: DNG raw development (lossless JPEG, demosaicing, colour)
 - `src/nitrowebp.c/.h`: lossy WebP (VP8) decoder
 - `src/nitroavif.c/.h`: AVIF (AV1 through dav1d, our colour conversion); `src/heif.h`: the HEIF
