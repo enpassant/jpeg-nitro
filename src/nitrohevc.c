@@ -594,7 +594,7 @@ static void cabac_init_contexts(Cabac *c, int qp) {   // 9.3.2.2
     }
 }
 
-static inline int cabac_decision(Cabac *c, int ctx) {   // 9.3.4.3.2
+static inline __attribute__((always_inline)) int cabac_decision(Cabac *c, int ctx) {   // 9.3.4.3.2
     unsigned s = c->state[ctx];
     uint32_t lps = range_lps[s >> 1][(c->range >> 6) & 3];
     uint32_t r = c->range - lps;
@@ -612,7 +612,7 @@ static inline int cabac_decision(Cabac *c, int ctx) {   // 9.3.4.3.2
     return (int)(s & 1) ^ is_lps;
 }
 
-static inline int cabac_bypass(Cabac *c) {   // 9.3.4.3.4: ivlOffset = ivlOffset << 1 | the next bit
+static inline __attribute__((always_inline)) int cabac_bypass(Cabac *c) {   // 9.3.4.3.4: ivlOffset = ivlOffset << 1 | the next bit
     c->bits--;
     uint64_t scaled = (uint64_t)c->range << c->bits;
     int bin = c->value >= scaled;
@@ -621,9 +621,20 @@ static inline int cabac_bypass(Cabac *c) {   // 9.3.4.3.4: ivlOffset = ivlOffset
     return bin;
 }
 
-static uint32_t cabac_bypass_bits(Cabac *c, int n) {
+// n bypass bins at once (MSB first): ivlOffset << k | the next k bits, divided by the range, gives
+// k bins and the remainder the new ivlOffset; k <= 16 (refills keep at least 16 bits)
+static inline uint32_t cabac_bypass_bits(Cabac *c, int n) {
     uint32_t v = 0;
-    for (int i = 0; i < n; i++) v = v << 1 | (uint32_t)cabac_bypass(c);
+    while (n > 0) {
+        int k = n < 16 ? n : 16;
+        c->bits -= k;
+        uint64_t t = c->value >> c->bits;
+        uint32_t q = (uint32_t)(t / c->range);
+        c->value -= (uint64_t)q * c->range << c->bits;
+        if (c->bits < 16) cabac_refill(c);
+        v = v << k | q;
+        n -= k;
+    }
     return v;
 }
 
