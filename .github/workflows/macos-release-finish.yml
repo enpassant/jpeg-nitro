@@ -1,0 +1,94 @@
+# Finishes a "macOS release" run whose notarization took longer than that run waited: takes
+# its signed dmg (the nitroview-dmg artifact), asks Apple for the submission's result and, once
+# accepted, staples the ticket, attests the provenance and publishes the GitHub Release.
+# Can be started again until Apple is done; each try takes about a minute.
+# Uses the macos-release environment (the notary key; a required reviewer approves each run).
+name: "macOS release: finish"
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: ID of the "macOS release" run (the number in its URL)
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: macos-26
+    timeout-minutes: 15
+    environment: macos-release
+    permissions:
+      contents: write       # the release
+      actions: read         # the artifact of the other run
+      id-token: write       # the build provenance attestation
+      attestations: write
+    steps:
+      - name: Get the signed dmg
+        uses: actions/download-artifact@v4
+        with:
+          name: nitroview-dmg
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Read the build
+        run: |
+          cat build.json
+          for k in dmg version repository sha submission run; do
+            echo "$(echo "$k" | tr a-z A-Z)=$(python3 -c "import json; print(json.load(open('build.json'))['$k'])")" >> "$GITHUB_ENV"
+          done
+
+      - name: Staple Apple's ticket
+        env:
+          KEY_P8: ${{ secrets.NOTARY_KEY_P8 }}
+          KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
+        run: |
+          printf '%s\n' "$KEY_P8" > "$RUNNER_TEMP/notary.p8"
+          AUTH=(--key "$RUNNER_TEMP/notary.p8" --key-id "$KEY_ID" --issuer "$ISSUER_ID")
+          STATUS=$(xcrun notarytool info "$SUBMISSION" "${AUTH[@]}" --output-format json |
+                   python3 -c "import json,sys; print(json.load(sys.stdin)['status'])")
+          echo "submission $SUBMISSION: $STATUS"
+          case "$STATUS" in
+            Accepted) ;;
+            "In Progress")
+              echo "::error::Apple is still processing submission $SUBMISSION: try again later"
+              exit 1 ;;
+            *)
+              xcrun notarytool log "$SUBMISSION" "${AUTH[@]}" || true
+              echo "::error::Apple did not accept the dmg: $STATUS"
+              exit 1 ;;
+          esac
+          xcrun stapler staple "$DMG"
+          xcrun stapler validate "$DMG"
+          spctl --assess --type open --context context:primary-signature --verbose=2 "$DMG"
+          shasum -a 256 "$DMG" | tee "$DMG.sha256"
+
+      - name: Attest the build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: ${{ env.DMG }}
+
+      # The release goes to the repository running this workflow, with its own token.
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cat > notes.md <<NOTES
+          Notarized macOS build of NitroView (universal: Intel + Apple Silicon, macOS 12+).
+
+          Built unmodified from [$REPOSITORY@${SHA:0:12}](https://github.com/$REPOSITORY/tree/$SHA) by [this workflow run]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$RUN), notarized and published by [this one]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID).
+
+          SHA-256: \`$(cut -d' ' -f1 "$DMG.sha256")\`
+
+          Check the provenance: \`gh attestation verify $DMG --repo $GITHUB_REPOSITORY\`
+          NOTES
+          gh release create "nitroview-$VERSION" "$DMG" "$DMG.sha256" \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "NitroView $VERSION for macOS" --notes-file notes.md
+
+      - name: Remove the notary key
+        if: always()
+        run: rm -f "$RUNNER_TEMP/notary.p8"

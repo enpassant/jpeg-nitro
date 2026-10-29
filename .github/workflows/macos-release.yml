@@ -1,0 +1,259 @@
+# Notarized macOS release: builds nitroview.app from gereoffy/jpeg-nitro at a chosen tag or
+# commit (the source is checked out as is, nothing from this repository goes into the app),
+# signs it with a Developer ID, submits it to Apple for notarization and, once Apple accepts it,
+# staples the ticket and publishes the dmg as a GitHub Release.
+#
+# Two jobs, so that the source's own code never runs where the signing secrets are:
+#   build  checks out the source and runs its scripts and Makefile (make app), with no secrets
+#          and a read-only token; the app goes to the next job as an artifact
+#   sign   in the "macos-release" environment (its secrets, and a required reviewer who
+#          approves each run): runs no code from the source, only codesign, hdiutil, notarytool,
+#          stapler and the release steps on the app the build job made
+#
+# The sign job waits up to 20 minutes for Apple. If notarization takes longer (a team's first
+# submissions can take hours), it ends with the signed dmg and the submission ID kept as a
+# workflow artifact: "macOS release: finish" (macos-release-finish.yml) publishes it later.
+#
+# Runs only when started by hand (Actions > macOS release > Run workflow). Environment secrets:
+#   MACOS_CERT_P12       Developer ID Application certificate + key (.p12), base64
+#   MACOS_CERT_PASSWORD  the .p12's password
+#   MACOS_SIGN_ID        "Developer ID Application: Name (TEAMID)"
+#   NOTARY_KEY_P8        App Store Connect API key (.p8 file contents, Developer access)
+#   NOTARY_KEY_ID        its Key ID
+#   NOTARY_ISSUER_ID     its Issuer ID
+# With "notarize" unticked only the build job runs and keeps an ad-hoc signed dmg as a workflow
+# artifact: a test of the build on the runner.
+name: macOS release
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Tag, branch or commit of the source to build (e.g. v2.6)
+        required: true
+      repository:
+        description: Source repository
+        default: gereoffy/jpeg-nitro
+      notarize:
+        description: Sign with the Developer ID, notarize and publish a release
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 60
+    outputs:
+      sha: ${{ steps.src.outputs.sha }}
+      version: ${{ steps.src.outputs.version }}
+    steps:
+      - name: Check out the source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.repository }}
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Name the build
+        id: src
+        run: |
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "version=$(git describe --tags --always)" >> "$GITHUB_OUTPUT"
+          echo "deps-key=$(cat scripts/get-deps.sh patches/* | shasum -a 256 | cut -c1-16)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache the dependencies
+        uses: actions/cache@v4
+        with:
+          path: third_party
+          key: deps-macos-${{ steps.src.outputs.deps-key }}
+
+      - name: Fetch and build the dependencies
+        run: SDL=0 scripts/get-deps.sh
+
+      - name: Build the app (ad-hoc signed)
+        run: |
+          make app
+          codesign --verify --deep --strict --verbose=2 nitroview.app
+          lipo -archs nitroview.app/Contents/MacOS/nitroview
+          # a tarball keeps the bundle's permissions and links (an artifact zip would not)
+          tar -czf nitroview-app.tar.gz nitroview.app
+
+      - name: Keep the app for signing
+        if: inputs.notarize
+        uses: actions/upload-artifact@v4
+        with:
+          name: nitroview-app
+          path: nitroview-app.tar.gz
+
+      - name: Build the dmg (ad-hoc signed)
+        if: ${{ !inputs.notarize }}
+        run: |
+          make dmg
+          mv nitroview.dmg "nitroview-${{ steps.src.outputs.version }}-adhoc.dmg"
+
+      - name: Keep the dmg
+        if: ${{ !inputs.notarize }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: nitroview-dmg-adhoc
+          path: nitroview-*-adhoc.dmg
+
+  sign:
+    needs: build
+    if: inputs.notarize
+    runs-on: macos-26
+    timeout-minutes: 45
+    environment: macos-release
+    permissions:
+      contents: write       # the release
+      id-token: write       # the build provenance attestation
+      attestations: write
+    env:
+      SRC_REPO: ${{ inputs.repository }}
+      SRC_SHA: ${{ needs.build.outputs.sha }}
+      VERSION: ${{ needs.build.outputs.version }}
+    steps:
+      - name: Get the app
+        uses: actions/download-artifact@v4
+        with:
+          name: nitroview-app
+
+      - name: Unpack the app
+        run: |
+          # only nitroview.app/..., no absolute paths or ".." (the build job is not trusted)
+          tar -tzf nitroview-app.tar.gz > files.txt
+          BAD=$(grep -Ev '^nitroview\.app(/|$)' files.txt; grep -E '(^|/)\.\.(/|$)' files.txt) || true
+          if [ -n "$BAD" ]; then
+            echo "::error::unexpected paths in nitroview-app.tar.gz: $BAD"; exit 1
+          fi
+          rm files.txt
+          tar -xzf nitroview-app.tar.gz
+          rm nitroview-app.tar.gz
+
+      - name: Import the signing certificate
+        env:
+          CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+        run: |
+          KC="$RUNNER_TEMP/signing.keychain-db"
+          KC_PASS=$(openssl rand -base64 24)
+          security create-keychain -p "$KC_PASS" "$KC"
+          security set-keychain-settings -lut 21600 "$KC"
+          security unlock-keychain -p "$KC_PASS" "$KC"
+          echo "$CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KC" -P "$CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -k "$KC_PASS" "$KC" >/dev/null
+          security list-keychains -d user -s "$KC" $(security list-keychains -d user | tr -d '"')
+          rm -f "$RUNNER_TEMP/cert.p12"
+
+      # the same signing and dmg as the source's Makefile (make dmg SIGN_ID=...): hardened
+      # runtime + secure timestamp, the app + a link to /Applications, compressed
+      - name: Sign the app and make the dmg
+        env:
+          SIGN_ID: ${{ secrets.MACOS_SIGN_ID }}
+        run: |
+          codesign --force --options runtime --timestamp --sign "$SIGN_ID" nitroview.app
+          codesign --verify --deep --strict --verbose=2 nitroview.app
+          mkdir dmg
+          ditto nitroview.app dmg/nitroview.app
+          ln -s /Applications dmg/Applications
+          hdiutil create -volname NitroView -srcfolder dmg -ov -format UDZO -quiet nitroview.dmg
+          codesign --force --timestamp --sign "$SIGN_ID" nitroview.dmg
+
+      # notarytool with the API key directly (not a keychain profile): submit, then ask for the
+      # status every 30 s for up to 20 minutes. Accepted: the ticket is stapled to the dmg.
+      - name: Notarize the dmg
+        id: notary
+        env:
+          KEY_P8: ${{ secrets.NOTARY_KEY_P8 }}
+          KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
+        run: |
+          printf '%s\n' "$KEY_P8" > "$RUNNER_TEMP/notary.p8"
+          AUTH=(--key "$RUNNER_TEMP/notary.p8" --key-id "$KEY_ID" --issuer "$ISSUER_ID")
+          json() { python3 -c "import json,sys; print(json.load(sys.stdin)['$1'])"; }
+          ID=$(xcrun notarytool submit nitroview.dmg "${AUTH[@]}" --output-format json | json id)
+          echo "submitted to Apple: $ID"
+          echo "id=$ID" >> "$GITHUB_OUTPUT"
+          for i in $(seq 40); do
+            STATUS=$(xcrun notarytool info "$ID" "${AUTH[@]}" --output-format json | json status)
+            echo "$(date -u +%H:%M:%S) $STATUS"
+            [ "$STATUS" != "In Progress" ] && break
+            sleep 30
+          done
+          case "$STATUS" in
+            Accepted)
+              xcrun stapler staple nitroview.dmg
+              echo "notarized=true" >> "$GITHUB_OUTPUT" ;;
+            "In Progress")
+              echo "notarized=false" >> "$GITHUB_OUTPUT"
+              echo "::notice::Apple is still processing submission $ID. Run \"macOS release: finish\" with run ID $GITHUB_RUN_ID to publish it once it is accepted." ;;
+            *)
+              xcrun notarytool log "$ID" "${AUTH[@]}" || true
+              echo "::error::Apple did not accept the dmg: $STATUS"
+              exit 1 ;;
+          esac
+
+      - name: Check the result
+        run: |
+          if ${{ steps.notary.outputs.notarized == 'true' }}; then
+            xcrun stapler validate nitroview.dmg
+            spctl --assess --type open --context context:primary-signature --verbose=2 nitroview.dmg
+          fi
+          DMG="nitroview-$VERSION.dmg"
+          mv nitroview.dmg "$DMG"
+          shasum -a 256 "$DMG" | tee "$DMG.sha256"
+          echo "DMG=$DMG" >> "$GITHUB_ENV"
+
+      # what "macOS release: finish" needs to publish this build later
+      - name: Record the build
+        env:
+          SUBMISSION: ${{ steps.notary.outputs.id }}
+        run: |
+          python3 -c 'import json,os; e=os.environ; json.dump({"dmg": e["DMG"], "version": e["VERSION"], "repository": e["SRC_REPO"], "sha": e["SRC_SHA"], "submission": e["SUBMISSION"], "run": e["GITHUB_RUN_ID"]}, open("build.json", "w"), indent=2)'
+          cat build.json
+
+      - name: Attest the build provenance
+        if: steps.notary.outputs.notarized == 'true'
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: ${{ env.DMG }}
+
+      - name: Keep the dmg
+        uses: actions/upload-artifact@v4
+        with:
+          name: nitroview-dmg
+          path: |
+            ${{ env.DMG }}
+            ${{ env.DMG }}.sha256
+            build.json
+
+      # The release goes to the repository running this workflow (GITHUB_REPOSITORY, e.g. a
+      # fork), with its own token: no access to the source repository is needed, only reading it.
+      - name: Publish the release
+        if: steps.notary.outputs.notarized == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cat > notes.md <<NOTES
+          Notarized macOS build of NitroView (universal: Intel + Apple Silicon, macOS 12+).
+
+          Built unmodified from [$SRC_REPO@${SRC_SHA:0:12}](https://github.com/$SRC_REPO/tree/$SRC_SHA) by [this workflow run]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID).
+
+          SHA-256: \`$(cut -d' ' -f1 "$DMG.sha256")\`
+
+          Check the provenance: \`gh attestation verify $DMG --repo $GITHUB_REPOSITORY\`
+          NOTES
+          gh release create "nitroview-$VERSION" "$DMG" "$DMG.sha256" \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "NitroView $VERSION for macOS" --notes-file notes.md
+
+      - name: Remove the signing keychain
+        if: always()
+        run: |
+          security delete-keychain "$RUNNER_TEMP/signing.keychain-db" || true
+          rm -f "$RUNNER_TEMP/notary.p8"
