@@ -654,8 +654,8 @@ RGB-t csinál, párhuzamosan, annak, akinek nincs rá GPU-shadere. Az `examples/
 az orientációt alkalmazva.
 
 A dekóderek nem függnek a macOS-től: amit a rendszerből használnak, az a `src/nitro_os.h`-ban
-van — párhuzamos ciklus (macOS-en Grand Central Dispatch, máshol egy kis pthreads-es
-szálkészlet), óra és a processzormagok száma. A ciklusmagok clang-blokkok (`^(size_t i) {…}`),
+van — párhuzamos ciklus (egy kis pthreads-es szálkészlet, minden rendszeren ugyanaz), óra és a
+processzormagok száma. A ciklusmagok clang-blokkok (`^(size_t i) {…}`),
 ezért **clang kell `-fblocks`-szal** (a GCC nem ismeri a blokkokat); blokk-futásidejű könyvtár
 nem kell hozzá. Linuxon a `make` (= `make linux`) a `build/lib/libnitro.so`,
 `build/lib/libnitro.a` könyvtárakat és a hordozható eszközöket fordítja le: `bench/nbench`,
@@ -680,9 +680,13 @@ A `make gnome` a `build/lib/libnitro.a` dekódereit belefordítva készíti el a
 fájl nyitható parancssorból, az asztali környezetből vagy a natív Megnyitás párbeszédablakkal.
 A `make gnome-register` az aktuális felhasználónak telepíti a desktop fájlt és az ikont.
 
-macOS-en a szálkészlet a `-DNITRO_PTHREAD_POOL` kapcsolóval kipróbálható: ott ugyanolyan gyors,
-mint a GCD, és minden ellenőrzésen átmegy (`verify`, `pngverify`, `psdverify`, az ASan-os
-robusztussági tesztek, ThreadSanitizer négy egyszerre dekódoló szállal). Linuxon kipróbálva (lásd:
+macOS-en a dekóderek 2026 októberéig a Grand Central Dispatch-et használták; a pthreads-es
+szálkészlet azért váltotta fel, hogy minden rendszeren ugyanaz a kód fusson. Ugyanolyan gyors: a
+néző `--bench`-e 10 formátumon az M1-en a PNG-nél 7%-kal gyorsabb, a HEIC-nél (VideoToolbox-szal)
+5%-kal lassabb, a többinél 2%-on belül; az Intel i9-en nincs különbség. Minden ellenőrzésen
+átmegy (`verify`, `pngverify`, `psdverify`, az ASan-os robusztussági tesztek; ThreadSanitizer négy,
+egyszerre minden formátumot dekódoló szállal: tiszta, kivéve a VideoToolbox saját kimeneti
+puffereinek olvasását, amelyek írását nem látja; ugyanígy a GCD-vel). Linuxon kipróbálva (lásd:
 „Három gép, macOS és Linux”).
 
 **Windows:** a `make windows WINCC=…/llvm-mingw/bin/x86_64-w64-mingw32-clang` az
@@ -719,7 +723,7 @@ make tools           # bench/bench, bench/verify, bench/robust (referenciának k
 **A nézőnek nem kell a libjpeg-turbo.** A dekóder (`src/nitrojpeg.c`) önállóan dekódolja a
 baseline és progresszív JPEG-eket (8 bit, Huffman, 1 vagy 3 komponens, YCbCr/szürke, bármilyen
 mintavételezés, restart markerrel vagy anélkül; ~4100 letöltött JPEG-ből mindet). Ehhez csak C,
-pthreads, GCD és AVX2 / NEON kell; a libjpeg-turbo a tesztek mércéje.
+pthreads és AVX2 / NEON kell; a libjpeg-turbo a tesztek mércéje.
 
 - **`TURBOJPEG=0`** (alapértelmezés): a maradékot (sérült és félbevágott fájlok, CMYK, RGB,
   aritmetikai kódolás, >16384 px) az Apple ImageIO dekódolja (ha az sem tudja, a címsorban

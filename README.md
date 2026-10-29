@@ -733,8 +733,8 @@ RGB of the planes, in parallel, for whoever has no GPU shader for them.
 image the library decodes to a 24-bit BMP, with its orientation applied.
 
 **Other systems (Linux, MinGW).** The decoders don't depend on macOS: all they need from the OS
-is in `src/nitro_os.h` — a parallel loop (Grand Central Dispatch on macOS, a small pthread
-pool elsewhere), a clock and the CPU count. The loop bodies are clang blocks (`^(size_t i) {…}`),
+is in `src/nitro_os.h` — a parallel loop (a small pthread pool, the same on every system),
+a clock and the CPU count. The loop bodies are clang blocks (`^(size_t i) {…}`),
 so they need **clang with `-fblocks`** (GCC doesn't support blocks); no blocks runtime library is
 needed. On Linux, `make` (= `make linux`) builds `build/lib/libnitro.so`,
 `build/lib/libnitro.a` and the portable tools: `bench/nbench`, `bench/pngverify`,
@@ -759,9 +759,12 @@ It opens JPEG, PNG, PSD/PSB, HEIC, lossy WebP, DNG and camera raw files through 
 SVG and CorelDRAW through nitrosvg / nitrocdr; files can be opened from the command line, the desktop or the native Open
 dialog. `make gnome-register` installs the desktop file and icon for the current user.
 
-On macOS the pthread pool can be tried with `-DNITRO_PTHREAD_POOL`: there it is as fast as GCD
-and passes all checks (`verify`, `pngverify`, `psdverify`, the ASan robustness tests,
-ThreadSanitizer with four threads decoding at once). Tested on Linux (see
+On macOS the decoders used Grand Central Dispatch until October 2026; the pthread pool replaced
+it so that every system runs the same code. It is as fast: the viewer's `--bench` on 10 formats,
+on the M1 PNG 7% faster, HEIC (through VideoToolbox) 5% slower, the rest within 2%; on the Intel
+i9 no difference. It passes all checks (`verify`, `pngverify`, `psdverify`, the ASan robustness
+tests; ThreadSanitizer with four threads decoding every format at once: clean, apart from reads of
+VideoToolbox's own output buffers, whose writes it cannot see, the same with GCD). Tested on Linux (see
 [Three machines](#three-machines-macos-and-linux)).
 
 **Windows:** `make windows WINCC=…/llvm-mingw/bin/x86_64-w64-mingw32-clang` cross-compiles

@@ -3,7 +3,7 @@
 // nitrotiff: see nitrotiff.h
 #include "nitrotiff.h"
 #include "nitropng.h"   // np_zlib_decompress: Deflate
-#include "nitro_os.h"   // parallel loop (GCD on macOS, a thread pool elsewhere)
+#include "nitro_os.h"   // parallel loop (a thread pool)
 #include "tiff.h"       // the TIFF directory (shared with nitrodng, nitrojpeg ...)
 
 #include <pthread.h>

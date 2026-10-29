@@ -3,7 +3,7 @@
 // nitroavif: see nitroavif.h
 #include "nitroavif.h"
 #include "heif.h"       // the HEIF structure (shared with nitroheic)
-#include "nitro_os.h"   // parallel loop (GCD on macOS, a thread pool elsewhere)
+#include "nitro_os.h"   // parallel loop (a thread pool)
 
 #include <dav1d/dav1d.h>
 #include <math.h>

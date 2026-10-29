@@ -2,7 +2,7 @@
 // Copyright (c) 2026 A'rpi - part of jpeg-nitro (https://github.com/gereoffy/jpeg-nitro)
 // nitrohevc: see nitrohevc.h. Section numbers refer to ITU-T H.265 (v4 and later).
 #include "nitrohevc.h"
-#include "nitro_os.h"   // parallel loop (GCD on macOS, a thread pool elsewhere)
+#include "nitro_os.h"   // parallel loop (a thread pool)
 
 #include <pthread.h>
 #include <sched.h>

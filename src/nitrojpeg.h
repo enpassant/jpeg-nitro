@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 A'rpi - part of jpeg-nitro (https://github.com/gereoffy/jpeg-nitro)
 // nitrojpeg: multi-threaded decoding of a *single* baseline or progressive JPEG image into
-// planar Y/Cb/Cr, with no external dependencies (C, pthreads, GCD, AVX2).
+// planar Y/Cb/Cr, with no external dependencies (C, pthreads, AVX2 / NEON).
 //
 // A baseline JPEG is one long Huffman-coded bitstream, so normal decoders
 // (libjpeg-turbo included) run on one core. nitrojpeg decodes it in parallel:

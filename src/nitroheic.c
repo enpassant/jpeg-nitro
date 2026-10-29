@@ -5,11 +5,12 @@
 #include "nitrohevc.h"
 #include "heif.h"   // the HEIF structure (shared with nitroavif)
 
-#include "nitro_os.h"   // parallel loop (GCD on macOS, a thread pool elsewhere)
+#include "nitro_os.h"   // parallel loop (a thread pool)
 
 #ifdef __APPLE__
 #include <CoreMedia/CoreMedia.h>
 #include <VideoToolbox/VideoToolbox.h>
+#include <dispatch/dispatch.h>   // the VideoToolbox work: abandoned if it hangs (see decode_vt)
 #include <pthread.h>
 #endif
 #include <stdatomic.h>

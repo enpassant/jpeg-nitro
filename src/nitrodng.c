@@ -2,7 +2,7 @@
 // Copyright (c) 2026 A'rpi - part of jpeg-nitro (https://github.com/gereoffy/jpeg-nitro)
 // nitrodng: see nitrodng.h
 #include "nitrodng.h"
-#include "nitro_os.h"   // parallel loop (GCD on macOS, a thread pool elsewhere)
+#include "nitro_os.h"   // parallel loop (a thread pool)
 #include "tiff.h"       // the TIFF directory (shared with nitrotiff, nitrojpeg ...)
 
 #include <math.h>
