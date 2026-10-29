@@ -14,6 +14,9 @@ Linuxra**:
 | Linux, GNOME | GTK 4 + libadwaita: `nitroview-gnome`, Flatpakként is | `make gnome` / `make flatpak` |
 | Linux (Wayland / X11), új | SDL3 + OpenGL 3.3: egyetlen önálló `nitroview-sdl` | `make sdl` / `make sdl-dist` |
 
+Kész buildek mind a négyhez: [Releases](https://github.com/gereoffy/jpeg-nitro/releases). Az ottani macOS
+dmg **hitelesített (notarized)**: Gatekeeper-figyelmeztetés nélkül nyílik.
+
 Mind a négy ugyanazokra a saját dekóderekre épül: hármat, amelyek egyetlen képet is az összes CPU-magon
 dekódolnak — pedig a JPEG, a PNG és a PSD tömörítése is eredendően soros —, egyet, amely a HEIC-fotók
 csempéit párhuzamosan dekódolja, egyet a DNG nyers képek előhívásához, egyet-egyet a WebP-hez, a TIFF-hez
@@ -181,7 +184,11 @@ Macen elsőre nem engedi megnyitni a rendszer: jobb klikk → Megnyitás (macOS 
 nitroview.app`. Apple Developer ID-val figyelmeztetés nélkül nyílik: a `make dmg notarize
 SIGN_ID="Developer ID Application: Név (TEAMID)" NOTARY_PROFILE=név` aláírja (hardened runtime),
 hitelesítteti az Apple-lel a dmg-t, és hozzátűzi a jegyet (előtte egyszer: `xcrun notarytool
-store-credentials név`).
+store-credentials név`). A [Releases](https://github.com/gereoffy/jpeg-nitro/releases)
+dmg-je ilyen hitelesített build: a kiadás tagjéből a `.github/workflows/macos-release.yml` workflow-val
+egy GitHub Actions macOS runneren fordítva [mgelei forkjában](https://github.com/mgelei/jpeg-nitro), az
+ő Developer ID-jával aláírva (a származását a `gh attestation verify nitroview-vN.dmg --repo
+mgelei/jpeg-nitro` ellenőrzi).
 
 **Finder:** a `make app` elkészíti a `nitroview.app`-ot. Másold az Applications mappába, majd a Finderben
 egy képen: Információ → Megnyitás ezzel → nitroview → Az összes módosítása. Képeket vagy mappát a

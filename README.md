@@ -14,6 +14,9 @@ GNOME/Linux**:
 | Linux with GNOME | GTK 4 + libadwaita: `nitroview-gnome`, also as a Flatpak | `make gnome` / `make flatpak` |
 | Linux (Wayland / X11), new | SDL3 + OpenGL 3.3: one self-contained `nitroview-sdl` | `make sdl` / `make sdl-dist` |
 
+Ready-made builds for all four: [Releases](https://github.com/gereoffy/jpeg-nitro/releases). The macOS
+dmg there is **notarized**: it opens without a Gatekeeper warning.
+
 All four are built on our own decoders: three that decode a *single* image on all CPU cores —
 although JPEG, PNG and PSD compression are all sequential by design —, one that decodes the tiles of
 HEIC photos in parallel, one that develops DNG raw images, one for WebP, one for TIFF, one for AVIF (with dav1d), and two for vector drawings:
@@ -95,7 +98,11 @@ macOS refuses it the first time: right-click → Open (up to macOS 14), or Syste
 Security → Open Anyway (macOS 15), or `xattr -dr com.apple.quarantine nitroview.app`. With an Apple
 Developer ID it opens without that: `make dmg notarize SIGN_ID="Developer ID Application: Name
 (TEAMID)" NOTARY_PROFILE=name` signs it (hardened runtime), has Apple notarize the dmg and staples the
-ticket to it (once before: `xcrun notarytool store-credentials name`).
+ticket to it (once before: `xcrun notarytool store-credentials name`). The dmg in the
+[Releases](https://github.com/gereoffy/jpeg-nitro/releases) is such a notarized build: made from the
+release's tag by the workflow in `.github/workflows/macos-release.yml` on a GitHub Actions macOS runner
+in [mgelei's fork](https://github.com/mgelei/jpeg-nitro), signed with their Developer ID
+(`gh attestation verify nitroview-vN.dmg --repo mgelei/jpeg-nitro` checks the provenance).
 
 **Finder:** `make app` builds `nitroview.app`. Copy it to /Applications, then in the Finder: Get Info
 on an image → Open with → nitroview → Change All. Images or folders can also be dropped on its Dock
