@@ -915,79 +915,86 @@ static void intra_predict(Dec *d, int c, int x0, int y0, int log2, int mode) {
     int stride = d->stride[c];
     uint8_t *dst = d->plane[c] + (size_t)y0 * stride + x0;
     int cur_slice = d->slice_addr_rs;
-    // reference samples: left[0..2n] = p[-1][-1 .. 2n-1], top[0..2n] = p[-1 .. 2n-1][-1]
-    int left[65], top[65];
-    int avl[65], avt[65];
-    int any = 0;
-    for (int i = 0; i <= 2 * n; i++) {
-        int yy = y0 - 1 + i;   // left column, from the corner down
-        int ok = avail4(d, (x0 - 1) * (1 << sub), yy * (1 << sub), cur_slice);
-        avl[i] = ok;
-        if (ok) left[i] = d->plane[c][(size_t)yy * stride + x0 - 1];
-        any |= ok;
-        int xx = x0 - 1 + i;   // top row, from the corner right
-        ok = avail4(d, xx * (1 << sub), (y0 - 1) * (1 << sub), cur_slice);
-        avt[i] = ok;
-        if (ok) top[i] = d->plane[c][(size_t)(y0 - 1) * stride + xx];
-        any |= ok;
+    // reference samples: left[0..2n] = p[-1][-1 .. 2n-1], top[0..2n] = p[-1 .. 2n-1][-1]. The
+    // availability is the same within a 4x4 luma block: asked per unit of u samples (and the corner)
+    uint8_t left[65], top[65];
+    int u = 4 >> sub, nu = 2 * n / u;
+    uint8_t avl[32], avt[32];
+    int corner = avail4(d, (x0 - 1) * (1 << sub), (y0 - 1) * (1 << sub), cur_slice), any = corner;
+    for (int k = 0; k < nu; k++) {
+        avl[k] = (uint8_t)avail4(d, (x0 - 1) * (1 << sub), (y0 + k * u) * (1 << sub), cur_slice);
+        avt[k] = (uint8_t)avail4(d, (x0 + k * u) * (1 << sub), (y0 - 1) * (1 << sub), cur_slice);
+        any |= avl[k] | avt[k];
     }
-    // substitution (8.4.4.2.2): order p[-1][2n-1] .. p[-1][-1], p[0][-1] .. p[2n-1][-1]
     if (!any) {
-        for (int i = 0; i <= 2 * n; i++) left[i] = top[i] = 128;
+        memset(left, 128, (size_t)(2 * n + 1));
+        memset(top, 128, (size_t)(2 * n + 1));
     } else {
-        // the sequence: left[2n], left[2n-1], ..., left[0] (= corner = top[0]), top[1] ... top[2n]
-        if (!avl[2 * n]) {
-            int v = -1;
-            for (int i = 2 * n - 1; i >= 0 && v < 0; i--)
-                if (avl[i]) v = left[i];
-            for (int i = 1; i <= 2 * n && v < 0; i++)
-                if (avt[i]) v = top[i];
-            left[2 * n] = v;
-            avl[2 * n] = 1;
+        if (corner) left[0] = dst[-stride - 1];
+        for (int k = 0; k < nu; k++) {
+            if (avl[k])
+                for (int j = 0; j < u; j++) left[1 + k * u + j] = dst[(k * u + j) * stride - 1];
+            if (avt[k]) {
+                if (u == 4) memcpy(top + 1 + k * u, dst - stride + k * u, 4);
+                else memcpy(top + 1 + k * u, dst - stride + k * u, 2);
+            }
         }
-        for (int i = 2 * n - 1; i >= 0; i--)
-            if (!avl[i]) left[i] = left[i + 1];
+        // substitution (8.4.4.2.2), in the order p[-1][2n-1] .. p[-1][-1], p[0][-1] .. p[2n-1][-1]:
+        // the first one, if missing, is the first available; a missing one after it its predecessor
+        if (!avl[nu - 1]) {
+            int v = -1;
+            for (int k = nu - 2; k >= 0 && v < 0; k--)
+                if (avl[k]) v = left[(k + 1) * u];   // (the unit's lowest sample)
+            if (v < 0 && corner) v = left[0];
+            for (int k = 0; k < nu && v < 0; k++)
+                if (avt[k]) v = top[1 + k * u];
+            memset(left + 1 + (nu - 1) * u, v, (size_t)u);
+        }
+        for (int k = nu - 2; k >= 0; k--)
+            if (!avl[k]) memset(left + 1 + k * u, left[1 + (k + 1) * u], (size_t)u);
+        if (!corner) left[0] = left[1];
         top[0] = left[0];
-        for (int i = 1; i <= 2 * n; i++)
-            if (!avt[i]) top[i] = top[i - 1];
+        for (int k = 0; k < nu; k++)
+            if (!avt[k]) memset(top + 1 + k * u, top[k * u], (size_t)u);
     }
     // filtering of the reference samples (8.4.4.2.3): luma only (4:2:0)
     if (c == 0 && mode != 1 && n != 4) {
         int dist = MIN(abs(mode - 26), abs(mode - 10));
         int thres = n == 8 ? 7 : n == 16 ? 1 : 0;
         if (dist > thres) {
-            int fl[65], ft[65];
-            int corner = left[0];
-            if (d->sps->strong_intra_smoothing && n == 32 &&
-                abs(corner + top[2 * n] - 2 * top[n]) < (1 << (8 - 5)) &&
-                abs(corner + left[2 * n] - 2 * left[n]) < (1 << (8 - 5))) {
-                fl[0] = ft[0] = corner;
+            uint8_t fl[65], ft[65];
+            int cr = left[0];
+            if (d->sps->strong_intra_smoothing && n == 32 && abs(cr + top[2 * n] - 2 * top[n]) < (1 << (8 - 5)) &&
+                abs(cr + left[2 * n] - 2 * left[n]) < (1 << (8 - 5))) {
+                fl[0] = ft[0] = (uint8_t)cr;
                 for (int i = 1; i < 64; i++) {
-                    fl[i] = ((64 - i) * corner + i * left[64] + 32) >> 6;
-                    ft[i] = ((64 - i) * corner + i * top[64] + 32) >> 6;
+                    fl[i] = (uint8_t)(((64 - i) * cr + i * left[64] + 32) >> 6);
+                    ft[i] = (uint8_t)(((64 - i) * cr + i * top[64] + 32) >> 6);
                 }
                 fl[64] = left[64];
                 ft[64] = top[64];
             } else {
-                fl[0] = ft[0] = (left[1] + 2 * corner + top[1] + 2) >> 2;
+                fl[0] = ft[0] = (uint8_t)((left[1] + 2 * cr + top[1] + 2) >> 2);
                 for (int i = 1; i < 2 * n; i++) {
-                    fl[i] = (left[i + 1] + 2 * left[i] + left[i - 1] + 2) >> 2;
-                    ft[i] = (top[i + 1] + 2 * top[i] + top[i - 1] + 2) >> 2;
+                    fl[i] = (uint8_t)((left[i + 1] + 2 * left[i] + left[i - 1] + 2) >> 2);
+                    ft[i] = (uint8_t)((top[i + 1] + 2 * top[i] + top[i - 1] + 2) >> 2);
                 }
                 fl[2 * n] = left[2 * n];
                 ft[2 * n] = top[2 * n];
             }
-            memcpy(left, fl, sizeof(int) * (2 * n + 1));
-            memcpy(top, ft, sizeof(int) * (2 * n + 1));
+            memcpy(left, fl, (size_t)(2 * n + 1));
+            memcpy(top, ft, (size_t)(2 * n + 1));
         }
     }
     // p[-1][y] = left[y + 1], p[x][-1] = top[x + 1], p[-1][-1] = left[0]
     if (mode == 0) {   // planar
-        for (int y = 0; y < n; y++)
+        int tr = top[n + 1], bl = left[n + 1];
+        for (int y = 0; y < n; y++) {
+            uint8_t *o = dst + y * stride;
+            int l = left[y + 1];
             for (int x = 0; x < n; x++)
-                dst[y * stride + x] = (uint8_t)(((n - 1 - x) * left[y + 1] + (x + 1) * top[n + 1] +
-                                                 (n - 1 - y) * top[x + 1] + (y + 1) * left[n + 1] + n) >>
-                                                (log2 + 1));
+                o[x] = (uint8_t)(((n - 1 - x) * l + (x + 1) * tr + (n - 1 - y) * top[x + 1] + (y + 1) * bl + n) >> (log2 + 1));
+        }
     } else if (mode == 1) {   // DC
         int sum = n;
         for (int i = 1; i <= n; i++) sum += left[i] + top[i];
@@ -998,28 +1005,34 @@ static void intra_predict(Dec *d, int c, int x0, int y0, int log2, int mode) {
             for (int x = 1; x < n; x++) dst[x] = (uint8_t)((top[x + 1] + 3 * dc + 2) >> 2);
             for (int y = 1; y < n; y++) dst[y * stride] = (uint8_t)((left[y + 1] + 3 * dc + 2) >> 2);
         }
-    } else {   // angular
+    } else {   // angular: computed as a vertical mode (a horizontal one transposed: into blk, then dst)
         int angle = intra_angle[mode];
-        int refbuf[3 * 64 + 1];
-        int *ref = refbuf + 64;   // ref[-n .. 2n]
+        uint8_t refbuf[3 * 64 + 1], blk[32 * 32];
+        uint8_t *ref = refbuf + 64;   // ref[-n .. 2n]
         int vertical = mode >= 18;
-        const int *main = vertical ? top : left, *side = vertical ? left : top;
-        for (int x = 0; x <= n; x++) ref[x] = main[x];   // ref[x] = p[-1 + x][-1] (vertical)
+        const uint8_t *main = vertical ? top : left, *side = vertical ? left : top;
+        memcpy(ref, main, (size_t)(n + 1));   // ref[x] = p[-1 + x][-1] (vertical)
         if (angle < 0) {
             int last = (n * angle) >> 5;
             if (last < -1)
                 for (int x = last; x <= -1; x++) ref[x] = side[((x * inv_angle[mode] + 128) >> 8)];
         } else {
-            for (int x = n + 1; x <= 2 * n; x++) ref[x] = main[x];
+            memcpy(ref + n + 1, main + n + 1, (size_t)n);
         }
+        uint8_t *out = vertical ? dst : blk;
+        int os = vertical ? stride : n;
         for (int y = 0; y < n; y++) {
-            int pos = (y + 1) * angle, idx = pos >> 5, fact = pos & 31;
-            for (int x = 0; x < n; x++) {
-                int v = fact ? ((32 - fact) * ref[x + idx + 1] + fact * ref[x + idx + 2] + 16) >> 5 : ref[x + idx + 1];
-                if (vertical) dst[y * stride + x] = (uint8_t)v;
-                else dst[x * stride + y] = (uint8_t)v;
-            }
+            int pos = (y + 1) * angle, fact = pos & 31;
+            const uint8_t *r = ref + (pos >> 5) + 1;
+            uint8_t *o = out + y * os;
+            if (fact)
+                for (int x = 0; x < n; x++) o[x] = (uint8_t)(((32 - fact) * r[x] + fact * r[x + 1] + 16) >> 5);
+            else
+                memcpy(o, r, (size_t)n);
         }
+        if (!vertical)
+            for (int y = 0; y < n; y++)
+                for (int x = 0; x < n; x++) dst[x * stride + y] = blk[y * n + x];
         if (c == 0 && n < 32) {
             if (mode == 26)
                 for (int y = 0; y < n; y++) dst[y * stride] = clip_pixel(top[1] + ((left[y + 1] - left[0]) >> 1));
@@ -1241,8 +1254,20 @@ static int residual(Dec *d, int x0, int y0, int log2, int c, int pred_mode) {
 // ---------------------------------------------------------------------------
 // coding tree (7.3.8)
 
+// w (a power of 2 up to 16) bytes v at p: fixed-size stores (a memset call would cost more than
+// the 1..4 bytes of the small blocks)
+static inline void set_small(uint8_t *p, int v, int w) {
+    switch (w) {
+    case 1: p[0] = (uint8_t)v; break;
+    case 2: memset(p, v, 2); break;
+    case 4: memset(p, v, 4); break;
+    case 8: memset(p, v, 8); break;
+    default: memset(p, v, 16); break;
+    }
+}
+
 static void fill4(uint8_t *map, int w4, int x0, int y0, int size, uint8_t v) {   // luma coordinates
-    for (int y = y0 >> 2; y < (y0 + size) >> 2; y++) memset(map + y * w4 + (x0 >> 2), v, (size_t)(size >> 2));
+    for (int y = y0 >> 2; y < (y0 + size) >> 2; y++) set_small(map + y * w4 + (x0 >> 2), v, size >> 2);
 }
 
 // 7.3.8.3 sao(): parsed (the SAO filter itself is not applied yet)
@@ -1419,8 +1444,7 @@ static int coding_unit(Dec *d, int x0, int y0, int log2) {
     int max_depth = s->max_transform_hierarchy_depth_intra + part_nxn;
     if (transform_tree(d, x0, y0, x0, y0, log2, 0, max_depth, part_nxn, 0, 0, 0)) return -1;
     // the CU's QP (for the prediction of later quantization groups and the deblocking)
-    for (int y = y0 >> 2; y < (y0 + n) >> 2; y++)
-        memset(d->qp + y * d->w4 + (x0 >> 2), d->qp_y, (size_t)(n >> 2));
+    for (int y = y0 >> 2; y < (y0 + n) >> 2; y++) set_small((uint8_t *)d->qp + y * d->w4 + (x0 >> 2), d->qp_y, n >> 2);
     d->qp_prev_cu = d->qp_y;
     return 0;
 }
