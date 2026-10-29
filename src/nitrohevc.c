@@ -646,6 +646,30 @@ static inline uint32_t cabac_bits(CabacEngine *c, int n) {
     return v;
 }
 
+// coeff_abs_level_remaining (9.3.3.11) with Rice parameter rice; -1 if too long for a coefficient.
+// 16 bypass bins are peeked by one division: the unary prefix is their leading ones, the suffix
+// the bins after its terminating zero, and when both fit, only those bins are consumed.
+static inline __attribute__((always_inline)) int cabac_level_remaining(CabacEngine *c, int rice) {
+    uint64_t t = c->value >> (c->bits - 16);
+    uint32_t q = (uint32_t)(t / c->range);   // the next 16 bins, the first in bit 15
+    uint32_t zeros = ~q & 0xffff;
+    int prefix = zeros ? __builtin_clz(zeros) - 16 : 16;
+    int len = prefix <= 3 ? rice : prefix - 3 + rice, n = prefix + 1 + len;
+    if (n <= 16) {
+        uint32_t bins = q >> (16 - n);
+        c->bits -= n;
+        c->value -= (uint64_t)bins * c->range << c->bits;
+        if (c->bits < 16) cabac_refill(c);
+        int suffix = (int)(bins & ((1u << len) - 1));
+        return prefix <= 3 ? (prefix << rice) + suffix : (((1 << (prefix - 3)) + 3 - 1) << rice) + suffix;
+    }
+    prefix = 0;   // (a long one: bin by bin)
+    while (prefix < 32 && cabac_byp(c)) prefix++;
+    if (prefix > 24) return -1;   // (more would not fit the 16-bit coefficient range)
+    if (prefix <= 3) return (prefix << rice) + (int)cabac_bits(c, rice);
+    return (((1 << (prefix - 3)) + 3 - 1) << rice) + (int)cabac_bits(c, prefix - 3 + rice);
+}
+
 // on the decoder's own engine (outside the residual loop)
 static inline __attribute__((always_inline)) int cabac_decision(Cabac *c, int ctx) { return cabac_dec(&c->e, c->state, ctx); }
 static inline __attribute__((always_inline)) int cabac_bypass(Cabac *c) { return cabac_byp(&c->e); }
@@ -992,6 +1016,22 @@ static void intra_predict(Dec *d, int c, int x0, int y0, int log2, int mode) {
 // residual coding (7.3.8.11, 9.3.4.2.x) and dequantization (8.6.2, 8.6.3)
 
 static const uint8_t ctx_idx_map4[16] = {0, 1, 4, 5, 2, 3, 4, 5, 6, 6, 8, 8, 7, 7, 8, 8};
+
+// sigCtx of the scan positions of a 4x4 sub-block (9.3.4.2.5), without the block's offsets:
+// [scanIdx][prevCsbf 0..3, or 4: a 4x4 transform block (ctxIdxMap)][scan position]
+static uint8_t sig_pos_ctx[3][5][16];
+
+static void init_sig_ctx(void) {
+    for (int scan = 0; scan < 3; scan++)
+        for (int p = 0; p < 16; p++) {
+            int xp = scan_order[2][scan][p][0], yp = scan_order[2][scan][p][1];
+            sig_pos_ctx[scan][0][p] = (uint8_t)(xp + yp == 0 ? 2 : xp + yp < 3 ? 1 : 0);
+            sig_pos_ctx[scan][1][p] = (uint8_t)(yp == 0 ? 2 : yp == 1 ? 1 : 0);
+            sig_pos_ctx[scan][2][p] = (uint8_t)(xp == 0 ? 2 : xp == 1 ? 1 : 0);
+            sig_pos_ctx[scan][3][p] = 2;
+            sig_pos_ctx[scan][4][p] = ctx_idx_map4[(yp << 2) + xp];
+        }
+}
 static const int level_scale[6] = {40, 45, 51, 57, 64, 72};
 
 static int chroma_qp_table(int qpi) {   // Table 8-10 (ChromaArrayType 1)
@@ -1086,32 +1126,21 @@ static int residual(Dec *d, int x0, int y0, int log2, int c, int pred_mode) {
             int prev = 0;
             if (xs < nsb - 1) prev += csbf[xs + 1][ys];
             if (ys < nsb - 1) prev += csbf[xs][ys + 1] << 1;
-            for (int p = start; p >= 0; p--) {
-                int xp = pos_scan[p][0], yp = pos_scan[p][1];
-                int xc = (xs << 2) + xp, yc = (ys << 2) + yp;
-                if (p == 0 && infer_dc) {   // inferred significant: nothing coded after it
-                    sig[nsig++] = 0;
-                    break;
-                }
-                int sctx;
-                if (log2 == 2) sctx = ctx_idx_map4[(yc << 2) + xc];
-                else if (xc + yc == 0) sctx = 0;
-                else {
-                    if (prev == 0) sctx = xp + yp == 0 ? 2 : xp + yp < 3 ? 1 : 0;
-                    else if (prev == 1) sctx = yp == 0 ? 2 : yp == 1 ? 1 : 0;
-                    else if (prev == 2) sctx = xp == 0 ? 2 : xp == 1 ? 1 : 0;
-                    else sctx = 2;
-                    if (c == 0) {
-                        if (xs + ys > 0) sctx += 3;
-                        sctx += log2 == 3 ? (scan == 0 ? 9 : 15) : 21;
-                    } else {
-                        sctx += log2 == 3 ? 9 : 12;
-                    }
-                }
-                if (cabac_dec(&e, st, CTX_SIG + (c ? 27 + sctx : sctx))) {
+            // the offsets of this block (9.3.4.2.5), the position's part from sig_pos_ctx
+            const uint8_t *sp = sig_pos_ctx[scan][log2 == 2 ? 4 : prev];
+            int base = log2 == 2 ? (c ? 27 : 0)
+                     : c       ? 27 + (log2 == 3 ? 9 : 12)
+                               : (i > 0 ? 3 : 0) + (log2 == 3 ? (scan == 0 ? 9 : 15) : 21);
+            uint8_t *sst = st + CTX_SIG + base;
+            for (int p = start; p > 0; p--)
+                if (cabac_dec(&e, sst, sp[p])) {
                     sig[nsig++] = p;
                     infer_dc = 0;
                 }
+            if (start >= 0) {   // position 0: inferred significant if nothing else of the sub-block is
+                if (infer_dc) sig[nsig++] = 0;
+                else if (cabac_dec(&e, st, log2 > 2 && i == 0 ? CTX_SIG + (c ? 27 : 0) : CTX_SIG + base + sp[0]))
+                    sig[nsig++] = 0;
             }
         }
         if (!nsig) continue;
@@ -1140,13 +1169,8 @@ static int residual(Dec *d, int x0, int y0, int log2, int c, int pred_mode) {
             int base = 1 + (k < 8 ? g1[k] : 0) + (k == g2_pos ? g2 : 0);
             int level = base;
             if (base == (k < 8 ? (k == g2_pos ? 3 : 2) : 1)) {
-                // coeff_abs_level_remaining (9.3.3.11)
-                int prefix = 0;
-                while (prefix < 32 && cabac_byp(&e)) prefix++;
-                if (prefix > 24) return -1;   // (more would not fit the 16-bit coefficient range)
-                int rem;
-                if (prefix <= 3) rem = (prefix << rice) + (int)cabac_bits(&e, rice);
-                else rem = (((1 << (prefix - 3)) + 3 - 1) << rice) + (int)cabac_bits(&e, prefix - 3 + rice);
+                int rem = cabac_level_remaining(&e, rice);
+                if (rem < 0) return -1;
                 level = base + rem;
                 if (level > 3 * (1 << rice)) rice = MIN(rice + 1, 4);
             }
@@ -1669,6 +1693,7 @@ out:
 static pthread_once_t tables_once = PTHREAD_ONCE_INIT;
 static void init_tables(void) {
     init_scans();
+    init_sig_ctx();
     init_dct();
 }
 
