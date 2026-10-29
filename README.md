@@ -157,7 +157,8 @@ the one file to give away, `nitroview-linux-x64.tar.gz` (4 MB): built for x86-64
 of the build machine's CPU, libstdc++, zlib and dav1d linked in, it needs only glibc (2.35+ when built
 on Ubuntu 22.04). On 64-bit ARM Linux (Asahi Linux on Apple M1 / M2, Raspberry Pi 4 / 5) the same
 makes `nitroview-linux-arm64.tar.gz`, built for armv8-a (the NEON code paths are the ones the Mac's arm64
-build uses; HEIC is decoded by nitrohevc, as on x86 Linux). `nitroview-sdl --register` adds it to the desktop's applications for the current user
+build uses; HEIC is decoded by nitrohevc, as on x86 Linux); tried on an M1 MacBook Air under Fedora Asahi Remix 44
+(KDE Plasma on Wayland, Mesa's OpenGL 4.6 driver for the M1 GPU): 100% stays pixel-exact at 200% and 300% display scaling too. `nitroview-sdl --register` adds it to the desktop's applications for the current user
 (a desktop file and the icon in `~/.local/share`: "Open with" in the file manager), `--unregister`
 removes it.
 
