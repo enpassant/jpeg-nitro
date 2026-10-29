@@ -529,30 +529,59 @@ static const uint8_t range_lps[64][4] = {
     {8, 10, 12, 14},      {8, 9, 11, 13},       {7, 9, 11, 12},       {7, 9, 10, 12},       {7, 8, 10, 11},
     {6, 8, 9, 11},        {6, 7, 9, 10},        {6, 7, 8, 9},         {2, 2, 2, 2}};
 
-static const uint8_t trans_idx_lps[64] = {0,  0,  1,  2,  2,  4,  4,  5,  6,  7,  8,  9,  9,  11, 11, 12,
-                                          13, 13, 15, 15, 16, 16, 18, 18, 19, 19, 21, 21, 22, 22, 23, 24,
-                                          24, 25, 26, 26, 27, 27, 28, 29, 29, 30, 30, 30, 31, 32, 32, 33,
-                                          33, 33, 34, 34, 35, 35, 35, 36, 36, 36, 37, 37, 37, 38, 38, 63};
-
-// The arithmetic decoder keeps ivlOffset scaled: value = ivlOffset << 7 plus up to 8 bits read
-// ahead (bits_needed: -8 .. -1 how many of them are still free), so bytes are read one at a
-// time instead of bit by bit; range and value are compared with the range scaled the same way.
+// The arithmetic decoder (9.3.4.3) keeps the stream's next bits in value: ivlOffset is
+// value >> bits, the bits below it come after it in the stream. Renormalizing only lowers bits
+// (value stays), 4 bytes are loaded at once when fewer than 16 bits are left, and range and
+// ivlOffset are compared as range << bits: a bin is a few instructions, without a loop or a
+// branch per bit.
 typedef struct {
     const uint8_t *p, *end;
-    uint32_t range, value;
-    int bits_needed;
+    uint64_t value;
+    uint32_t range;
+    int bits;
     uint8_t state[NUM_CTX];   // pStateIdx << 1 | valMps
 } Cabac;
 
-static inline uint32_t cabac_byte(Cabac *c) { return c->p < c->end ? *c->p++ : 0; }
+// a context's next state: [pStateIdx << 1 | valMps][the bin was the LPS] (9.3.4.3.2.2: transIdxMps
+// is pStateIdx + 1 up to 62, transIdxLps the table of the standard, valMps flips on an LPS in state 0)
+static const uint8_t next_state[128][2] = {
+    {2, 1}, {3, 0}, {4, 0}, {5, 1}, {6, 2}, {7, 3}, {8, 4}, {9, 5},
+    {10, 4}, {11, 5}, {12, 8}, {13, 9}, {14, 8}, {15, 9}, {16, 10}, {17, 11},
+    {18, 12}, {19, 13}, {20, 14}, {21, 15}, {22, 16}, {23, 17}, {24, 18}, {25, 19},
+    {26, 18}, {27, 19}, {28, 22}, {29, 23}, {30, 22}, {31, 23}, {32, 24}, {33, 25},
+    {34, 26}, {35, 27}, {36, 26}, {37, 27}, {38, 30}, {39, 31}, {40, 30}, {41, 31},
+    {42, 32}, {43, 33}, {44, 32}, {45, 33}, {46, 36}, {47, 37}, {48, 36}, {49, 37},
+    {50, 38}, {51, 39}, {52, 38}, {53, 39}, {54, 42}, {55, 43}, {56, 42}, {57, 43},
+    {58, 44}, {59, 45}, {60, 44}, {61, 45}, {62, 46}, {63, 47}, {64, 48}, {65, 49},
+    {66, 48}, {67, 49}, {68, 50}, {69, 51}, {70, 52}, {71, 53}, {72, 52}, {73, 53},
+    {74, 54}, {75, 55}, {76, 54}, {77, 55}, {78, 56}, {79, 57}, {80, 58}, {81, 59},
+    {82, 58}, {83, 59}, {84, 60}, {85, 61}, {86, 60}, {87, 61}, {88, 60}, {89, 61},
+    {90, 62}, {91, 63}, {92, 64}, {93, 65}, {94, 64}, {95, 65}, {96, 66}, {97, 67},
+    {98, 66}, {99, 67}, {100, 66}, {101, 67}, {102, 68}, {103, 69}, {104, 68}, {105, 69},
+    {106, 70}, {107, 71}, {108, 70}, {109, 71}, {110, 70}, {111, 71}, {112, 72}, {113, 73},
+    {114, 72}, {115, 73}, {116, 72}, {117, 73}, {118, 74}, {119, 75}, {120, 74}, {121, 75},
+    {122, 74}, {123, 75}, {124, 76}, {125, 77}, {124, 76}, {125, 77}, {126, 126}, {127, 127},
+};
+
+static inline void cabac_refill(Cabac *c) {
+    uint32_t w = 0;
+    if (c->end - c->p >= 4) {
+        w = (uint32_t)c->p[0] << 24 | (uint32_t)c->p[1] << 16 | (uint32_t)c->p[2] << 8 | c->p[3];
+        c->p += 4;
+    } else {   // (past the end: zeros)
+        for (int k = 0; k < 4; k++) w = w << 8 | (c->p < c->end ? *c->p++ : 0u);
+    }
+    c->value = c->value << 32 | w;   // (value < range << bits < 2^25 here)
+    c->bits += 32;
+}
 
 static void cabac_start(Cabac *c, const uint8_t *p, const uint8_t *end) {   // 9.3.2.5
     c->p = p;
     c->end = end;
     c->range = 510;
-    c->bits_needed = -8;
-    c->value = cabac_byte(c) << 8;
-    c->value |= cabac_byte(c);
+    c->value = 0;
+    c->bits = -9;   // ivlOffset: the first 9 bits
+    cabac_refill(c);
 }
 
 static void cabac_init_contexts(Cabac *c, int qp) {   // 9.3.2.2
@@ -566,53 +595,30 @@ static void cabac_init_contexts(Cabac *c, int qp) {   // 9.3.2.2
 }
 
 static inline int cabac_decision(Cabac *c, int ctx) {   // 9.3.4.3.2
-    uint8_t s = c->state[ctx];
-    int p = s >> 1, mps = s & 1;
-    uint32_t lps = range_lps[p][(c->range >> 6) & 3];
-    c->range -= lps;
-    uint32_t scaled = c->range << 7;
-    int bin;
-    if (c->value < scaled) {   // MPS
-        bin = mps;
-        if (p < 62) p++;
-        if (scaled < (256u << 7)) {   // one bit of renormalization
-            c->range = scaled >> 6;
-            c->value <<= 1;
-            if (++c->bits_needed == 0) {
-                c->bits_needed = -8;
-                c->value |= cabac_byte(c);
-            }
-        }
-    } else {   // LPS
-        bin = !mps;
+    unsigned s = c->state[ctx];
+    uint32_t lps = range_lps[s >> 1][(c->range >> 6) & 3];
+    uint32_t r = c->range - lps;
+    uint64_t scaled = (uint64_t)r << c->bits;
+    int is_lps = c->value >= scaled;
+    if (is_lps) {
         c->value -= scaled;
-        int shift = __builtin_clz(lps) - 23;   // lps back to >= 256
-        c->value <<= shift;
-        c->range = lps << shift;
-        if (p == 0) mps = !mps;
-        p = trans_idx_lps[p];
-        c->bits_needed += shift;
-        if (c->bits_needed >= 0) {
-            c->value |= cabac_byte(c) << c->bits_needed;
-            c->bits_needed -= 8;
-        }
+        r = lps;
     }
-    c->state[ctx] = (uint8_t)(p << 1 | mps);
-    return bin;
+    c->state[ctx] = next_state[s][is_lps];
+    int shift = __builtin_clz(r) - 23;   // back to >= 256: at most 1 bit after an MPS, up to 6 after an LPS
+    c->range = r << shift;
+    c->bits -= shift;
+    if (c->bits < 16) cabac_refill(c);
+    return (int)(s & 1) ^ is_lps;
 }
 
-static inline int cabac_bypass(Cabac *c) {   // 9.3.4.3.4
-    c->value <<= 1;
-    if (++c->bits_needed >= 0) {
-        c->bits_needed = -8;
-        c->value |= cabac_byte(c);
-    }
-    uint32_t scaled = c->range << 7;
-    if (c->value >= scaled) {
-        c->value -= scaled;
-        return 1;
-    }
-    return 0;
+static inline int cabac_bypass(Cabac *c) {   // 9.3.4.3.4: ivlOffset = ivlOffset << 1 | the next bit
+    c->bits--;
+    uint64_t scaled = (uint64_t)c->range << c->bits;
+    int bin = c->value >= scaled;
+    if (bin) c->value -= scaled;
+    if (c->bits < 16) cabac_refill(c);
+    return bin;
 }
 
 static uint32_t cabac_bypass_bits(Cabac *c, int n) {
@@ -623,16 +629,12 @@ static uint32_t cabac_bypass_bits(Cabac *c, int n) {
 
 static int cabac_terminate(Cabac *c) {   // 9.3.4.3.5
     c->range -= 2;
-    uint32_t scaled = c->range << 7;
+    uint64_t scaled = (uint64_t)c->range << c->bits;
     if (c->value >= scaled) return 1;
-    if (scaled < (256u << 7)) {
-        c->range = scaled >> 6;
-        c->value <<= 1;
-        if (++c->bits_needed == 0) {
-            c->bits_needed = -8;
-            c->value |= cabac_byte(c);
-        }
-    }
+    int shift = __builtin_clz(c->range) - 23;
+    c->range <<= shift;
+    c->bits -= shift;
+    if (c->bits < 16) cabac_refill(c);
     return 0;
 }
 
