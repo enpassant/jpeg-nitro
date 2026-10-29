@@ -168,6 +168,9 @@ else
 all: linux
 endif
 
+# a failed recipe leaves no half-written target behind (e.g. an empty build/icon.inc without xxd)
+.DELETE_ON_ERROR:
+
 # rebuild the viewer when the optional parts change
 CONFIG := tj$(TURBOJPEG)-wuffs$(WUFFS)-svg$(SVG)-cdr$(CDR)-mi$(MIMALLOC)-dav1d$(DAV1D)
 build/.config-$(CONFIG):
