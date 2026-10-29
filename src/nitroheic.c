@@ -4,12 +4,14 @@
 #include "nitroheic.h"
 #ifdef NV_NITROHEVC
 #include "nitrohevc.h"
+#elif defined(__APPLE__)
+#define NH_VIDEOTOOLBOX   // macOS: VideoToolbox, unless built with nitrohevc (make NITROHEVC=1)
 #endif
 #include "heif.h"   // the HEIF structure (shared with nitroavif)
 
 #include "nitro_os.h"   // parallel loop (a thread pool)
 
-#ifdef __APPLE__
+#ifdef NH_VIDEOTOOLBOX
 #include <CoreMedia/CoreMedia.h>
 #include <VideoToolbox/VideoToolbox.h>
 #include <dispatch/dispatch.h>   // the VideoToolbox work: abandoned if it hangs (see decode_vt)
@@ -87,8 +89,7 @@ out:
 }
 
 #ifdef NV_NITROHEVC
-// ---- decoding with nitrohevc, our own decoder (built with make NITROHEVC=1; macOS: only with
-// NITROHEVC=1 in the environment too)
+// ---- decoding with nitrohevc, our own decoder (only in a build made with make NITROHEVC=1)
 static int decode_own(const uint8_t *data, const nh_info *info, uint8_t *const planes[3], const size_t pitch[3]) {
     _Atomic int failed = 0;
     _Atomic int *pfailed = &failed;
@@ -108,7 +109,7 @@ static int decode_own(const uint8_t *data, const nh_info *info, uint8_t *const p
 }
 #endif
 
-#ifdef __APPLE__
+#ifdef NH_VIDEOTOOLBOX
 // ---- decoding: one VideoToolbox session per worker, tiles handed out in order
 //
 // VideoToolbox's HEVC decoders (software and hardware) can loop forever on a damaged stream: the
@@ -312,7 +313,7 @@ static int decode_vt(const uint8_t *data, const nh_info *info, uint8_t *const pl
 #endif
 
 int nh_decoder(void) {
-#if defined(__APPLE__) || defined(NV_NITROHEVC)
+#if defined(NH_VIDEOTOOLBOX) || defined(NV_NITROHEVC)
     return 1;
 #else
     return 0;
@@ -322,15 +323,13 @@ int nh_decoder(void) {
 int nh_decode_planes(const uint8_t *data, size_t len, const nh_info *info, uint8_t *const planes[3],
                      const size_t pitch[3], int nthreads) {
     (void)len;
-    (void)nthreads;
-#if defined(__APPLE__) && defined(NV_NITROHEVC)
-    if (getenv("NITROHEVC")) return decode_own(data, info, planes, pitch);
-#endif
-#if defined(__APPLE__)
+#if defined(NH_VIDEOTOOLBOX)
     return decode_vt(data, info, planes, pitch, nthreads);
 #elif defined(NV_NITROHEVC)
+    (void)nthreads;
     return decode_own(data, info, planes, pitch);
 #else
+    (void)nthreads;
     (void)data, (void)info, (void)planes, (void)pitch;
     return -1;   // no HEVC decoder in this build (see nh_decoder)
 #endif

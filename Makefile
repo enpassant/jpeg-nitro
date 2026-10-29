@@ -8,8 +8,8 @@
 #                        covered by patents that need a licence, which the binaries we distribute don't
 #                        have. Without it HEIC goes to the system: VideoToolbox on macOS (nitroheic),
 #                        WIC on Windows (Microsoft's HEVC extension), GTK's loaders in the GNOME viewer;
-#                        the SDL viewer has none. With it macOS still uses VideoToolbox (NITROHEVC=1 in
-#                        the environment: nitrohevc), the others nitrohevc
+#                        the SDL viewer has none. With it every viewer uses nitrohevc (macOS too,
+#                        VideoToolbox left out)
 #   make WUFFS=1         with Wuffs (third_party/wuffs.c) for interlaced PNGs before ImageIO (nitropng
 #                        decodes all others)
 #   make SVG=0           no SVG support (lunasvg, from scripts/get-deps.sh)
@@ -71,8 +71,10 @@ THREADLIBS := -lpthread
 endif
 CFLAGS     := -O3 $(CPUFLAGS) $(PORTFLAGS) -Wall -Wextra -Wno-unused-parameter
 ASAN       := -O1 -g $(PORTFLAGS) -fsanitize=address,undefined -fno-omit-frame-pointer
+# VideoToolbox: nitroheic's HEVC decoding (left out with nitrohevc: make NITROHEVC=1)
+VT_FW      := $(if $(filter 1,$(NITROHEVC)),,-framework VideoToolbox -framework CoreMedia -framework CoreVideo)
 FRAMEWORKS := -framework Cocoa -framework Metal -framework MetalKit -framework QuartzCore -framework UniformTypeIdentifiers \
-              -framework VideoToolbox -framework CoreMedia -framework CoreVideo
+              $(VT_FW)
 # libnitro: the decoders and nitro_load as one static library, built per target into <dir>/libnitro.a
 # (from <dir>/libobj/): build/ for this machine, build/app-<arch>/ for the app, build/dist/ for the
 # portable Linux build, build/win/ for Windows, build/lib/ as PIC for the Linux shared library. With
@@ -85,7 +87,7 @@ LIB_HDR    := src/nitrojpeg.h src/nitropng.h src/nitropsd.h src/nitroheic.h src/
 LIB_AVIF    = $(if $(filter 1,$(DAV1D)),src/nitroavif.c)
 LIB_DEFS    = $(if $(filter 1,$(DAV1D)),-DNV_DAV1D -I$(DAV1D_DIR)/include)
 HEVC_DEFS  := $(if $(filter 1,$(NITROHEVC)),-DNV_NITROHEVC)
-HEVC_NAME  := $(if $(filter 1,$(NITROHEVC)),nitrohevc,the system's)
+HEVC_NAME  := $(if $(filter 1,$(NITROHEVC)),nitrohevc,$(if $(filter Darwin,$(UNAME_S)),VideoToolbox,the system's))
 LIB_WARN   := -Wall -Wextra -Wno-unused-parameter
 define nitro_lib   # $(1): the compiler flags (optimisation, CPU, -fblocks, -fPIC ...)
 	@rm -rf $(@D)/libobj && mkdir -p $(@D)/libobj
@@ -245,7 +247,7 @@ SDL_LIBS   = $(SDL3_DIR)/lib/libSDL3.a $(shell sed -n 's/^Libs:.*-lSDL3//p' $(SD
 ifeq ($(UNAME_S),Darwin)
 SDL_DEC   := build/libnitro.a
 SDL_VEC   := $(if $(filter 1,$(CDR)),build/libnitrocdr.a) $(if $(filter 1,$(SVG)),build/libnitrosvg.a)
-SDL_VLIBS := $(if $(filter 1,$(CDR)),-liconv -lz) $(if $(filter 1,$(SVG)),-lc++) -framework VideoToolbox   # (HEIC: hardware decoding)
+SDL_VLIBS := $(if $(filter 1,$(CDR)),-liconv -lz) $(if $(filter 1,$(SVG)),-lc++) -framework CoreFoundation $(VT_FW)   # (HEIC)
 else
 SDL_DEC   := $(LIB_STATIC)
 SDL_VEC   := $(GNOME_CDR) $(GNOME_SVG) $(if $(and $(GNOME_SVG),$(filter 1,$(MIMALLOC))),build/mimalloc.o build/nitroalloc.o)
@@ -265,7 +267,7 @@ $(SDL_BIN): src/nitroview_sdl.c $(VIEWER_SRC) $(VIEWER_HDR) build/icon.inc $(SDL
 	  $(SDL_VEC) $(SDL_LIBS) $(SDL_VLIBS) $(THREADLIBS) -lm -o $@
 
 sdl: $(SDL_BIN)
-	@echo "built $(SDL_BIN) (SVG: $(if $(filter -DNV_SVG,$(SDL_VDEFS)),yes,no), CorelDRAW: $(if $(filter -DNV_CDR,$(SDL_VDEFS)),yes,no), AVIF: $(if $(SDL_AVIF),dav1d,no), HEIC: $(if $(filter Darwin,$(UNAME_S)),VideoToolbox,$(if $(filter 1,$(NITROHEVC)),nitrohevc,no)))"
+	@echo "built $(SDL_BIN) (SVG: $(if $(filter -DNV_SVG,$(SDL_VDEFS)),yes,no), CorelDRAW: $(if $(filter -DNV_CDR,$(SDL_VDEFS)),yes,no), AVIF: $(if $(SDL_AVIF),dav1d,no), HEIC: $(if $(filter 1,$(NITROHEVC)),nitrohevc,$(if $(filter Darwin,$(UNAME_S)),VideoToolbox,no)))"
 
 # Portable Linux build of it (make sdl-dist): x86-64-v3 (AVX2; DIST_ARCH=x86-64-v2 for older CPUs)
 # instead of -march=native, libstdc++ / libgcc and zlib linked in. One file that needs only the build
@@ -414,7 +416,7 @@ build/shaders.inc: src/shaders.metal
 nitroview: src/nitroview.m $(VIEWER_SRC) $(VIEWER_HDR) $(LIB_HDR) build/shaders.inc build/libnitro.a $(VIEWER_OBJS) build/.config-$(CONFIG) Makefile
 	$(CC) $(CFLAGS) $(VIEWER_DEFS) -Ibuild -Isrc -fobjc-arc src/nitroview.m $(VIEWER_SRC) build/libnitro.a $(VIEWER_OBJS) $(VIEWER_LIBS) \
 	  $(FRAMEWORKS) -framework ImageIO -o $@
-	@echo "built nitroview (libjpeg-turbo fallback: $(if $(filter 1,$(TURBOJPEG)),yes,no), Wuffs PNG: $(if $(filter 1,$(WUFFS)),yes,no), SVG: $(if $(filter 1,$(SVG)),yes,no), CDR: $(if $(filter 1,$(CDR)),yes,no), AVIF: $(if $(filter 1,$(DAV1D)),dav1d,ImageIO), ImageIO: always)"
+	@echo "built nitroview (libjpeg-turbo fallback: $(if $(filter 1,$(TURBOJPEG)),yes,no), Wuffs PNG: $(if $(filter 1,$(WUFFS)),yes,no), SVG: $(if $(filter 1,$(SVG)),yes,no), CDR: $(if $(filter 1,$(CDR)),yes,no), AVIF: $(if $(filter 1,$(DAV1D)),dav1d,ImageIO), HEIC: $(if $(filter 1,$(NITROHEVC)),nitrohevc,VideoToolbox), ImageIO: always)"
 
 # Dock / Finder icon: every iconset size scaled from packaging/icon.png
 build/nitroview.icns: packaging/icon.png
@@ -495,7 +497,7 @@ bench/rgbverify: bench/rgbverify.c build/libnitro.a | ljt
 
 # the example program on the library (examples/nitroconvert.c): any image it decodes -> a 24-bit BMP
 EXAMPLE_LIBS := $(if $(filter 1,$(DAV1D)),$(DAV1D_LIB)) $(THREADLIBS) \
-                $(if $(filter Darwin,$(UNAME_S)),-framework CoreFoundation -framework VideoToolbox -framework CoreMedia -framework CoreVideo,-lm)
+                $(if $(filter Darwin,$(UNAME_S)),-framework CoreFoundation $(VT_FW),-lm)
 examples/nitroconvert: examples/nitroconvert.c build/libnitro.a
 	$(CC) $(CFLAGS) -Isrc $^ $(EXAMPLE_LIBS) $(LDQUIET) -o $@
 
@@ -513,7 +515,7 @@ bench/pngbench: bench/pngbench.m build/libnitro.a | deps
 # nitrotiff / nitropng / nitroavif's BGRX output against ImageIO: pixels and time (macOS)
 bench/bgrxverify: bench/bgrxverify.m build/libnitro.a
 	$(CC) -O3 $(CPUFLAGS) -w -Isrc $(if $(filter 1,$(DAV1D)),-DNV_DAV1D) -fobjc-arc $^ $(if $(filter 1,$(DAV1D)),$(DAV1D_LIB)) \
-	  -framework Foundation -framework ImageIO -framework CoreGraphics -framework VideoToolbox -framework CoreMedia -framework CoreVideo -o $@
+	  -framework Foundation -framework ImageIO -framework CoreGraphics $(VT_FW) -o $@
 
 bench/pngverify: bench/pngverify.c build/libnitro.a
 	$(CC) -O3 $(CPUFLAGS) $(PORTFLAGS) -w -Isrc $^ -lz $(THREADLIBS) -o $@

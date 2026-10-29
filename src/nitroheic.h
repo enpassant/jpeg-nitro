@@ -10,7 +10,7 @@
 // decoders, one per core up to 8; Apple Silicon: 4 on the media engine; ~33 ms on the i9,
 // ~26 ms on the M1). nitrohevc, our own HEVC decoder, is only in a build made with
 // make NITROHEVC=1 (HEVC is covered by patents that need a licence: the binaries we distribute
-// leave it out): then it decodes them elsewhere, and on macOS with NITROHEVC=1 in the environment.
+// leave it out): then it decodes them, on every system (macOS too, without VideoToolbox).
 //
 // Handled: an 8-bit 4:2:0 HEVC image or grid of them (full range BT.601, as iPhones write
 // them), with rotation (irot), mirroring (imir), a crop from the top left corner (clap)
@@ -37,8 +37,8 @@ typedef struct {
     size_t hvcc_len;
 } nh_info;
 
-// 1 if this build has an HEVC decoder for the tiles (macOS: VideoToolbox; elsewhere: nitrohevc,
-// make NITROHEVC=1); without one nh_decode_planes fails, and the caller uses the system's decoder.
+// 1 if this build has an HEVC decoder for the tiles (nitrohevc, make NITROHEVC=1; else on macOS
+// VideoToolbox); without one nh_decode_planes fails, and the caller uses the system's decoder.
 int nh_decoder(void);
 
 // Parses the HEIF structure. Returns 0 if nitroheic can decode the primary image.

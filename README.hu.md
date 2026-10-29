@@ -199,12 +199,8 @@ a futó néző átveszi az új fájl(oka)t.
 **Windows:** a `nitroview.exe` ([src/nitroview_win.c](src/nitroview_win.c), Win32 + Direct3D 11)
 ugyanez a néző: ugyanazok a billentyűk, egérfunkciók, nagyítás és ablakméretezés, teljes képernyő,
 diavetítés, egy fájlból a mappája, ráhúzás, O / Shift+O: fájlok / mappa megnyitása (fájl nélkül indítva
-is ez az ablak jön fel). A JPEG / PNG / PSD a három dekóderrel és egy compute
-shaderrel megy, a HEIC-fotók a WIC-kel (a Microsoft HEVC-bővítményével; `make NITROHEVC=1`-gyel
-fordítva a saját HEVC-dekóderünkkel, lásd lent: **HEIC és a HEVC-szabadalmak**), a TIFF a nitrotiff-fel, az AVIF a
-nitroavif + dav1d párossal (AV1-hez is Store-bővítmény kellene a Windowsnak), minden más
-(JPEG-tömörítésű TIFF, WebP, GIF, BMP) a Windows saját WIC-
-kodekjeivel; az SVG és a CorelDRAW CDR / CMX ugyanúgy, mint macOS-en (nagyítva éles, [ / ] a rajz
+is ez az ablak jön fel). A bitképes formátumokat a fenti dekóderek vagy a Windows WIC-kodekjei
+bontják ki. Az SVG és a CorelDRAW CDR / CMX ugyanúgy, mint macOS-en (nagyítva éles, [ / ] a rajz
 oldalai között). Egyetlen önálló .exe (csak rendszer-DLL-ek, Windows 10-től), Macen vagy Linuxon
 fordítható a `make windows`-szal (lásd lent: „A dekóderek más rendszeren”). A `nitroview.exe --register`
 felajánlja az összes ilyen típushoz az Intézőben (az aktuális felhasználónak, rendszergazdai jog
@@ -216,11 +212,12 @@ színkezelés (a képek sRGB-ként jelennek meg); az érintőpados gesztusok nin
 **GNOME / Linux:** a `nitroview-gnome` ([src/gnome/](src/gnome), GTK 4 + libadwaita, Czirok Ferenc
 munkája) ugyanazokat a billentyűket, egér- és érintőpados gesztusokat, nagyítást és mozgatást, teljes
 képernyőt, diavetítést (`-s`), egy fájlból a mappája lapozását, ráhúzást és Megnyitás-ablakot tudja.
-A JPEG / PNG / PSD a három dekóderrel megy (statikusan belefordítva); a JPEG színkonverziója többszálú,
+A bitképes formátumokat a fenti dekóderek bontják ki; a JPEG színkonverziója többszálú,
 és pontosan a libjpeg-turbo RGB-kimenetét adja (`bench/rgbverify`), a PNG-sorok másolás nélkül kerülnek
 a GTK-hoz, az EXIF-forgatást a rajzolás végzi. A képek háttérszálon dekódolódnak, ugyanazzal az
-előtöltéssel, mint macOS-en és Windowson (3 előre, 2 hátra). Minden mást (HEIC – `make NITROHEVC=1`-gyel
-fordítva a nitrohevc –, TIFF, GIF, WebP ...) a GTK saját betöltői nyitnak meg. Lapozáskor az ablak mérete nem változik (Wayland alatt egy
+előtöltéssel, mint macOS-en és Windowson (3 előre, 2 hátra). Minden mást a GTK saját betöltői nyitnak meg.
+Az SVG és a CorelDRAW CDR / CMX a nitrosvg-vel / nitrocdr-rel megy (nagyítva éles, [ / ] az oldalak
+között, ha a `scripts/get-deps.sh` letöltötte őket). Lapozáskor az ablak mérete nem változik (Wayland alatt egy
 program nem méretezheti át szabadon a saját ablakát). A `make gnome`-hoz GTK 4.10+ és libadwaita 1.4+
 kell; a `make gnome-register` az aktuális felhasználónak felveszi az asztalra; a `make flatpak` a
 GNOME 50 runtime-ra fordítja a `nitroview-gnome.flatpak`-ot.
@@ -231,10 +228,10 @@ egérműveletek (+ O: fájlok, Shift+O: mappa megnyitása), ablakkezelés, előt
 éles nagyítással, `--bench` és `--selftest`, és ugyanaz a GPU-út (a síkok textúraként, YCbCr→RGB
 shaderben, mipmapek, trilineáris rajzolás; pixelpontos 200–800%). Amit a saját dekóderek nem
 vállalnak (interlace-elt PNG, GIF, BMP, sérült vagy CMYK JPEG), azt az
-stb_image bontja ki; HEIC-et csak `make NITROHEVC=1`-gyel fordítva nyit meg (lásd lent). Az SDL3 statikusan van belefordítva, az OpenGL-t és a Waylandet / X11-et futáskor
+stb_image bontja ki; a HEIC csak `make NITROHEVC=1`-gyel fordítva támogatott (lásd lent). Az SDL3 statikusan van belefordítva, az OpenGL-t és a Waylandet / X11-et futáskor
 tölti be, GTK nem kell hozzá. Az SDL3-at a `scripts/get-deps.sh` fordítja (az ehhez szükséges
 fejlesztői csomagok ott vannak felsorolva). macOS-en is lefordul, de csak teszteléshez (ott az OpenGL
-lassú; a valódi néző a Metal-os marad). A `make sdl-dist` készíti a továbbadható egyetlen fájlt, a
+lassú; ott a Metal-os néző az ajánlott). A `make sdl-dist` készíti a továbbadható egyetlen fájlt, a
 `nitroview-linux-x64.tar.gz`-t (4 MB): a fordító gép processzora helyett x86-64-v3-ra (AVX2) fordítva,
 a libstdc++-szal, a zlibbel és a dav1d-vel együtt, csak a glibc kell hozzá (Ubuntu 22.04-en fordítva
 2.35-ös vagy újabb). 64 bites ARM-os Linuxon (Asahi Linux Apple M1 / M2-n, Raspberry Pi 4 / 5) ugyanez
@@ -244,19 +241,17 @@ arm64-es buildjében; HEIC csak `make NITROHEVC=1`-gyel, mint x86-os Linuxon); M
 (desktop fájl és ikon a `~/.local/share`-ben: „Megnyitás ezzel” a fájlkezelőben), az `--unregister`
 eltávolítja.
 
-**HEIC és a HEVC-szabadalmak:** a HEIC-fotók HEVC (H.265) képek, a HEVC-re pedig licencet igénylő szabadalmak vonatkoznak: a
-rendszerek dekóderei ezzel együtt jönnek, a mienk nem. Ezért az általunk terjesztett binárisok a
-rendszer dekóderével bontják ki a HEIC-et: macOS-en a VideoToolbox-szal (nitroheic, a csempék
-párhuzamosan), Windowson a WIC-kel (a Microsoft HEVC-bővítménye: frissen telepített Windows 11-en
-megnyitotta, Windows 10 LTSC-n nem), a GNOME-os nézőben a GTK betöltőivel (a GNOME futtatókörnyezet
-glycin + libheif párosa, a Freedesktop codecs-extra kiterjesztés HEVC-dekóderével); az SDL-es néző
-ilyenkor egyáltalán nem mutat HEIC-fájlokat.
-A nitrohevc (`src/nitrohevc.c`), a H.265 szabvány alapján írt saját HEVC intra dekóderünk csak a
-`make NITROHEVC=1`-gyel fordított buildben van benne, saját használatra (a szabadalmak kérdése ekkor
-a fordítóé). A windowsos, a GNOME-os és az SDL-es néző ezzel bontja ki a HEIC-et, a csempéket
-párhuzamosan (egy 12 MP-es iPhone-fotó: ~37 ms az Intel i9-en, ~67 ms az M1-en; VideoToolbox: ~36 ms
-és ~31 ms); macOS-en marad a VideoToolbox, a `NITROHEVC=1` környezeti változó vált nitrohevc-re. A
-deblocking és az SAO szűrő kimarad, fotókon ez nem látszik.
+**HEVC:** a HEIC-fotók HEIF formátumú HEVC (H.265) képek, a HEVC-re pedig licencet igénylő
+szabadalmak vonatkoznak: az operációs rendszerek dekóderei ezzel együtt jönnek, a saját
+megvalósításunk nem. Ezért az általunk terjesztett binárisok a HEIC-et csak a rendszer dekóderével
+bontják ki: macOS-en a VideoToolbox-szal (a nitroheic párhuzamosan adja át neki a csempéket),
+Windowson a WIC-kel (a Microsoft HEVC-bővítményének telepítve kell lennie), a GNOME-os nézőben a GTK
+betöltőivel (a GNOME futtatókörnyezet glycin + libheif párosa, a Freedesktop codecs-extra kiterjesztés
+HEVC-dekóderével); az SDL-es néző ilyenkor egyáltalán nem mutat HEIC-fájlokat.
+
+A nitro egyszerűsített, csak intra HEVC-dekódere (a deblocking és az SAO szűrő kimarad, fotókon ez
+nem látszik), amely a H.265 szabvány alapján készült (`src/nitrohevc.c`), csak a `make NITROHEVC=1`-gyel
+fordított buildben érhető el, saját használatra (a szabadalmak kérdése ekkor a fordítóé).
 
 **AVIF** (nitroavif, `src/nitroavif.c`): AV1-es állókép HEIF-tárolóban, egyre több webáruház
 és CDN ezt küldi. A HEIF-szerkezetet a saját kódunk olvassa (`src/heif.h`, közös a nitroheic-kel), az
@@ -783,6 +778,8 @@ A `-march=native` miatt a bináris a fordító gép CPU-jára optimalizált.
   `bench/sustain.c`: tartós terhelés, `bench/ab.sh`: zajtűrő A/B összehasonlítás
 - `src/nitropng.c/.h`: önálló párhuzamos PNG-dekóder
 - `src/nitropsd.c/.h`: párhuzamos PSD/PSB-dekóder (összefésült kép)
+- `src/nitroheic.c/.h`: HEIC (HEIF) olvasása, a csempék párhuzamos kezelése
+- `src/nitrohevc.c/.h`: az opcionális saját HEVC intra dekóderünk (csak `make NITROHEVC=1`-gyel, lásd fent: **HEVC**)
 - `src/nitroavif.c/.h`: AVIF (AV1 a dav1d-vel, saját színkonverzió); `src/heif.h`: a HEIF-szerkezet,
   közös a nitroheic-kel
 - `src/nitrotiff.c/.h`: TIFF-dekóder (csíkok / csempék párhuzamosan); `bench/bgrxverify.m`: az ő és a nitropng BGRX-kimenete az ImageIO-val összevetve

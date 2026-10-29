@@ -13,7 +13,8 @@
 // The EXIF orientation is applied while the BMP is written. Build (see the Makefile's
 // examples/nitroconvert): clang -O3 -fblocks -Isrc examples/nitroconvert.c build/libnitro.a
 // (-lpthread -lm; libdav1d.a when the library was built with it; on macOS -framework CoreFoundation
-// -framework VideoToolbox -framework CoreMedia -framework CoreVideo instead, for HEIC).
+// instead, with -framework VideoToolbox -framework CoreMedia -framework CoreVideo for HEIC unless
+// the library was built with nitrohevc, make NITROHEVC=1).
 #include "nitro_convert.h"
 #include "nitro_load.h"
 #include <limits.h>
